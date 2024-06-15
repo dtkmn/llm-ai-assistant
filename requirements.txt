@@ -11,3 +11,4 @@ InstructorEmbedding
 flask
 flask_cors
 huggingface-hub
+langchain-community
