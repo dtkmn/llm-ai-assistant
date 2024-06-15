@@ -1,0 +1,13 @@
+gradio
+transformers
+torch
+Pillow
+accelerate
+langchain==0.1.12
+pypdf
+chromadb
+sentence-transformers==2.2.2
+InstructorEmbedding
+flask
+flask_cors
+huggingface-hub
