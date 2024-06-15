@@ -2,7 +2,7 @@ import logging
 import os
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
-import src.worker_huggingface as worker_huggingface  # Import the worker module
+import worker_huggingface # Import the worker module
 
 # Initialize Flask app and CORS
 app = Flask(__name__)
