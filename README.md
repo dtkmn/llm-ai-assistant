@@ -6,6 +6,9 @@ This project is a personal data assistant using a Language Learning Model (LLM) 
 - Interactive chat interface
 - Toggle between light and dark modes
 
+
+![alt testing] (LLM-flow.png)
+
 ## Installation
 
 1. Clone the repository:
