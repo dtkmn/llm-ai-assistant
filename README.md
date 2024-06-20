@@ -7,7 +7,7 @@ This project is a personal data assistant using a Language Learning Model (LLM) 
 - Toggle between light and dark modes
 
 
-![alt testing] (LLM-flow.png)
+![LLM-flow.png](https://github.com/dtkmn/llm-ai-assistant/blob/main/LLM-flow.png)
 
 ## Installation
 
