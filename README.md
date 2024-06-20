@@ -1,7 +1,3 @@
-# LLM Powered AI Assistant
-This project is a personal data assistant using a Language Learning Model (LLM) to process and answer questions related to uploaded PDF documents.
-
-
 ---
 title: LLM Powered AI Assistant
 emoji: 🏳️‍🌈
@@ -9,8 +5,11 @@ colorFrom: gray
 colorTo: green
 sdk: docker
 app_port: 7860
-pinned: true
 ---
+
+
+# LLM Powered AI Assistant
+This project is a personal data assistant using a Language Learning Model (LLM) to process and answer questions related to uploaded PDF documents.
 
 
 ## Features
