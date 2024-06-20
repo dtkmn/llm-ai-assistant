@@ -52,4 +52,4 @@ def process_document_route():
 
 # Run the Flask app
 if __name__ == "__main__":
-    app.run(debug=True, port=8000, host='0.0.0.0')
+    app.run(debug=True, port=7860, host='0.0.0.0')
