@@ -9,8 +9,9 @@ app_port: 7860
 
 
 # LLM Powered AI Assistant
-This project is a personal data assistant using a Language Learning Model (LLM) to process and answer questions related to uploaded PDF documents.
+This project is a personal data assistant using a Large Language Model (LLM) to process and answer questions related to uploaded PDF documents.
 
+https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ## Features
 - Upload PDF documents for analysis
