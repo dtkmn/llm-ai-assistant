@@ -1,6 +1,19 @@
 # LLM Powered AI Assistant
 This project is a personal data assistant using a Language Learning Model (LLM) to process and answer questions related to uploaded PDF documents.
 
+
+---
+title: LLM Powered AI Assistant
+emoji: 🏳️‍🌈
+colorFrom: gray
+colorTo: green
+sdk: docker
+app_file: app.py
+app_port: 7860
+pinned: true
+---
+
+
 ## Features
 - Upload PDF documents for analysis
 - Interactive chat interface
