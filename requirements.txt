@@ -3,12 +3,13 @@ transformers
 torch
 Pillow
 accelerate
-langchain==0.1.12
+langchain
 pypdf
-chromadb
-sentence-transformers==2.2.2
+sentence-transformers
 InstructorEmbedding
 flask
 flask_cors
 huggingface-hub
 langchain-community
+langchain-huggingface
+faiss-cpu
