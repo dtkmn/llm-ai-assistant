@@ -1,7 +1,5 @@
-import os
 import torch
-from langchain_core.prompts import PromptTemplate
-from langchain_community.embeddings import HuggingFaceInstructEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -18,7 +16,6 @@ from langchain.chains import create_history_aware_retriever
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import ChatMessageHistory
-
 
 
 # Check for GPU availability and set the appropriate device for computation.
@@ -50,7 +47,6 @@ def init_llm():
         temperature=0.1,
     )
 
-    from langchain.embeddings import HuggingFaceEmbeddings
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 store = {}
