@@ -8,15 +8,16 @@ app_port: 7860
 ---
 
 
-# LLM Powered AI Assistant
-This project is a personal data assistant using a Large Language Model (LLM) to process and answer questions related to uploaded PDF documents.
+# LLM AI Assistant
+This project leverages LangChain and Hugging Face's models to create an AI assistant capable of answering questions based on provided document context and chat history.
 
 https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ## Features
-- Upload PDF documents for analysis
-- Interactive chat interface
-- Toggle between light and dark modes
+- **Prompt Template Integration:** Utilizes custom chat prompt templates for context-aware responses.
+- **Chat History Management:** Maintains session-specific chat histories to enhance the assistant's understanding and coherence.
+- **Document Processing:** Processes PDF documents to extract relevant information using PyPDFLoader and FAISS.
+- **GPU Support:** Automatically utilizes available GPU for faster computation.
 
 
 ![LLM-flow.png](https://github.com/dtkmn/llm-ai-assistant/blob/main/LLM-flow.png)
