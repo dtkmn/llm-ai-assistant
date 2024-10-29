@@ -1,4 +1,7 @@
 name: Publish Docker image
+run-name: ${{ github.actor }} is running ${{ github.workflow }}
+env:
+  DOCKER_REGISTRY: ghcr.io/dtkmn
 
 on:
   push:
@@ -11,7 +14,11 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
+
+    - name: Get short SHA from long commit SHA for image tagging
+      id: build-tag
+      run: echo "build_number=$(git rev-parse --short ${{ github.sha }})" >> "$GITHUB_OUTPUT"
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v1
@@ -24,8 +31,8 @@ jobs:
         password: ${{ secrets.GHCR_PAT }}
 
     - name: Build and push Docker image
-      uses: docker/build-push-action@v2
+      uses: docker/build-push-action@v4
       with:
         context: .
         push: true
-        tags: ghcr.io/dtkmn/${{ github.repository }}:latest
+        tags: ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}:${{ steps.build-tag.outputs.build_number }}
