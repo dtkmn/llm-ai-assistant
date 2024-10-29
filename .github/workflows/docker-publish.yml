@@ -35,4 +35,4 @@ jobs:
       with:
         context: .
         push: true
-        tags: ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}:${{ env.build_number }}
+        tags: ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}:${{ steps.build-tag.outputs.build_number }}
