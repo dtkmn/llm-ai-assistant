@@ -11,6 +11,10 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: write
 
     steps:
     - name: Checkout repository
@@ -19,7 +23,7 @@ jobs:
     - name: Get short SHA from long commit SHA for image tagging
       id: build-tag
       run: echo "build_number=$(git rev-parse --short ${{ github.sha }})" >> "$GITHUB_OUTPUT"
-
+      
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v1
 
@@ -35,4 +39,4 @@ jobs:
       with:
         context: .
         push: true
-        tags: ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}:${{ steps.build-tag.outputs.build_number }}
+        tags: ${{ env.DOCKER_REGISTRY }}/${{ github.repository }}:${{ github.sha }}
