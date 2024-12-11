@@ -40,7 +40,7 @@ def init_llm():
     llm_hub = HuggingFaceEndpoint(
         repo_id=model_id,
         task="text-generation",
-        max_new_tokens=200,
+        max_new_tokens=512,
         do_sample=False,
         repetition_penalty=1.03,
         return_full_text=False,
