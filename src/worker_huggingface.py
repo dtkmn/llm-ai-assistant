@@ -19,7 +19,7 @@ from langchain_community.chat_message_histories import ChatMessageHistory
 
 
 # Check for GPU availability and set the appropriate device for computation.
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Global variables
 conversation_retrieval_chain = None
@@ -62,7 +62,11 @@ def process_document(document_path):
 
     # Load the document
     loader = PyPDFLoader(document_path)
-    documents = loader.load()
+    try:
+        documents = loader.load()
+    except Exception as e:
+        print(f"Error loading document: {e}")
+        return None    
     
     # Split the document into chunks
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=128)
