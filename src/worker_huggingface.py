@@ -1,4 +1,6 @@
-import torch
+import torch, os
+from getpass import getpass
+
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -34,6 +36,8 @@ def init_llm():
 
     # Hugging Face API token
     # Setup environment variable HUGGINGFACEHUB_API_TOKEN
+    if "HUGGINGFACEHUB_API_TOKEN" not in os.environ:
+        os.environ["HUGGINGFACEHUB_API_TOKEN"] = getpass("Enter HF token: ")
 
     model_id = "meta-llama/Meta-Llama-3-8B-Instruct"
 
@@ -76,12 +80,11 @@ def process_document(document_path):
     db = FAISS.from_documents(documents=texts, embedding=embeddings)
 
     system_prompt = """
-    <|start_header_id|>user<|end_header_id|>
     You are an assistant for answering questions using provided context.
     You are given the extracted parts of a long document, previous chat_history and a question. Provide a conversational answer.
     If you don't know the answer, just say "I do not know." Don't make up an answer.
     Question: {input}
-    Context: {context}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+    Context: {context}
     """
     prompt = ChatPromptTemplate.from_messages(
         [
