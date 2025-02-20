@@ -60,7 +60,7 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 
 ## Usage
-- Open your browser and go to `http://localhost:5000`
+- Open your browser and go to `http://localhost:7860`
 - Upload a PDF document and interact with the chat interface.
 
 ## Contributing
