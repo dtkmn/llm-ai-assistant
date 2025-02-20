@@ -9,6 +9,15 @@ app = Flask(__name__)
 cors = CORS(app, resources={r"/*": {"origins": "*"}})
 app.logger.setLevel(logging.ERROR)
 
+UPLOAD_FOLDER = '/app/uploads'
+ALLOWED_EXTENSIONS = {'pdf'}
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB limit
+
+# Ensure directory exists with write permissions
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
 qa_system = DocumentQA.DocumentQA()
 
 # Define the route for the index page
@@ -40,8 +49,7 @@ def process_document_route():
         }), 400
 
     file = request.files['file']  # Extract the uploaded file from the request
-
-    file_path = file.filename  # Define the path where the file will be saved
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
     file.save(file_path)  # Save the file
 
     qa_system.process_document(file_path)  # Process the document using the worker module
