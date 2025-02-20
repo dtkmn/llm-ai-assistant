@@ -48,6 +48,16 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     ```bash
     python src/app.py
     ```
+   
+## 🐳 Docker Setup (Optional)
+
+### Build and Run the Container
+
+   ```bash
+   docker build -t ai-assistant:latest .
+   docker run -p 7860:7860 -e HUGGINGFACEHUB_API_TOKEN=your-token-here ai-assistant:latest
+   ```
+
 
 ## Usage
 - Open your browser and go to `http://localhost:5000`
