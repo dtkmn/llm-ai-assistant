@@ -2,12 +2,14 @@ import logging
 import os
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
-import worker_huggingface # Import the worker module
+import DocumentQA
 
 # Initialize Flask app and CORS
 app = Flask(__name__)
 cors = CORS(app, resources={r"/*": {"origins": "*"}})
 app.logger.setLevel(logging.ERROR)
+
+qa_system = DocumentQA.DocumentQA()
 
 # Define the route for the index page
 @app.route('/', methods=['GET'])
@@ -20,7 +22,7 @@ def process_message_route():
     user_message = request.json['userMessage']  # Extract the user's message from the request
     print('user_message', user_message)
 
-    bot_response = worker_huggingface.process_prompt(user_message)  # Process the user's message using the worker module
+    bot_response = qa_system.query(user_message)  # Process the user's message using the worker module
 
     # Return the bot's response as JSON
     return jsonify({
@@ -42,7 +44,7 @@ def process_document_route():
     file_path = file.filename  # Define the path where the file will be saved
     file.save(file_path)  # Save the file
 
-    worker_huggingface.process_document(file_path)  # Process the document using the worker module
+    qa_system.process_document(file_path)  # Process the document using the worker module
 
     # Return a success message as JSON
     return jsonify({
