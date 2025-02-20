@@ -9,7 +9,7 @@ app_port: 7860
 
 
 # LLM AI Assistant
-This project leverages LangChain and Hugging Face's models to create an AI assistant capable of answering questions based on provided document context and chat history.
+This project leverages LangChain and LLM to create an AI assistant capable of answering questions based on provided document context and chat history.
 
 https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
