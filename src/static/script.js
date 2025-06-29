@@ -116,15 +116,40 @@ const populateBotResponse = async (userMessage) => {
         body: formData, // send the FormData instance as the body
       });
 
-      if (response.status !== 400) {
-           document.querySelector('#upload-button').disabled = true;
+      // response = await response.json(); // Moved after status check
+      // console.log('/process-document', response) // Moved
+      // renderBotResponse(response, '') // Moved
+
+      if (response.ok) { // status in the range 200-299
+        const responseData = await response.json();
+        console.log('/process-document success', responseData);
+        if (responseData.botResponse) {
+            renderBotResponse(responseData, '');
+            // Successfully processed a document, disable upload button if it exists
+             if(document.querySelector('#upload-button')){
+                document.querySelector('#upload-button').disabled = true;
+             }
+        } else {
+            // Should not happen if server sends correct JSON
+            renderBotResponse({ botResponse: "Received an unexpected response from the server after document upload." }, '');
+        }
+      } else {
+        // Handle errors including 413, 400, or other server errors
+        const errorData = await response.json(); // Assuming server sends JSON for errors too
+        console.error('/process-document error', errorData);
+        let errorMessage = "An error occurred while processing the document.";
+        if (errorData && errorData.botResponse) {
+          errorMessage = errorData.botResponse;
+        } else if (response.status === 413) {
+          errorMessage = "Error: The uploaded file is too large. Please try a smaller file.";
+        }
+        renderBotResponse({ botResponse: errorMessage }, '');
+        // Re-enable upload button if it exists, as the upload failed
+        if(document.querySelector('#upload-button')){
+           document.querySelector('#upload-button').disabled = false;
+        }
       }
-
-      response = await response.json();
-      console.log('/process-document', response)
-      renderBotResponse(response, '')
     });
-
 
     isFirstMessage = false; // after the first message, set this to false
   }

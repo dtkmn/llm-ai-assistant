@@ -2,6 +2,7 @@ import logging
 import os
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
+from werkzeug.exceptions import RequestEntityTooLarge
 import DocumentQA
 
 # Initialize Flask app and CORS
@@ -61,6 +62,15 @@ def process_document_route():
         "botResponse": "Thank you for providing your PDF document. I have analyzed it, so now you can ask me any "
                        "questions regarding it!"
     }), 200
+
+# Custom error handler for 413 Request Entity Too Large
+@app.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(e):
+    # You can dynamically get the limit from app.config if you want
+    # max_size_mb = app.config.get('MAX_CONTENT_LENGTH', 0) / (1024 * 1024)
+    # For now, let's hardcode it based on the current setting or make it general
+    message = f"Error: File exceeds the maximum allowed size of {app.config['MAX_CONTENT_LENGTH'] // (1024*1024)}MB."
+    return jsonify(botResponse=message, error=True), 413
 
 # Run the Flask app
 if __name__ == "__main__":
