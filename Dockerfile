@@ -4,10 +4,10 @@ FROM python:3.11-slim
 # Create a non-root user with explicit permissions
 RUN addgroup --gid 1000 appuser && \
     adduser --uid 1000 --gid 1000 --disabled-password appuser && \
-    mkdir -p /app/uploads && \
-    chown -R appuser:appuser /app/uploads
+    mkdir -p /app/src/uploads && \
+    chown -R appuser:appuser /app/src/uploads
 
-# # Set the working directory to the user's home directory
+# Set the working directory
 WORKDIR /app
 
 # Try and run pip command after setting the user with `USER user` to avoid permission issues with Python
