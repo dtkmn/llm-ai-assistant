@@ -3,34 +3,31 @@ import os
 from getpass import getpass
 from typing import Optional, Dict
 
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-
-from langchain.chains import create_retrieval_chain
-from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains.combine_documents import create_stuff_documents_chain
-
-from langchain_huggingface import HuggingFaceEndpoint
-from langchain_core.prompts import MessagesPlaceholder
-
-from langchain.chains import create_history_aware_retriever
-
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_classic.chains import create_history_aware_retriever
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_classic.agents.agent import AgentExecutor
+from langchain_classic.agents.tool_calling_agent.base import create_tool_calling_agent
 
 
 class DocumentQA:
     def __init__(
         self,
-        model_id="mistralai/Mistral-7B-Instruct-v0.3",
-        embeddings_model="sentence-transformers/all-MiniLM-L6-v2",
-        hf_token = None,
-        device: Optional[str] = None
+        model_id="google/gemma-7b-it",
+        embeddings_model="sentence-transformers/all-mpnet-base-v2",
+        hf_token: Optional[str] = None,
+        device: Optional[str] = None,
     ):
-        self.device = device if device else "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = (
+            device if device else "cuda" if torch.cuda.is_available() else "cpu"
+        )
         self.model_id = model_id
         self.embeddings_model = embeddings_model
         self.hf_token = hf_token or self._get_hf_token()
@@ -38,7 +35,7 @@ class DocumentQA:
         self.llm = None
         self.embeddings = None
         self.vector_store = None
-        self.retrieval_chain = None
+        self.agent_executor = None
         self.session_store: Dict[str, BaseChatMessageHistory] = {}
         self._initialize_models()
 
@@ -59,80 +56,89 @@ class DocumentQA:
         )
 
         self.embeddings = HuggingFaceEmbeddings(
-            model_name=self.embeddings_model,
-            model_kwargs={"device": self.device}
+            model_name=self.embeddings_model, model_kwargs={"device": self.device}
         )
 
-    def _create_retrieval_chain(self):
-        """Create the conversation chain with history handling"""
+    def _create_agent(self):
+        """Create the agent with a retrieval tool"""
+        retriever = self.vector_store.as_retriever(
+            search_type="similarity", search_kwargs={"k": 3, "lambda_mult": 0.25}
+        )
 
+        # Create a tool for the retriever
+        tools = [
+            create_retrieval_chain(
+                retriever,
+                create_stuff_documents_chain(
+                    self.llm,
+                    ChatPromptTemplate.from_messages(
+                        [
+                            ("system", self._get_qa_system_prompt()),
+                            ("human", "{input}"),
+                        ]
+                    ),
+                ),
+            )
+        ]
+
+        # Create the agent
         prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", self._get_contextualize_prompt()),
                 MessagesPlaceholder("chat_history"),
                 ("human", "{input}"),
+                MessagesPlaceholder(variable_name="agent_scratchpad"),
             ]
         )
-
-        retriever = self.vector_store.as_retriever(
-            search_type="similarity",
-            search_kwargs={'k': 3, 'lambda_mult': 0.25}
-        )
-
-        history_aware_retriever = create_history_aware_retriever(
-            self.llm, retriever, prompt
-        )
-
-        qa_prompt = ChatPromptTemplate.from_messages([
-            ("system", self._get_qa_system_prompt()),
-            ("human", "{input}"),
-        ])
-
-        question_answer_chain = create_stuff_documents_chain(self.llm, qa_prompt)
-        rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
-
-        self.retrieval_chain = RunnableWithMessageHistory(
-            rag_chain,
-            self.get_session_history,
-            input_messages_key="input",
-            history_messages_key="chat_history",
-            output_messages_key="answer",
-        )
-
+        agent = create_tool_calling_agent(self.llm, tools, prompt)
+        self.agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 
     def process_document(self, document_path: str):
-        """Process a PDF document and create vector store"""
+        """Process a document and create a vector store"""
         try:
-            loader = PyPDFLoader(document_path)
+            file_extension = os.path.splitext(document_path)[1].lower()
+            if file_extension == ".pdf":
+                loader = PyPDFLoader(document_path)
+            elif file_extension == ".docx":
+                loader = Docx2txtLoader(document_path)
+            elif file_extension in [".txt", ".md"]:
+                loader = TextLoader(document_path)
+            else:
+                raise ValueError(f"Unsupported file type: {file_extension}")
+
             documents = loader.load()
             text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1024,
                 chunk_overlap=128,
-                separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]  # Add empty string as separator
+                separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""],
             )
             texts = text_splitter.split_documents(documents)
-            print(f"Number of text chunks: {len(texts)}")  # Debug
 
             self.vector_store = FAISS.from_documents(
-                documents=texts,
-                embedding=self.embeddings
+                documents=texts, embedding=self.embeddings
             )
-            self._create_retrieval_chain()
+            self._create_agent()
         except Exception as e:
             raise RuntimeError(f"Error loading document: {e}") from e
 
     def query(self, prompt: str, session_id: str = "default") -> str:
         """Process a user query with conversation history"""
-        if not self.retrieval_chain:
-            raise RuntimeError("No document processed. Call process_document() first.")
+        if not self.agent_executor:
+            return "Please upload a document first."
 
-        response = self.retrieval_chain.invoke(
-            {"input": prompt},
-            config={"configurable": {"session_id": session_id}}
+        history = self.get_session_history(session_id)
+
+        response = self.agent_executor.invoke(
+            {
+                "input": prompt,
+                "chat_history": history.messages,
+            }
         )
-        print(response)  # Debug
 
-        return response["answer"]
+        history.add_user_message(prompt)
+        history.add_ai_message(response["output"])
+
+        return response["output"]
 
     def get_session_history(self, session_id: str) -> BaseChatMessageHistory:
         """Get or create chat history for a session"""
@@ -143,13 +149,13 @@ class DocumentQA:
     @staticmethod
     def _get_qa_system_prompt() -> str:
         return """
-            You are a helpful assistant that can answer questions based on a PDF's content. 
-            You have access to relevant excerpts of the PDF and the conversation so far. 
+            You are a helpful assistant that can answer questions based on a document's content.
+            You have access to relevant excerpts of the document and the conversation so far.
             Use these excerpts to answer the user's questions in a clear and concise manner.
             
             If the user asks a question not answered by the provided context or the conversation, 
             simply respond with "I do not know." 
-            Do not reveal or invent any details that are not supported by the PDF context.
+            Do not reveal or invent any details that are not supported by the document context.
             
             Maintain a neutral, professional tone. 
             When you do not have enough context, say "I do not know." 

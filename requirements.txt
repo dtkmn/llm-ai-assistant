@@ -4,12 +4,13 @@ torch
 Pillow
 accelerate
 langchain
+langchain-community
+langchain-core
+langchain-huggingface
 pypdf
 sentence-transformers
 InstructorEmbedding
-flask
-flask_cors
 huggingface-hub
-langchain-community
-langchain-huggingface
 faiss-cpu
+docx2txt
+markdown
