@@ -1,5 +1,14 @@
 import gradio as gr
-from DocumentQA import DocumentQA
+import sys
+import os
+
+# Add parent directory to path to handle both local and Docker execution
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from DocumentQA import DocumentQA
+except ImportError:
+    from src.DocumentQA import DocumentQA
 
 # Initialize the DocumentQA system
 qa_system = DocumentQA()
@@ -49,4 +58,4 @@ with gr.Blocks() as demo:
     clear.click(clear_chat, None, chatbot, queue=False)
 
 if __name__ == "__main__":
-    demo.launch(debug=True, server_name="0.0.0.0", server_port=7862)
+    demo.launch(debug=True, server_name="0.0.0.0", server_port=7862, share=False)
