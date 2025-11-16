@@ -1,65 +1,61 @@
-import logging
+import gradio as gr
+import sys
 import os
-from flask import Flask, render_template, request, jsonify
-from flask_cors import CORS
-import DocumentQA
 
-# Initialize Flask app and CORS
-app = Flask(__name__)
-cors = CORS(app, resources={r"/*": {"origins": "*"}})
-app.logger.setLevel(logging.ERROR)
+# Add parent directory to path to handle both local and Docker execution
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-UPLOAD_FOLDER = '/app/uploads'
-ALLOWED_EXTENSIONS = {'pdf'}
+try:
+    from DocumentQA import DocumentQA
+except ImportError:
+    from src.DocumentQA import DocumentQA
 
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10MB limit
+# Initialize the DocumentQA system
+qa_system = DocumentQA()
 
-# Ensure directory exists with write permissions
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+def process_document(file):
+    """
+    Process the uploaded document.
+    """
+    if file is not None:
+        qa_system.process_document(file.name)
+        return "Thank you for providing your document. I have analyzed it, so now you can ask me any questions regarding it!"
+    return "No document uploaded."
 
-qa_system = DocumentQA.DocumentQA()
+def chat(message, history):
+    """
+    Chat function to interact with the DocumentQA system.
+    """
+    if message.strip():
+        response = qa_system.query(message)
+        history.append([message, response])
+    return history, ""
 
-# Define the route for the index page
-@app.route('/', methods=['GET'])
-def index():
-    return render_template('index.html')  # Render the index.html template
+def clear_chat():
+    """
+    Clear the chat history.
+    """
+    qa_system.chat_history.clear()
+    return []
 
-# Define the route for processing messages
-@app.route('/process-message', methods=['POST'])
-def process_message_route():
-    user_message = request.json['userMessage']  # Extract the user's message from the request
-    print('user_message', user_message)
+# Create the Gradio interface
+with gr.Blocks() as demo:
+    gr.Markdown("# LLM AI Assistant")
 
-    bot_response = qa_system.query(user_message)  # Process the user's message using the worker module
+    with gr.Row():
+        with gr.Column():
+            file_upload = gr.File(label="Upload Document")
+            upload_button = gr.Button("Process Document")
+            upload_status = gr.Textbox(label="Status")
 
-    # Return the bot's response as JSON
-    return jsonify({
-        "botResponse": bot_response
-    }), 200
+        with gr.Column():
+            chatbot = gr.Chatbot(type="tuples")
+            msg = gr.Textbox(label="Ask a question")
+            clear = gr.Button("Clear")
 
-# Define the route for processing documents
-@app.route('/process-document', methods=['POST'])
-def process_document_route():
-    # Check if a file was uploaded
-    if 'file' not in request.files:
-        return jsonify({
-            "botResponse": "It seems like the file was not uploaded correctly, can you try "
-                           "again. If the problem persists, try using a different file"
-        }), 400
+    upload_button.click(process_document, inputs=file_upload, outputs=upload_status)
+    msg.submit(chat, [msg, chatbot], [chatbot, msg])
+    clear.click(clear_chat, None, chatbot, queue=False)
 
-    file = request.files['file']  # Extract the uploaded file from the request
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-    file.save(file_path)  # Save the file
-
-    qa_system.process_document(file_path)  # Process the document using the worker module
-
-    # Return a success message as JSON
-    return jsonify({
-        "botResponse": "Thank you for providing your PDF document. I have analyzed it, so now you can ask me any "
-                       "questions regarding it!"
-    }), 200
-
-# Run the Flask app
 if __name__ == "__main__":
-    app.run(debug=True, port=7860, host='0.0.0.0')
+    demo.launch(debug=True, server_name="0.0.0.0", server_port=7862, share=False)
