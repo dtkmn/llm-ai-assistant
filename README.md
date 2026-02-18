@@ -59,7 +59,25 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     export HUGGINGFACEHUB_API_TOKEN=your_token_here
     ```
 
-5. Run the application:
+5. (Optional) choose a different local model:
+
+    ```bash
+    export LLM_MODEL_ID=Qwen/Qwen2.5-7B-Instruct
+    ```
+
+6. (Optional) enable fast mode (lower latency, lower quality):
+
+    ```bash
+    export FAST_MODE=true
+    ```
+
+7. (Optional) enable debug logs:
+
+    ```bash
+    export APP_DEBUG=false
+    ```
+
+8. Run the application:
 
     ```bash
     python src/app.py
@@ -83,12 +101,12 @@ The application is containerized for easy deployment.
      llm-ai-assistant
    ```
 
-**Note:** The first run will download ~6GB for the Llama 3.2 model, which may take a few minutes.
+**Note:** The first run downloads model weights (size depends on `LLM_MODEL_ID`; 3B/7B models can take several GB).
 
 
 ## Usage
 1. Open your browser and go to `http://localhost:7862`
-2. Upload a document (PDF, DOCX, or TXT)
+2. Upload a document (PDF, DOCX, TXT, or MD; max 25 MB)
 3. Click "Process Document" to analyze it
 4. Ask questions about your document in the chat interface
 5. Get detailed, AI-generated answers based on the document content
@@ -96,20 +114,40 @@ The application is containerized for easy deployment.
 ## Technical Details
 
 ### Model
-- **LLM:** Meta Llama-3.2-3B-Instruct (locally executed)
-- **Embeddings:** sentence-transformers/all-mpnet-base-v2
+- **LLM:** Configurable via `LLM_MODEL_ID`
+  - **Quality mode (default):** tries `Qwen/Qwen2.5-7B-Instruct`, then `meta-llama/Llama-3.2-3B-Instruct`
+  - **Fast mode (`FAST_MODE=true`):** tries `meta-llama/Llama-3.2-3B-Instruct` first
+- **Embeddings:**
+  - **Quality mode:** `sentence-transformers/all-mpnet-base-v2`
+  - **Fast mode:** `sentence-transformers/all-MiniLM-L6-v2`
 - **Vector Store:** FAISS for efficient similarity search
 - **Framework:** LangChain for orchestration
 
 ### Configuration
-- **Response Length:** Up to 512 tokens (~350-400 words)
-- **Temperature:** 0.3 (balanced between creativity and consistency)
-- **Chunk Size:** 800 characters with 100 character overlap
-- **Retrieval:** Top 5 most relevant chunks per query
+- **Response Length:** 384 new tokens (quality) / 160 new tokens (fast)
+- **Generation mode:** Deterministic (`do_sample=False`) for more reliable doc QA
+- **Chunk Size:** 1200/200 overlap (quality) / 900/120 overlap (fast)
+- **Retrieval:** MMR retrieval with source/page grounding
+  - **Quality:** `k=6`, `fetch_k=24`
+  - **Fast:** `k=3`, `fetch_k=10`
+- **Safety limits:** Max upload size 25 MB, chunk cap 2,000 chunks per document
+
+## Security and Dependency Maintenance
+- Dependencies are pinned in `requirements.txt` for reproducible installs.
+- Dependabot is enabled weekly (`.github/dependabot.yml`) for dependency updates.
+- Current baseline includes Gradio `6.6.0`, LangChain `1.2.10`, and latest compatible Transformers `4.57.6`.
+- Note: Transformers `5.x` is currently not selected by the resolver with this stack, so `4.57.6` is pinned as the highest compatible version.
+- Security-sensitive transitive dependencies are explicitly pinned (for example `aiohttp`, `urllib3`, `python-multipart`, and `orjson`) to keep audit results stable.
+- Recommended recurring checks:
+
+  ```bash
+  pip install pip-audit
+  pip-audit -r requirements.txt
+  pip check
+  ```
 
 ## Contributing
 Feel free to submit issues and pull requests. Contributions are welcome!
 
 ## License
 This project is open source and available under the MIT License.
-
