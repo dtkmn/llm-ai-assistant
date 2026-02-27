@@ -1,22 +1,27 @@
-# Use the official Python image from the Docker Hub
-FROM python:3.11-slim
+# Use a current Python runtime with security updates.
+FROM python:3.12-slim
 
 # Set the working directory
 WORKDIR /app
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
-RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --upgrade pip
 
 # Copy the requirements file into the image
 COPY requirements.txt .
 
 # Install the dependencies as root first
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
 # Copy the rest of the application code into the image
 COPY . .
@@ -38,6 +43,8 @@ ENV GRADIO_SERVER_NAME="0.0.0.0"
 ENV GRADIO_SERVER_PORT="7862"
 ENV TRANSFORMERS_CACHE="/home/appuser/.cache/huggingface"
 ENV HF_HOME="/home/appuser/.cache/huggingface"
+ENV FAST_MODE="true"
+ENV APP_DEBUG="false"
 
 # Command to run the Gradio app
 CMD ["python", "src/app.py"]
