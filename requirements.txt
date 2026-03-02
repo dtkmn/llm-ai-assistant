@@ -15,7 +15,7 @@ langchain-text-splitters==1.1.0
 marshmallow==3.26.2
 orjson==3.11.7
 pillow==12.1.1
-pypdf==6.7.1
+pypdf==6.7.4
 python-multipart==0.0.22
 sentence-transformers==5.2.3
 torch==2.10.0
