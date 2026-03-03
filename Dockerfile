@@ -36,12 +36,11 @@ RUN addgroup --gid 1000 appuser && \
 USER appuser
 
 # Expose the port the app runs on
-EXPOSE 7862
+EXPOSE 7860
 
 # Set environment variables for the application
 ENV GRADIO_SERVER_NAME="0.0.0.0"
-ENV GRADIO_SERVER_PORT="7862"
-ENV TRANSFORMERS_CACHE="/home/appuser/.cache/huggingface"
+ENV GRADIO_SERVER_PORT="7860"
 ENV HF_HOME="/home/appuser/.cache/huggingface"
 ENV FAST_MODE="true"
 ENV APP_DEBUG="false"
