@@ -90,7 +90,7 @@ with gr.Blocks() as demo:
 
 if __name__ == "__main__":
     server_name = os.getenv("GRADIO_SERVER_NAME", "0.0.0.0")
-    server_port = int(os.getenv("GRADIO_SERVER_PORT", "7862"))
+    server_port = int(os.getenv("PORT", os.getenv("GRADIO_SERVER_PORT", "7860")))
     demo.launch(
         debug=env_flag("APP_DEBUG", False),
         server_name=server_name,
