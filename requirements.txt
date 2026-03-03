@@ -14,7 +14,7 @@ langchain-huggingface==1.2.1
 langgraph-checkpoint==4.0.0
 langchain-text-splitters==1.1.1
 langsmith==0.6.3
-marshmallow==3.26.2
+marshmallow==4.2.2
 orjson==3.11.7
 pillow==12.1.1
 pypdf==6.7.4
