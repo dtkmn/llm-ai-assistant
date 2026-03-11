@@ -17,7 +17,7 @@ langsmith==0.6.3
 marshmallow==3.26.2
 orjson==3.11.7
 pillow==12.1.1
-pypdf==6.7.4
+pypdf==6.8.0
 python-multipart==0.0.22
 sentence-transformers==5.2.3
 torch==2.10.0
