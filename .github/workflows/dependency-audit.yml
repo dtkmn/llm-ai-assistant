@@ -1,12 +1,21 @@
 name: Dependency Audit
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+    paths:
+      - requirements*.txt
+      - pyproject.toml
+      - setup.cfg
+      - setup.py
+      - .github/workflows/dependency-audit.yml
   schedule:
     - cron: "0 4 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pip-audit:
@@ -22,6 +31,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
 
       - name: Install audit tooling
         run: python -m pip install --upgrade pip pip-audit
