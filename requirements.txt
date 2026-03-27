@@ -6,10 +6,10 @@ faiss-cpu==1.13.2
 filelock==3.24.2
 gradio==6.10.0
 huggingface-hub==1.5.0
-langchain==1.2.10
+langchain==1.2.13
 langchain-community==0.4.1
-langchain-classic==1.0.1
-langchain-core==1.2.17
+langchain-classic==1.0.3
+langchain-core==1.2.22
 langchain-huggingface==1.2.1
 langgraph-checkpoint==4.0.1
 langchain-text-splitters==1.1.1
