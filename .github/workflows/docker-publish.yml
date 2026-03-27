@@ -1,5 +1,5 @@
 name: Publish Docker image
-run-name: ${{ github.actor }} is running ${{ github.workflow }}
+
 env:
   DOCKER_REGISTRY: ghcr.io
 
