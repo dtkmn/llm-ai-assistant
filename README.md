@@ -4,7 +4,7 @@ emoji: 🏳️‍🌈
 colorFrom: gray
 colorTo: green
 sdk: docker
-app_port: 7862
+app_port: 7860
 ---
 
 
@@ -62,7 +62,7 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 5. (Optional) choose a different local model:
 
     ```bash
-    export LLM_MODEL_ID=Qwen/Qwen2.5-7B-Instruct
+    export LLM_MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct
     ```
 
 6. (Optional) enable fast mode (lower latency, lower quality):
@@ -96,16 +96,16 @@ The application is containerized for easy deployment.
 ### Run the Container
 
    ```bash
-   docker run -p 7862:7862 \
+   docker run -p 7860:7860 \
      -e HUGGINGFACEHUB_API_TOKEN=your_token_here \
      llm-ai-assistant
    ```
 
-**Note:** The first run downloads model weights (size depends on `LLM_MODEL_ID`; 3B/7B models can take several GB).
+**Note:** The first run downloads model weights (size depends on `LLM_MODEL_ID`; the default 1.5B model is much smaller than 4B/7B models but still takes a few GB).
 
 
 ## Usage
-1. Open your browser and go to `http://localhost:7862`
+1. Open your browser and go to `http://localhost:7860`
 2. Upload a document (PDF, DOCX, TXT, or MD; max 25 MB)
 3. Click "Process Document" to analyze it
 4. Ask questions about your document in the chat interface
@@ -115,10 +115,10 @@ The application is containerized for easy deployment.
 
 ### Model
 - **LLM:** Configurable via `LLM_MODEL_ID`
-  - **Quality mode (default):** tries `Qwen/Qwen2.5-7B-Instruct`, then `meta-llama/Llama-3.2-3B-Instruct`
-  - **Fast mode (`FAST_MODE=true`):** tries `meta-llama/Llama-3.2-3B-Instruct` first
+  - **Quality mode (default):** tries `Qwen/Qwen2.5-1.5B-Instruct`, then `Qwen/Qwen2.5-7B-Instruct`, then `meta-llama/Llama-3.2-3B-Instruct`
+  - **Fast mode (`FAST_MODE=true`):** tries `Qwen/Qwen2.5-1.5B-Instruct` first, then `meta-llama/Llama-3.2-3B-Instruct`
 - **Embeddings:**
-  - **Quality mode:** `sentence-transformers/all-mpnet-base-v2`
+  - **Quality mode:** `Alibaba-NLP/gte-modernbert-base`
   - **Fast mode:** `sentence-transformers/all-MiniLM-L6-v2`
 - **Vector Store:** FAISS for efficient similarity search
 - **Framework:** LangChain for orchestration
@@ -135,8 +135,8 @@ The application is containerized for easy deployment.
 ## Security and Dependency Maintenance
 - Dependencies are pinned in `requirements.txt` for reproducible installs.
 - Dependabot is enabled weekly (`.github/dependabot.yml`) for dependency updates.
-- Current baseline includes Gradio `6.6.0`, LangChain `1.2.10`, and latest compatible Transformers `4.57.6`.
-- Note: Transformers `5.x` is currently not selected by the resolver with this stack, so `4.57.6` is pinned as the highest compatible version.
+- Current baseline includes Gradio `6.6.0`, LangChain `1.2.10`, LangChain-HuggingFace `1.2.1`, HuggingFace Hub `1.5.0`, and Transformers `5.2.0`.
+- Note: `marshmallow` is intentionally pinned to `3.26.2` because `dataclasses-json` currently requires `<4.0.0`.
 - Security-sensitive transitive dependencies are explicitly pinned (for example `aiohttp`, `urllib3`, `python-multipart`, and `orjson`) to keep audit results stable.
 - Recommended recurring checks:
 

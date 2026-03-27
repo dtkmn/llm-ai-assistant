@@ -20,13 +20,15 @@ FAST_MODE_ENV_VAR = "FAST_MODE"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_DOCUMENT_CHUNKS = 2_000
-DEFAULT_QUALITY_EMBEDDINGS_MODEL = "sentence-transformers/all-mpnet-base-v2"
+DEFAULT_QUALITY_EMBEDDINGS_MODEL = "Alibaba-NLP/gte-modernbert-base"
 DEFAULT_FAST_EMBEDDINGS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_QUALITY_MODELS = (
+    "Qwen/Qwen2.5-1.5B-Instruct",
     "Qwen/Qwen2.5-7B-Instruct",
     "meta-llama/Llama-3.2-3B-Instruct",
 )
 DEFAULT_FAST_MODELS = (
+    "Qwen/Qwen2.5-1.5B-Instruct",
     "meta-llama/Llama-3.2-3B-Instruct",
     "Qwen/Qwen2.5-7B-Instruct",
 )
@@ -121,6 +123,8 @@ class DocumentQA:
         self.max_document_chunks = max_document_chunks
         self.profile = FAST_PROFILE if self.fast_mode else QUALITY_PROFILE
 
+        # Lazy initialization keeps web startup fast on constrained environments
+        # (for example Hugging Face Spaces CPU instances).
         self.llm = None
         self.loaded_model_id: Optional[str] = None
         self.embeddings = None
@@ -129,7 +133,6 @@ class DocumentQA:
         self.embeddings_error: Optional[str] = None
         self.current_document_name: Optional[str] = None
         self.chat_history: List[Dict[str, str]] = []
-        self._initialize_llm()
 
     def _detect_device(self) -> str:
         if torch.cuda.is_available():
@@ -189,6 +192,10 @@ class DocumentQA:
         if self.device == "mps":
             model = model.to("mps")
 
+        # Some model configs still carry a legacy max_length default, which
+        # causes transformers to warn when max_new_tokens is also provided.
+        model.generation_config.max_length = None
+
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
@@ -242,6 +249,10 @@ class DocumentQA:
                 HF_TOKEN_ENV_VAR,
             )
         self.llm = MockLLM()
+
+    def _ensure_llm_initialized(self) -> None:
+        if self.llm is None:
+            self._initialize_llm()
 
     def _initialize_embeddings(self) -> None:
         if self.embeddings is not None:
@@ -339,6 +350,7 @@ class DocumentQA:
         try:
             file_extension = self._validate_document(document_path)
             self.current_document_name = os.path.basename(document_path)
+            self._ensure_llm_initialized()
             if not self.embeddings:
                 self._initialize_embeddings()
             if not self.embeddings:
