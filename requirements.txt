@@ -1,5 +1,5 @@
 # Pinned direct dependencies for reproducible and safer builds.
-accelerate==1.12.0
+accelerate==1.13.0
 aiohttp==3.13.3
 docx2txt==0.9
 faiss-cpu==1.13.2
