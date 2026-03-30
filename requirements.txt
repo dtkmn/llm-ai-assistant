@@ -3,7 +3,7 @@ accelerate==1.13.0
 aiohttp==3.13.3
 docx2txt==0.9
 faiss-cpu==1.13.2
-filelock==3.24.2
+filelock==3.25.2
 gradio==6.10.0
 huggingface-hub==1.5.0
 langchain==1.2.13
