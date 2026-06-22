@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 from dataclasses import replace
+from typing import Optional
 
 import gradio as gr
 
@@ -16,6 +17,7 @@ try:
         DocumentProcessingReport,
         DocumentQA,
         DocumentQAStatus,
+        QueryResult,
     )
 except ImportError:
     from DocumentQA import (
@@ -24,6 +26,7 @@ except ImportError:
         DocumentProcessingReport,
         DocumentQA,
         DocumentQAStatus,
+        QueryResult,
     )
 
 
@@ -154,6 +157,51 @@ def status_with_unexpected_upload_error(
     return replace(qa_status, processing_report=failure_report)
 
 
+def format_answer_trace(query_result: Optional[QueryResult]) -> str:
+    if query_result is None:
+        return json.dumps(
+            {
+                "question": None,
+                "answer": None,
+                "document": None,
+                "backend": None,
+                "model": None,
+                "retrieved_chunk_count": 0,
+                "citations": [],
+                "error": None,
+            },
+            indent=2,
+        )
+
+    trace = query_result.trace
+    return json.dumps(
+        {
+            "question": trace.question,
+            "answer": query_result.answer,
+            "document": trace.document_name,
+            "backend": trace.backend,
+            "model": trace.model_label,
+            "retrieved_chunk_count": trace.retrieved_chunk_count,
+            "citations": [
+                {
+                    "id": citation.citation_id,
+                    "source": citation.source_name,
+                    "page": citation.page,
+                    "chunk": (
+                        citation.chunk_index + 1
+                        if citation.chunk_index is not None
+                        else None
+                    ),
+                    "excerpt": citation.excerpt,
+                }
+                for citation in trace.citations
+            ],
+            "error": trace.error_message,
+        },
+        indent=2,
+    )
+
+
 def process_document(file, text_encoding="Auto"):
     """Process the uploaded document."""
     if file is None or not getattr(file, "name", None):
@@ -189,16 +237,18 @@ def chat(message, history):
     """Chat function to interact with the DocumentQA system."""
     history = history or []
     if message and message.strip():
-        response = qa_system.query(message)
+        query_result = qa_system.query_with_trace(message)
+        response = query_result.answer
         history.append({"role": "user", "content": message})
         history.append({"role": "assistant", "content": response})
-    return history, ""
+        return history, "", format_answer_trace(query_result)
+    return history, "", format_answer_trace(None)
 
 
 def clear_chat():
     """Clear the chat history."""
     qa_system.chat_history.clear()
-    return []
+    return [], format_answer_trace(None)
 
 
 # Create the Gradio interface
@@ -225,6 +275,12 @@ with gr.Blocks() as demo:
         with gr.Column():
             chatbot = gr.Chatbot()
             msg = gr.Textbox(label="Ask a question")
+            answer_trace = gr.Textbox(
+                label="Answer Trace",
+                value=format_answer_trace(None),
+                lines=12,
+                interactive=False,
+            )
             clear = gr.Button("Clear")
 
     upload_button.click(
@@ -232,8 +288,8 @@ with gr.Blocks() as demo:
         inputs=[file_upload, text_encoding],
         outputs=[upload_status, runtime_status],
     )
-    msg.submit(chat, [msg, chatbot], [chatbot, msg])
-    clear.click(clear_chat, None, chatbot, queue=False)
+    msg.submit(chat, [msg, chatbot], [chatbot, msg, answer_trace])
+    clear.click(clear_chat, None, [chatbot, answer_trace], queue=False)
 
 
 if __name__ == "__main__":

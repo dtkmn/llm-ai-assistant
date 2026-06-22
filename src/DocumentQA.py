@@ -5,7 +5,7 @@ import threading
 import unicodedata
 from dataclasses import dataclass
 from getpass import getpass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import docx2txt
 import faiss
@@ -18,7 +18,6 @@ from langchain_core.language_models.llms import LLM
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.retrievers import BaseRetriever
-from langchain_core.runnables import RunnablePassthrough
 from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import ConfigDict, Field
@@ -191,6 +190,32 @@ class DocumentQAStatus:
 
 
 @dataclass(frozen=True)
+class AnswerCitation:
+    citation_id: int
+    source_name: str
+    page: Optional[int]
+    chunk_index: Optional[int]
+    excerpt: str
+
+
+@dataclass(frozen=True)
+class AnswerTrace:
+    question: str
+    document_name: Optional[str]
+    backend: str
+    model_label: str
+    retrieved_chunk_count: int
+    citations: List[AnswerCitation]
+    error_message: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class QueryResult:
+    answer: str
+    trace: AnswerTrace
+
+
+@dataclass(frozen=True)
 class ActiveDocumentState:
     document_name: Optional[str]
     vector_store: Optional["FaissVectorStore"]
@@ -311,6 +336,107 @@ class FaissRetriever(BaseRetriever):
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
     ) -> List[Document]:
         return self.vector_store.search(query, self.search_type, self.search_kwargs)
+
+
+@dataclass(frozen=True)
+class RetrievalChainResult:
+    answer: str
+    retrieved_chunk_count: int
+    citations: List[AnswerCitation]
+
+
+class DocumentRetrievalChain:
+    def __init__(
+        self,
+        *,
+        retriever: FaissRetriever,
+        prompt: ChatPromptTemplate,
+        llm: LLM,
+        document_name: Optional[str],
+        profile: Dict,
+    ):
+        self.retriever = retriever
+        self.answer_chain = prompt | llm | StrOutputParser()
+        self.document_name = document_name
+        self.profile = profile
+
+    def invoke(self, question: str) -> str:
+        return self.invoke_with_trace(question).answer
+
+    def invoke_with_trace(self, question: str) -> RetrievalChainResult:
+        docs = self.retriever.invoke(question)
+        context, citations = self._format_context_and_citations(docs)
+        response = self.answer_chain.invoke(
+            {
+                "context": context,
+                "question": question,
+                "document_name": self.document_name or "unknown",
+            }
+        )
+        return RetrievalChainResult(
+            answer=str(response).strip(),
+            retrieved_chunk_count=len(citations),
+            citations=citations,
+        )
+
+    def _format_context_and_citations(
+        self, docs: List[Document]
+    ) -> Tuple[str, List[AnswerCitation]]:
+        context_parts = []
+        citations = []
+        remaining_chars = self.profile["context_total_chars"]
+
+        for doc in docs:
+            if len(citations) >= self.profile["context_chunks"] or remaining_chars <= 0:
+                break
+
+            content = doc.page_content.strip()
+            if not content:
+                continue
+
+            citation_id = len(citations) + 1
+            metadata = doc.metadata or {}
+            source_name = self._source_name(metadata)
+            page = metadata.get("page")
+            display_page = page + 1 if isinstance(page, int) else None
+            chunk_index = metadata.get("chunk_index")
+            if not isinstance(chunk_index, int):
+                chunk_index = None
+
+            source_label = f"[{citation_id}] Source: {source_name}"
+            if display_page is not None:
+                source_label = f"{source_label} (page {display_page})"
+            if chunk_index is not None:
+                source_label = f"{source_label}, chunk {chunk_index + 1}"
+
+            allowed_content_chars = min(
+                self.profile["context_chars_per_chunk"],
+                max(0, remaining_chars - len(source_label) - 1),
+            )
+            if allowed_content_chars <= 0:
+                break
+
+            excerpt = content[:allowed_content_chars]
+            context_entry = f"{source_label}\n{excerpt}"
+            context_parts.append(context_entry)
+            remaining_chars -= len(context_entry) + 2
+            citations.append(
+                AnswerCitation(
+                    citation_id=citation_id,
+                    source_name=source_name,
+                    page=display_page,
+                    chunk_index=chunk_index,
+                    excerpt=" ".join(excerpt.split()),
+                )
+            )
+
+        return "\n\n".join(context_parts), citations
+
+    def _source_name(self, metadata: Dict) -> str:
+        source = metadata.get("source")
+        if source:
+            return os.path.basename(str(source))
+        return self.document_name or "uploaded document"
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -903,46 +1029,20 @@ class DocumentQA:
         )
         prompt = ChatPromptTemplate.from_template(
             "You are a helpful AI assistant. Answer using only the provided context. "
-            "If the answer is not in the context, say that clearly.\n\n"
+            "Cite relevant sources inline with bracketed numbers like [1]. "
+            "If the answer is not in the context, say that clearly and do not invent citations.\n\n"
             "Uploaded document name: {document_name}\n\n"
             "Context:\n{context}\n\n"
             "Question: {question}\n\n"
             "Answer:"
         )
 
-        def format_docs(docs):
-            filtered_chunks = []
-            for doc in docs:
-                content = doc.page_content.strip()
-                if not content:
-                    continue
-                metadata = doc.metadata or {}
-                source = metadata.get("source")
-                source_name = (
-                    os.path.basename(str(source))
-                    if source
-                    else (document_name or "uploaded document")
-                )
-                source_label = f"Source: {source_name}"
-                page = metadata.get("page")
-                if isinstance(page, int):
-                    source_label = f"{source_label} (page {page + 1})"
-                filtered_chunks.append(
-                    f"{source_label}\n{content[: self.profile['context_chars_per_chunk']]}"
-                )
-            return "\n\n".join(filtered_chunks[: self.profile["context_chunks"]])[
-                : self.profile["context_total_chars"]
-            ]
-
-        return (
-            {
-                "context": retriever | format_docs,
-                "question": RunnablePassthrough(),
-                "document_name": lambda _: document_name or "unknown",
-            }
-            | prompt
-            | self.llm
-            | StrOutputParser()
+        return DocumentRetrievalChain(
+            retriever=retriever,
+            prompt=prompt,
+            llm=self.llm,
+            document_name=document_name,
+            profile=self.profile,
         )
 
     def _validate_document(self, document_path: str) -> str:
@@ -1270,6 +1370,9 @@ class DocumentQA:
                     )
                     chunks = chunks[: self.max_document_chunks]
                 chunk_count = len(chunks)
+                for chunk_index, chunk in enumerate(chunks):
+                    chunk.metadata = dict(chunk.metadata or {})
+                    chunk.metadata["chunk_index"] = chunk_index
 
                 phase = "index"
                 vector_store = FaissVectorStore.from_documents(
@@ -1316,37 +1419,116 @@ class DocumentQA:
         lowered = prompt.lower()
         return any(hint in lowered for hint in DOCUMENT_IDENTITY_QUESTION_HINTS)
 
-    def query(self, prompt: str, session_id: str = "default") -> str:
-        """Answer a user query using retrieved document context."""
+    def _query_result(
+        self,
+        *,
+        answer: str,
+        question: str,
+        active_state: ActiveDocumentState,
+        retrieved_chunk_count: int = 0,
+        citations: Optional[List[AnswerCitation]] = None,
+        error_message: Optional[str] = None,
+    ) -> QueryResult:
+        return QueryResult(
+            answer=answer,
+            trace=AnswerTrace(
+                question=question,
+                document_name=active_state.document_name,
+                backend=self._active_backend(),
+                model_label=self._active_model_label(),
+                retrieved_chunk_count=retrieved_chunk_count,
+                citations=citations or [],
+                error_message=error_message,
+            ),
+        )
+
+    def query_with_trace(self, prompt: str, session_id: str = "default") -> QueryResult:
+        """Answer a user query and return the retrieved evidence used."""
         active_state = self._snapshot_active_document_state()
+        clean_prompt = (prompt or "").strip()
 
         if not active_state.retrieval_chain:
-            return "Please upload and process a document first."
+            return self._query_result(
+                answer="Please upload and process a document first.",
+                question=clean_prompt,
+                active_state=active_state,
+                error_message="document_not_loaded",
+            )
 
         if not self.llm:
-            return "Language model is not initialized. Please check your HuggingFace token setup."
+            return self._query_result(
+                answer="Language model is not initialized. Please check your HuggingFace token setup.",
+                question=clean_prompt,
+                active_state=active_state,
+                error_message="llm_not_initialized",
+            )
 
-        clean_prompt = prompt.strip()
         if not clean_prompt:
-            return "Please provide a question."
+            return self._query_result(
+                answer="Please provide a question.",
+                question=clean_prompt,
+                active_state=active_state,
+                error_message="empty_question",
+            )
 
         if active_state.document_name and self._is_document_identity_question(clean_prompt):
-            return f"The uploaded document is `{active_state.document_name}`."
+            return self._query_result(
+                answer=f"The uploaded document is `{active_state.document_name}`.",
+                question=clean_prompt,
+                active_state=active_state,
+            )
 
         try:
-            response = active_state.retrieval_chain.invoke(clean_prompt)
-            if not isinstance(response, str):
-                response = str(response)
-            response = response.strip()
+            if hasattr(active_state.retrieval_chain, "invoke_with_trace"):
+                chain_result = active_state.retrieval_chain.invoke_with_trace(clean_prompt)
+                response = chain_result.answer
+                retrieved_chunk_count = chain_result.retrieved_chunk_count
+                citations = chain_result.citations
+            else:
+                response = active_state.retrieval_chain.invoke(clean_prompt)
+                retrieved_chunk_count = 0
+                citations = []
+
+            response = str(response).strip()
             if len(response) < 3:
                 response = (
                     "I could not find enough relevant information in the document to answer that."
                 )
+            result = self._query_result(
+                answer=response,
+                question=clean_prompt,
+                active_state=active_state,
+                retrieved_chunk_count=retrieved_chunk_count,
+                citations=citations,
+            )
 
             self.chat_history.append(
-                {"session_id": session_id, "question": clean_prompt, "answer": response}
+                {
+                    "session_id": session_id,
+                    "question": clean_prompt,
+                    "answer": response,
+                    "citations": [
+                        {
+                            "id": citation.citation_id,
+                            "source_name": citation.source_name,
+                            "page": citation.page,
+                            "chunk_index": citation.chunk_index,
+                            "excerpt": citation.excerpt,
+                        }
+                        for citation in citations
+                    ],
+                }
             )
-            return response
+            return result
         except Exception:
             LOGGER.exception("Error while processing query.")
-            return "I hit an internal error while processing your question. Please try again."
+            return self._query_result(
+                answer="I hit an internal error while processing your question. Please try again.",
+                question=clean_prompt,
+                active_state=active_state,
+                error_message="query_failed",
+            )
+
+    def query(self, prompt: str, session_id: str = "default") -> str:
+        """Answer a user query using retrieved document context."""
+        return self.query_with_trace(prompt, session_id=session_id).answer

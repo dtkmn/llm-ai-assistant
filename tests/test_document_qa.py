@@ -41,6 +41,13 @@ def test_query_before_document_asks_for_upload_first():
     qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
 
     assert qa.query("What is this?") == "Please upload and process a document first."
+    result = qa.query_with_trace("What is this?")
+    assert result.answer == "Please upload and process a document first."
+    assert result.trace.question == "What is this?"
+    assert result.trace.document_name is None
+    assert result.trace.retrieved_chunk_count == 0
+    assert result.trace.citations == []
+    assert result.trace.error_message == "document_not_loaded"
 
 
 def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
@@ -82,6 +89,55 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     assert status.processing_report.backend == "mock"
     assert status.processing_report.model_label == "MockLLM (fallback)"
     assert status.processing_report.error_message is None
+
+
+def test_query_with_trace_returns_retrieved_citations(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+
+    result = qa.query_with_trace("What is Project Phoenix?")
+
+    assert "demonstration response" in result.answer
+    assert result.trace.question == "What is Project Phoenix?"
+    assert result.trace.document_name == "phoenix.txt"
+    assert result.trace.backend == "mock"
+    assert result.trace.model_label == "MockLLM (fallback)"
+    assert result.trace.retrieved_chunk_count > 0
+    assert result.trace.error_message is None
+    assert len(result.trace.citations) >= 1
+    citation = result.trace.citations[0]
+    assert citation.citation_id == 1
+    assert citation.source_name == "phoenix.txt"
+    assert citation.page is None
+    assert citation.chunk_index == 0
+    assert "Project Phoenix" in citation.excerpt
+    assert qa.chat_history[-1]["citations"][0]["source_name"] == "phoenix.txt"
+
+
+def test_query_trace_counts_only_prompt_included_chunks(tmp_path):
+    document = tmp_path / "long-phoenix.txt"
+    document.write_text(
+        "\n\n".join(
+            f"Project Phoenix evidence section {index}. The launch date is June 2026."
+            for index in range(80)
+        ),
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa.embeddings = FakeEmbeddings()
+    qa.process_document(str(document))
+    assert len(qa.vector_store.documents) > 1
+    qa.profile["context_chunks"] = 1
+
+    result = qa.query_with_trace("What is the launch date?")
+
+    assert result.trace.retrieved_chunk_count == 1
+    assert len(result.trace.citations) == 1
+
+
+def test_document_chunks_record_citation_metadata(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+
+    assert qa.vector_store.documents[0].metadata["chunk_index"] == 0
 
 
 def test_status_reports_configured_backend_before_initialization():

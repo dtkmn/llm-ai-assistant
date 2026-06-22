@@ -35,6 +35,8 @@ Primary runtime files:
   behavior while recording the failed attempt in the processing report.
 - `DocumentQA.status()` and its processing report are the source of truth for UI
   status. UI code and tests should not inspect random internal attributes.
+- Answer traces and citations must come from the retrieved chunks used to build
+  the LLM prompt. Do not bolt on citations from a separate post-answer lookup.
 - Text upload default is `Auto`. Ambiguous legacy bytes must fail closed instead
   of mojibaking. `UTF-8 / Western` and explicit legacy encodings are opt-ins.
 - Docker image publication belongs to `main` only. `dev`, PR, and manual workflow
@@ -64,6 +66,8 @@ Use this loop for every non-trivial change:
   internal attributes.
 - Treat failed replacement uploads as hostile state-integrity cases. Assert the
   old document is still active and queryable after every failed upload path.
+- Preserve `DocumentQA.query()` as the simple string API; add richer answer
+  evidence through structured result objects such as `query_with_trace()`.
 - Keep `DocumentQA` honest before making it clever. Reliability beats agentic
   theater.
 - Add abstractions only when they reduce risk or remove repeated policy logic.
