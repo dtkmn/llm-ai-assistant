@@ -40,12 +40,24 @@ def process_document(file):
     try:
         qa_system.process_document(file.name)
         uploaded_name = os.path.basename(file.name)
-        active_model = qa_system.loaded_model_id or "MockLLM (fallback)"
+        active_model = (
+            getattr(qa_system, "loaded_model_label", None)
+            or qa_system.loaded_model_id
+            or "MockLLM (fallback)"
+        )
+        active_backend = qa_system.active_llm_backend or qa_system.llm_backend
         mode_label = "FAST" if qa_system.fast_mode else "QUALITY"
+        if active_backend == "mock":
+            return (
+                f"Document `{uploaded_name}` processed in mock mode. "
+                f"Profile: `{mode_label}`. Active model: `{active_model}`. "
+                "Answers will be demonstration responses until a real LLM backend is configured."
+            )
         return (
-            f"Document `{uploaded_name}` processed successfully. "
-            f"Profile: `{mode_label}`. Active model: `{active_model}`. "
-            "You can now ask questions about it."
+            f"Document `{uploaded_name}` indexed. "
+            f"Profile: `{mode_label}`. Backend: `{active_backend}`. "
+            f"Active model: `{active_model}`. "
+            "Inference will be validated on the first question."
         )
     except RuntimeError as exc:
         LOGGER.warning("Document processing failed: %s", exc)

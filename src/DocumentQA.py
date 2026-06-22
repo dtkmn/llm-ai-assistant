@@ -17,7 +17,11 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 LOGGER = logging.getLogger(__name__)
 HF_TOKEN_ENV_VAR = "HUGGINGFACEHUB_API_TOKEN"
 FAST_MODE_ENV_VAR = "FAST_MODE"
+LLM_BACKEND_ENV_VAR = "LLM_BACKEND"
+HF_ENDPOINT_URL_ENV_VAR = "HF_ENDPOINT_URL"
+HF_ENDPOINT_TIMEOUT_ENV_VAR = "HF_ENDPOINT_TIMEOUT"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+SUPPORTED_LLM_BACKENDS = {"auto", "endpoint", "local", "mock"}
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_DOCUMENT_CHUNKS = 2_000
 DEFAULT_QUALITY_EMBEDDINGS_MODEL = "Alibaba-NLP/gte-modernbert-base"
@@ -73,6 +77,17 @@ def env_flag(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        LOGGER.warning("Invalid integer for %s=%r. Using %s.", name, value, default)
+        return default
+
+
 class MockLLM(LLM):
     """Fallback LLM when no HuggingFace token/model is available."""
 
@@ -104,6 +119,7 @@ class DocumentQA:
         hf_token: Optional[str] = None,
         device: Optional[str] = None,
         fast_mode: Optional[bool] = None,
+        llm_backend: Optional[str] = None,
         allow_interactive_token: bool = False,
         max_document_bytes: int = MAX_DOCUMENT_BYTES,
         max_document_chunks: int = MAX_DOCUMENT_CHUNKS,
@@ -119,6 +135,7 @@ class DocumentQA:
         self.model_id = model_id or os.getenv("LLM_MODEL_ID", default_models[0])
         self.embeddings_model = embeddings_model or default_embeddings_model
         self.hf_token = hf_token or self._get_hf_token(allow_interactive_token)
+        self.llm_backend = self._normalize_llm_backend(llm_backend)
         self.max_document_bytes = max_document_bytes
         self.max_document_chunks = max_document_chunks
         self.profile = FAST_PROFILE if self.fast_mode else QUALITY_PROFILE
@@ -127,6 +144,8 @@ class DocumentQA:
         # (for example Hugging Face Spaces CPU instances).
         self.llm = None
         self.loaded_model_id: Optional[str] = None
+        self.loaded_model_label: Optional[str] = None
+        self.active_llm_backend: Optional[str] = None
         self.embeddings = None
         self.vector_store = None
         self.retrieval_chain = None
@@ -140,6 +159,25 @@ class DocumentQA:
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             return "mps"
         return "cpu"
+
+    def _normalize_llm_backend(self, llm_backend: Optional[str]) -> str:
+        backend = (llm_backend or os.getenv(LLM_BACKEND_ENV_VAR, "auto")).strip().lower()
+        if backend not in SUPPORTED_LLM_BACKENDS:
+            LOGGER.warning(
+                "Unsupported %s=%r. Supported values: %s. Using auto.",
+                LLM_BACKEND_ENV_VAR,
+                backend,
+                ", ".join(sorted(SUPPORTED_LLM_BACKENDS)),
+            )
+            return "auto"
+        return backend
+
+    def _select_llm_backend(self) -> str:
+        if self.llm_backend != "auto":
+            return self.llm_backend
+        if self.device in {"cuda", "mps"}:
+            return "local"
+        return "endpoint"
 
     def _get_hf_token(self, allow_interactive_token: bool) -> Optional[str]:
         token = os.getenv(HF_TOKEN_ENV_VAR, "").strip()
@@ -172,6 +210,39 @@ class DocumentQA:
         if self.device in {"cuda", "mps"}:
             return torch.float16
         return torch.float32
+
+    def _endpoint_url(self) -> Optional[str]:
+        return os.getenv(HF_ENDPOINT_URL_ENV_VAR, "").strip() or None
+
+    def _loaded_model_label(self, model_id: str, backend: str) -> str:
+        endpoint_url = self._endpoint_url()
+        if backend == "endpoint" and endpoint_url:
+            return f"Custom endpoint ({endpoint_url})"
+        return model_id
+
+    def _load_endpoint_model(self, model_id: str) -> LLM:
+        from langchain_huggingface import HuggingFaceEndpoint
+
+        endpoint_url = self._endpoint_url()
+        LOGGER.info(
+            "Configuring Hugging Face endpoint %s",
+            endpoint_url if endpoint_url else model_id,
+        )
+        endpoint_kwargs = {
+            "task": "text-generation",
+            "huggingfacehub_api_token": self.hf_token,
+            "max_new_tokens": self.profile["max_new_tokens"],
+            "do_sample": False,
+            "repetition_penalty": 1.05,
+            "return_full_text": False,
+            "temperature": 0.1,
+            "timeout": env_int(HF_ENDPOINT_TIMEOUT_ENV_VAR, 120),
+        }
+        if endpoint_url:
+            endpoint_kwargs["endpoint_url"] = endpoint_url
+        else:
+            endpoint_kwargs["repo_id"] = model_id
+        return HuggingFaceEndpoint(**endpoint_kwargs)
 
     def _load_local_model(self, model_id: str) -> HuggingFacePipeline:
         from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
@@ -219,18 +290,55 @@ class DocumentQA:
         return candidates
 
     def _initialize_llm(self) -> None:
-        if self.hf_token == "dummy":
-            LOGGER.warning("Dummy HuggingFace token detected. Falling back to MockLLM.")
+        requested_backend = self._select_llm_backend()
+        if self.llm_backend == "mock":
+            LOGGER.warning("Mock LLM backend selected. Real model inference is disabled.")
+            self.active_llm_backend = "mock"
             self.llm = MockLLM()
             return
+
+        if self.hf_token == "dummy":
+            message = (
+                "Dummy HuggingFace token is only allowed with LLM_BACKEND=mock "
+                "or auto demo fallback."
+            )
+            if self.llm_backend in {"endpoint", "local"}:
+                raise RuntimeError(message)
+            LOGGER.warning("%s Falling back to MockLLM.", message)
+            self.active_llm_backend = "mock"
+            self.llm = MockLLM()
+            return
+
+        if requested_backend == "endpoint" and not self.hf_token:
+            message = (
+                "HuggingFace token is required for endpoint inference. "
+                f"Set {HF_TOKEN_ENV_VAR} or use LLM_BACKEND=mock for demo mode."
+            )
+            if self.llm_backend == "auto":
+                LOGGER.warning("%s Falling back to MockLLM.", message)
+                self.active_llm_backend = "mock"
+                self.llm = MockLLM()
+                return
+            raise RuntimeError(message)
 
         last_error = None
         for candidate_model in self._candidate_models():
             try:
-                self.llm = self._load_local_model(candidate_model)
-                self.loaded_model_id = candidate_model
+                if requested_backend == "endpoint":
+                    self.llm = self._load_endpoint_model(candidate_model)
+                else:
+                    self.llm = self._load_local_model(candidate_model)
+                self.active_llm_backend = requested_backend
+                self.loaded_model_label = self._loaded_model_label(
+                    candidate_model, requested_backend
+                )
+                self.loaded_model_id = (
+                    None
+                    if requested_backend == "endpoint" and self._endpoint_url()
+                    else candidate_model
+                )
                 self.model_id = candidate_model
-                LOGGER.info("Using model %s", candidate_model)
+                LOGGER.info("Using %s model %s", requested_backend, candidate_model)
                 return
             except Exception as exc:
                 last_error = exc
@@ -240,14 +348,18 @@ class DocumentQA:
                     exc,
                 )
 
+        candidate_list = ", ".join(self._candidate_models()) or "none"
+        if last_error and self.llm_backend in {"endpoint", "local"}:
+            raise RuntimeError(
+                f"Unable to initialize {requested_backend} LLM after trying "
+                f"{candidate_list}. Last error: {last_error}"
+            ) from last_error
+
         if last_error:
             LOGGER.exception("All model candidates failed. Falling back to MockLLM.")
         else:
-            LOGGER.warning(
-                "No model candidates available. Falling back to MockLLM. "
-                "Set %s to enable the local model.",
-                HF_TOKEN_ENV_VAR,
-            )
+            LOGGER.warning("No model candidates available. Falling back to MockLLM.")
+        self.active_llm_backend = "mock"
         self.llm = MockLLM()
 
     def _ensure_llm_initialized(self) -> None:
@@ -397,11 +509,11 @@ class DocumentQA:
 
     def query(self, prompt: str, session_id: str = "default") -> str:
         """Answer a user query using retrieved document context."""
-        if not self.llm:
-            return "Language model is not initialized. Please check your HuggingFace token setup."
-
         if not self.retrieval_chain:
             return "Please upload and process a document first."
+
+        if not self.llm:
+            return "Language model is not initialized. Please check your HuggingFace token setup."
 
         clean_prompt = prompt.strip()
         if not clean_prompt:

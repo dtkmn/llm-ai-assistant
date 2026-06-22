@@ -43,6 +43,7 @@ ENV GRADIO_SERVER_NAME="0.0.0.0"
 ENV GRADIO_SERVER_PORT="7860"
 ENV HF_HOME="/home/appuser/.cache/huggingface"
 ENV FAST_MODE="true"
+ENV LLM_BACKEND="auto"
 ENV APP_DEBUG="false"
 
 # Command to run the Gradio app
