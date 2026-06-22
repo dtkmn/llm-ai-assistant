@@ -9,13 +9,12 @@ app_port: 7860
 
 
 # LLM AI Assistant
-This project leverages LangChain and Meta's Llama 3.2 to create an AI assistant capable of answering questions based on provided document context. The assistant uses local model execution for better quality and reliability.
+This project uses LangChain, Hugging Face models, FAISS, and Gradio to answer questions from uploaded document context. It is a compact retrieval-augmented generation (RAG) assistant designed to run locally, in Docker, or on Hugging Face Spaces.
 
 https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ## Features
-- **Meta Llama 3.2 Integration:** Uses Meta's Llama-3.2-3B-Instruct model from HuggingFace for high-quality responses
-- **Local Model Execution:** Runs models locally for better reliability and control
+- **Configurable LLM Backend:** Uses hosted Hugging Face inference on CPU by default, local model weights on GPU/MPS, or explicit mock mode for demos/tests
 - **Document Processing:** Supports PDF, DOCX, and text documents with intelligent chunking
 - **Vector Search:** Uses FAISS for efficient similarity search with HuggingFace embeddings
 - **Gradio Interface:** Modern, user-friendly web interface for document upload and chat
@@ -28,8 +27,8 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ### Prerequisites
 - Python 3.11 or higher
-- HuggingFace account and API token ([get one here](https://huggingface.co/settings/tokens))
-- At least 8GB RAM (for Llama 3.2-3B model)
+- HuggingFace account and API token for hosted endpoint inference or gated models ([get one here](https://huggingface.co/settings/tokens))
+- At least 8GB RAM if forcing local model execution on CPU; GPU/MPS is strongly preferred for local models
 
 ### Local Setup
 
@@ -65,19 +64,31 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     export LLM_MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct
     ```
 
-6. (Optional) enable fast mode (lower latency, lower quality):
+6. (Optional) choose an LLM backend:
+
+    ```bash
+    export LLM_BACKEND=auto
+    ```
+
+    Supported values:
+    - `auto` uses hosted Hugging Face inference on CPU and local weights on CUDA/MPS
+    - `endpoint` always uses hosted Hugging Face inference
+    - `local` always downloads and runs model weights in-process
+    - `mock` disables real inference for demos/tests
+
+7. (Optional) enable fast mode (lower latency, lower quality):
 
     ```bash
     export FAST_MODE=true
     ```
 
-7. (Optional) enable debug logs:
+8. (Optional) enable debug logs:
 
     ```bash
     export APP_DEBUG=false
     ```
 
-8. Run the application:
+9. Run the application:
 
     ```bash
     python src/app.py
@@ -101,7 +112,7 @@ The application is containerized for easy deployment.
      llm-ai-assistant
    ```
 
-**Note:** The first run downloads model weights (size depends on `LLM_MODEL_ID`; the default 1.5B model is much smaller than 4B/7B models but still takes a few GB).
+**Note:** With `LLM_BACKEND=auto`, CPU deployments use hosted Hugging Face inference and avoid downloading LLM weights. Local backends still download model weights, which can take several GB.
 
 
 ## Usage
@@ -114,9 +125,15 @@ The application is containerized for easy deployment.
 ## Technical Details
 
 ### Model
-- **LLM:** Configurable via `LLM_MODEL_ID`
+- **LLM backend:** Configurable via `LLM_BACKEND`
+  - `auto` (default): hosted endpoint on CPU, local model on CUDA/MPS
+  - `endpoint`: hosted Hugging Face inference
+  - `local`: in-process Transformers pipeline
+  - `mock`: deterministic demo/test fallback
+- **LLM model:** Configurable via `LLM_MODEL_ID`
   - **Quality mode (default):** tries `Qwen/Qwen2.5-1.5B-Instruct`, then `Qwen/Qwen2.5-7B-Instruct`, then `meta-llama/Llama-3.2-3B-Instruct`
   - **Fast mode (`FAST_MODE=true`):** tries `Qwen/Qwen2.5-1.5B-Instruct` first, then `meta-llama/Llama-3.2-3B-Instruct`
+- **Hosted endpoint:** optionally configurable with `HF_ENDPOINT_URL` and `HF_ENDPOINT_TIMEOUT`
 - **Embeddings:**
   - **Quality mode:** `Alibaba-NLP/gte-modernbert-base`
   - **Fast mode:** `sentence-transformers/all-MiniLM-L6-v2`
@@ -135,15 +152,16 @@ The application is containerized for easy deployment.
 ## Security and Dependency Maintenance
 - Dependencies are pinned in `requirements.txt` for reproducible installs.
 - Dependabot is enabled weekly (`.github/dependabot.yml`) for dependency updates.
-- Current baseline includes Gradio `6.6.0`, LangChain `1.2.10`, LangChain-HuggingFace `1.2.1`, HuggingFace Hub `1.5.0`, and Transformers `5.2.0`.
+- Current baseline includes Gradio `6.15.2`, LangChain `1.3.10`, LangChain-HuggingFace `1.2.1`, HuggingFace Hub `1.5.0`, Transformers `5.4.0`, and Torch `2.12.1`.
 - Note: `marshmallow` is intentionally pinned to `3.26.2` because `dataclasses-json` currently requires `<4.0.0`.
 - Security-sensitive transitive dependencies are explicitly pinned (for example `aiohttp`, `urllib3`, `python-multipart`, and `orjson`) to keep audit results stable.
 - Recommended recurring checks:
 
   ```bash
-  pip install pip-audit
+  pip install -r requirements-dev.txt
   pip-audit -r requirements.txt
   pip check
+  pytest
   ```
 
 ## Contributing
