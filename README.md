@@ -164,6 +164,16 @@ The application is containerized for easy deployment.
   pytest
   ```
 
+## Agent-Assisted Development
+- `AGENTS.md` contains repo-level instructions for coding agents: setup commands,
+  validation expectations, backend honesty rules, encoding policy, and release
+  guardrails.
+- `.agents/skills/document-qa/SKILL.md` defines the focused document-QA
+  engineering skill for changes to ingestion, retrieval, model routing, UI
+  status, and CI publishing.
+- Use the documented loop for non-trivial changes: explore, plan, act, observe,
+  verify, review, and ship.
+
 ## Contributing
 Feel free to submit issues and pull requests. Contributions are welcome!
 

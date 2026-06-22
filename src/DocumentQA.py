@@ -1,7 +1,9 @@
 import logging
 import os
 import sys
+import threading
 import unicodedata
+from dataclasses import dataclass
 from getpass import getpass
 from typing import Dict, List, Optional
 
@@ -151,6 +153,54 @@ UTF_NUL_FAMILY_ENCODINGS = {
     "utf_32_le",
 }
 ALLOWED_TEXT_CONTROL_CHARACTERS = {"\n", "\r", "\t", "\f"}
+
+
+@dataclass(frozen=True)
+class DocumentProcessingReport:
+    attempted_document_name: Optional[str]
+    active_document_name: Optional[str]
+    success: bool
+    phase: str
+    file_extension: Optional[str]
+    chunk_count: int
+    truncated: bool
+    max_chunk_limit: int
+    text_encoding_mode: str
+    backend: str
+    model_label: str
+    error_message: Optional[str]
+
+
+@dataclass(frozen=True)
+class DocumentQAStatus:
+    profile_label: str
+    configured_backend: str
+    active_backend: str
+    active_model_label: str
+    loaded_model_id: Optional[str]
+    loaded_model_label: Optional[str]
+    embeddings_model: str
+    device: str
+    document_name: Optional[str]
+    ready_for_queries: bool
+    processing_report: Optional[DocumentProcessingReport]
+
+    @property
+    def mock_mode(self) -> bool:
+        return self.active_backend == "mock"
+
+
+@dataclass(frozen=True)
+class ActiveDocumentState:
+    document_name: Optional[str]
+    vector_store: Optional["FaissVectorStore"]
+    retrieval_chain: Optional[object]
+
+
+class DocumentProcessingError(RuntimeError):
+    def __init__(self, message: str, status: DocumentQAStatus):
+        super().__init__(message)
+        self.status = status
 
 
 class FaissVectorStore:
@@ -460,10 +510,18 @@ class DocumentQA:
         self.loaded_model_label: Optional[str] = None
         self.active_llm_backend: Optional[str] = None
         self.embeddings = None
+        self._state_lock = threading.RLock()
+        self._upload_lock = threading.Lock()
+        self._active_document_state = ActiveDocumentState(
+            document_name=None,
+            vector_store=None,
+            retrieval_chain=None,
+        )
         self.vector_store = None
         self.retrieval_chain = None
         self.embeddings_error: Optional[str] = None
         self.current_document_name: Optional[str] = None
+        self.latest_processing_report: Optional[DocumentProcessingReport] = None
         self.chat_history: List[Dict[str, str]] = []
 
     def _detect_device(self) -> str:
@@ -676,8 +734,91 @@ class DocumentQA:
         self.llm = MockLLM()
 
     def _ensure_llm_initialized(self) -> None:
-        if self.llm is None:
-            self._initialize_llm()
+        with self._state_lock:
+            if self.llm is None:
+                self._initialize_llm()
+
+    def _snapshot_active_document_state(self) -> ActiveDocumentState:
+        with self._state_lock:
+            return self._active_document_state
+
+    def _commit_active_document_state(
+        self,
+        *,
+        document_name: str,
+        vector_store: FaissVectorStore,
+        retrieval_chain,
+        processing_report: DocumentProcessingReport,
+    ) -> DocumentQAStatus:
+        active_state = ActiveDocumentState(
+            document_name=document_name,
+            vector_store=vector_store,
+            retrieval_chain=retrieval_chain,
+        )
+        with self._state_lock:
+            self._active_document_state = active_state
+            # Keep legacy attributes synchronized for existing tests and callers.
+            self.current_document_name = active_state.document_name
+            self.vector_store = active_state.vector_store
+            self.retrieval_chain = active_state.retrieval_chain
+            self.latest_processing_report = processing_report
+            return self._status_from_locked(active_state, processing_report)
+
+    def _record_processing_failure(
+        self,
+        *,
+        attempted_document_name: Optional[str],
+        phase: str,
+        file_extension: Optional[str],
+        chunk_count: int,
+        truncated: bool,
+        text_encoding: Optional[str],
+        error_message: str,
+    ) -> DocumentQAStatus:
+        with self._state_lock:
+            processing_report = self._processing_report(
+                attempted_document_name=attempted_document_name,
+                success=False,
+                phase=phase,
+                file_extension=file_extension,
+                chunk_count=chunk_count,
+                truncated=truncated,
+                text_encoding=text_encoding,
+                error_message=error_message,
+                active_document_name=self._active_document_state.document_name,
+            )
+            self.latest_processing_report = processing_report
+            return self._status_from_locked(
+                self._active_document_state, processing_report
+            )
+
+    def _status_from_locked(
+        self,
+        active_state: ActiveDocumentState,
+        processing_report: Optional[DocumentProcessingReport],
+    ) -> DocumentQAStatus:
+        active_backend = self._active_backend()
+        return DocumentQAStatus(
+            profile_label="FAST" if self.fast_mode else "QUALITY",
+            configured_backend=self.llm_backend,
+            active_backend=active_backend,
+            active_model_label=self._active_model_label(),
+            loaded_model_id=self.loaded_model_id,
+            loaded_model_label=self.loaded_model_label,
+            embeddings_model=self.embeddings_model,
+            device=self.device,
+            document_name=active_state.document_name,
+            ready_for_queries=(
+                self.llm is not None and active_state.retrieval_chain is not None
+            ),
+            processing_report=processing_report,
+        )
+
+    def status(self) -> DocumentQAStatus:
+        with self._state_lock:
+            active_state = self._active_document_state
+            processing_report = self.latest_processing_report
+            return self._status_from_locked(active_state, processing_report)
 
     def _initialize_embeddings(self) -> None:
         if self.embeddings is not None:
@@ -695,13 +836,64 @@ class DocumentQA:
                 "Embeddings initialization failed. Document processing will be unavailable."
             )
 
-    def _create_retrieval_chain(self) -> None:
+    def _active_backend(self) -> str:
+        return self.active_llm_backend or self.llm_backend
+
+    def _active_model_label(self) -> str:
+        active_model_label = self.loaded_model_label or self.loaded_model_id
+        if active_model_label:
+            return active_model_label
+
+        active_backend = self._active_backend()
+        if active_backend == "mock":
+            return "MockLLM (fallback)"
+        return self.model_id
+
+    def _text_encoding_mode(self, text_encoding: Optional[str]) -> str:
+        return (text_encoding or "auto").strip().lower() or "auto"
+
+    def _processing_report(
+        self,
+        *,
+        attempted_document_name: Optional[str],
+        success: bool,
+        phase: str,
+        file_extension: Optional[str],
+        chunk_count: int,
+        truncated: bool,
+        text_encoding: Optional[str],
+        error_message: Optional[str] = None,
+        active_document_name: Optional[str] = None,
+    ) -> DocumentProcessingReport:
+        active_state = self._snapshot_active_document_state()
+        return DocumentProcessingReport(
+            attempted_document_name=attempted_document_name,
+            active_document_name=(
+                active_state.document_name
+                if active_document_name is None
+                else active_document_name
+            ),
+            success=success,
+            phase=phase,
+            file_extension=file_extension,
+            chunk_count=chunk_count,
+            truncated=truncated,
+            max_chunk_limit=self.max_document_chunks,
+            text_encoding_mode=self._text_encoding_mode(text_encoding),
+            backend=self._active_backend(),
+            model_label=self._active_model_label(),
+            error_message=error_message,
+        )
+
+    def _build_retrieval_chain(
+        self, vector_store: FaissVectorStore, document_name: Optional[str]
+    ):
         if not self.llm:
             raise RuntimeError("LLM is not initialized.")
-        if not self.vector_store:
+        if not vector_store:
             raise RuntimeError("Vector store is not initialized.")
 
-        retriever = self.vector_store.as_retriever(
+        retriever = vector_store.as_retriever(
             search_type="mmr",
             search_kwargs={
                 "k": self.profile["retrieval_k"],
@@ -729,7 +921,7 @@ class DocumentQA:
                 source_name = (
                     os.path.basename(str(source))
                     if source
-                    else (self.current_document_name or "uploaded document")
+                    else (document_name or "uploaded document")
                 )
                 source_label = f"Source: {source_name}"
                 page = metadata.get("page")
@@ -742,11 +934,11 @@ class DocumentQA:
                 : self.profile["context_total_chars"]
             ]
 
-        self.retrieval_chain = (
+        return (
             {
                 "context": retriever | format_docs,
                 "question": RunnablePassthrough(),
-                "document_name": lambda _: self.current_document_name or "unknown",
+                "document_name": lambda _: document_name or "unknown",
             }
             | prompt
             | self.llm
@@ -1025,48 +1217,100 @@ class DocumentQA:
 
     def process_document(
         self, document_path: str, text_encoding: Optional[str] = None
-    ) -> None:
+    ) -> DocumentQAStatus:
         """Process a document and build a vector store."""
-        try:
-            file_extension = self._validate_document(document_path)
-            self.current_document_name = os.path.basename(document_path)
-            self._ensure_llm_initialized()
-            if not self.embeddings:
-                self._initialize_embeddings()
-            if not self.embeddings:
-                raise RuntimeError(
-                    "Embedding model is unavailable. Check network access/model cache and retry."
+        with self._upload_lock:
+            attempted_document_name = (
+                os.path.basename(document_path) if document_path else None
+            )
+            file_extension = (
+                os.path.splitext(document_path)[1].lower() if document_path else None
+            )
+            phase = "validate"
+            chunk_count = 0
+            truncated = False
+
+            try:
+                file_extension = self._validate_document(document_path)
+
+                phase = "initialize_llm"
+                self._ensure_llm_initialized()
+
+                phase = "initialize_embeddings"
+                if not self.embeddings:
+                    self._initialize_embeddings()
+                if not self.embeddings:
+                    raise RuntimeError(
+                        "Embedding model is unavailable. Check network access/model cache and retry."
+                    )
+
+                phase = "load"
+                documents = self._load_documents(
+                    document_path, file_extension, text_encoding=text_encoding
+                )
+                if not documents:
+                    raise ValueError("No readable content found in the uploaded document.")
+
+                phase = "split"
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=self.profile["splitter_chunk_size"],
+                    chunk_overlap=self.profile["splitter_chunk_overlap"],
+                    separators=["\n\n", "\n", ". ", "! ", "? ", ", ", " "],
+                )
+                chunks = text_splitter.split_documents(documents)
+                if not chunks:
+                    raise ValueError("No text chunks were generated from the document.")
+
+                if len(chunks) > self.max_document_chunks:
+                    truncated = True
+                    LOGGER.warning(
+                        "Document produced %s chunks; truncating to %s to keep memory bounded.",
+                        len(chunks),
+                        self.max_document_chunks,
+                    )
+                    chunks = chunks[: self.max_document_chunks]
+                chunk_count = len(chunks)
+
+                phase = "index"
+                vector_store = FaissVectorStore.from_documents(
+                    documents=chunks,
+                    embedding=self.embeddings,
                 )
 
-            documents = self._load_documents(
-                document_path, file_extension, text_encoding=text_encoding
-            )
-            if not documents:
-                raise ValueError("No readable content found in the uploaded document.")
-
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=self.profile["splitter_chunk_size"],
-                chunk_overlap=self.profile["splitter_chunk_overlap"],
-                separators=["\n\n", "\n", ". ", "! ", "? ", ", ", " "],
-            )
-            chunks = text_splitter.split_documents(documents)
-            if not chunks:
-                raise ValueError("No text chunks were generated from the document.")
-
-            if len(chunks) > self.max_document_chunks:
-                LOGGER.warning(
-                    "Document produced %s chunks; truncating to %s to keep memory bounded.",
-                    len(chunks),
-                    self.max_document_chunks,
+                phase = "chain"
+                retrieval_chain = self._build_retrieval_chain(
+                    vector_store, attempted_document_name
                 )
-                chunks = chunks[: self.max_document_chunks]
 
-            self.vector_store = FaissVectorStore.from_documents(
-                documents=chunks, embedding=self.embeddings
-            )
-            self._create_retrieval_chain()
-        except Exception as exc:
-            raise RuntimeError(f"Error loading document: {exc}") from exc
+                processing_report = self._processing_report(
+                    attempted_document_name=attempted_document_name,
+                    active_document_name=attempted_document_name,
+                    success=True,
+                    phase="complete",
+                    file_extension=file_extension,
+                    chunk_count=chunk_count,
+                    truncated=truncated,
+                    text_encoding=text_encoding,
+                )
+                return self._commit_active_document_state(
+                    document_name=attempted_document_name,
+                    vector_store=vector_store,
+                    retrieval_chain=retrieval_chain,
+                    processing_report=processing_report,
+                )
+            except Exception as exc:
+                status = self._record_processing_failure(
+                    attempted_document_name=attempted_document_name,
+                    phase=phase,
+                    file_extension=file_extension,
+                    chunk_count=chunk_count,
+                    truncated=truncated,
+                    text_encoding=text_encoding,
+                    error_message=str(exc),
+                )
+                raise DocumentProcessingError(
+                    f"Error loading document: {exc}", status
+                ) from exc
 
     def _is_document_identity_question(self, prompt: str) -> bool:
         lowered = prompt.lower()
@@ -1074,7 +1318,9 @@ class DocumentQA:
 
     def query(self, prompt: str, session_id: str = "default") -> str:
         """Answer a user query using retrieved document context."""
-        if not self.retrieval_chain:
+        active_state = self._snapshot_active_document_state()
+
+        if not active_state.retrieval_chain:
             return "Please upload and process a document first."
 
         if not self.llm:
@@ -1084,11 +1330,11 @@ class DocumentQA:
         if not clean_prompt:
             return "Please provide a question."
 
-        if self.current_document_name and self._is_document_identity_question(clean_prompt):
-            return f"The uploaded document is `{self.current_document_name}`."
+        if active_state.document_name and self._is_document_identity_question(clean_prompt):
+            return f"The uploaded document is `{active_state.document_name}`."
 
         try:
-            response = self.retrieval_chain.invoke(clean_prompt)
+            response = active_state.retrieval_chain.invoke(clean_prompt)
             if not isinstance(response, str):
                 response = str(response)
             response = response.strip()
