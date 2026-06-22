@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import unicodedata
+from dataclasses import dataclass
 from getpass import getpass
 from typing import Dict, List, Optional
 
@@ -151,6 +152,24 @@ UTF_NUL_FAMILY_ENCODINGS = {
     "utf_32_le",
 }
 ALLOWED_TEXT_CONTROL_CHARACTERS = {"\n", "\r", "\t", "\f"}
+
+
+@dataclass(frozen=True)
+class DocumentQAStatus:
+    profile_label: str
+    configured_backend: str
+    active_backend: str
+    active_model_label: str
+    loaded_model_id: Optional[str]
+    loaded_model_label: Optional[str]
+    embeddings_model: str
+    device: str
+    document_name: Optional[str]
+    ready_for_queries: bool
+
+    @property
+    def mock_mode(self) -> bool:
+        return self.active_backend == "mock"
 
 
 class FaissVectorStore:
@@ -678,6 +697,27 @@ class DocumentQA:
     def _ensure_llm_initialized(self) -> None:
         if self.llm is None:
             self._initialize_llm()
+
+    def status(self) -> DocumentQAStatus:
+        active_backend = self.active_llm_backend or self.llm_backend
+        active_model_label = self.loaded_model_label or self.loaded_model_id
+        if not active_model_label:
+            active_model_label = (
+                "MockLLM (fallback)" if active_backend == "mock" else self.model_id
+            )
+
+        return DocumentQAStatus(
+            profile_label="FAST" if self.fast_mode else "QUALITY",
+            configured_backend=self.llm_backend,
+            active_backend=active_backend,
+            active_model_label=active_model_label,
+            loaded_model_id=self.loaded_model_id,
+            loaded_model_label=self.loaded_model_label,
+            embeddings_model=self.embeddings_model,
+            device=self.device,
+            document_name=self.current_document_name,
+            ready_for_queries=self.llm is not None and self.retrieval_chain is not None,
+        )
 
     def _initialize_embeddings(self) -> None:
         if self.embeddings is not None:

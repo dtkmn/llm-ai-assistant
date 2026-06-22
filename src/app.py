@@ -8,9 +8,9 @@ import gradio as gr
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from DocumentQA import DocumentQA
+    from DocumentQA import DocumentQA, DocumentQAStatus
 except ImportError:
-    from src.DocumentQA import DocumentQA
+    from src.DocumentQA import DocumentQA, DocumentQAStatus
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -43,6 +43,23 @@ qa_system = DocumentQA(
 )
 
 
+def format_upload_status(uploaded_name: str, qa_status: DocumentQAStatus) -> str:
+    if qa_status.mock_mode:
+        return (
+            f"Document `{uploaded_name}` processed in mock mode. "
+            f"Profile: `{qa_status.profile_label}`. "
+            f"Active model: `{qa_status.active_model_label}`. "
+            "Answers will be demonstration responses until a real LLM backend is configured."
+        )
+    return (
+        f"Document `{uploaded_name}` indexed. "
+        f"Profile: `{qa_status.profile_label}`. "
+        f"Backend: `{qa_status.active_backend}`. "
+        f"Active model: `{qa_status.active_model_label}`. "
+        "Inference will be validated on the first question."
+    )
+
+
 def process_document(file, text_encoding="Auto"):
     """Process the uploaded document."""
     if file is None or not getattr(file, "name", None):
@@ -52,25 +69,7 @@ def process_document(file, text_encoding="Auto"):
         selected_encoding = TEXT_ENCODING_OPTIONS.get(text_encoding, "auto")
         qa_system.process_document(file.name, text_encoding=selected_encoding)
         uploaded_name = os.path.basename(file.name)
-        active_model = (
-            getattr(qa_system, "loaded_model_label", None)
-            or qa_system.loaded_model_id
-            or "MockLLM (fallback)"
-        )
-        active_backend = qa_system.active_llm_backend or qa_system.llm_backend
-        mode_label = "FAST" if qa_system.fast_mode else "QUALITY"
-        if active_backend == "mock":
-            return (
-                f"Document `{uploaded_name}` processed in mock mode. "
-                f"Profile: `{mode_label}`. Active model: `{active_model}`. "
-                "Answers will be demonstration responses until a real LLM backend is configured."
-            )
-        return (
-            f"Document `{uploaded_name}` indexed. "
-            f"Profile: `{mode_label}`. Backend: `{active_backend}`. "
-            f"Active model: `{active_model}`. "
-            "Inference will be validated on the first question."
-        )
+        return format_upload_status(uploaded_name, qa_system.status())
     except RuntimeError as exc:
         LOGGER.warning("Document processing failed: %s", exc)
         return str(exc)

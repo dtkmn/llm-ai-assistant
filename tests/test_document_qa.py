@@ -47,6 +47,33 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
     assert "demonstration response" in qa.query("What is Project Phoenix?")
 
+    status = qa.status()
+    assert status.profile_label == "FAST"
+    assert status.active_backend == "mock"
+    assert status.active_model_label == "MockLLM (fallback)"
+    assert status.document_name == "phoenix.txt"
+    assert status.ready_for_queries is True
+    assert status.mock_mode is True
+
+
+def test_status_reports_configured_backend_before_initialization():
+    qa = DocumentQA(
+        device="cpu",
+        fast_mode=False,
+        hf_token="real-token",
+        llm_backend="endpoint",
+        model_id="example/model",
+    )
+
+    status = qa.status()
+
+    assert status.profile_label == "QUALITY"
+    assert status.configured_backend == "endpoint"
+    assert status.active_backend == "endpoint"
+    assert status.active_model_label == "example/model"
+    assert status.ready_for_queries is False
+    assert status.mock_mode is False
+
 
 def test_text_loader_sets_source_metadata(tmp_path):
     document = tmp_path / "notes.md"

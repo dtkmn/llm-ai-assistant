@@ -1,17 +1,39 @@
 from types import SimpleNamespace
 
 from src import app
+from src.DocumentQA import DocumentQAStatus
 
 
 class FakeQA:
     fast_mode = True
     loaded_model_id = None
+    loaded_model_label = None
     active_llm_backend = "mock"
     llm_backend = "mock"
 
     def process_document(self, document_path, text_encoding=None):
         self.document_path = document_path
         self.text_encoding = text_encoding
+
+    def status(self):
+        active_backend = self.active_llm_backend or self.llm_backend
+        active_model_label = (
+            self.loaded_model_label
+            or self.loaded_model_id
+            or ("MockLLM (fallback)" if active_backend == "mock" else "unknown")
+        )
+        return DocumentQAStatus(
+            profile_label="FAST" if self.fast_mode else "QUALITY",
+            configured_backend=self.llm_backend,
+            active_backend=active_backend,
+            active_model_label=active_model_label,
+            loaded_model_id=self.loaded_model_id,
+            loaded_model_label=self.loaded_model_label,
+            embeddings_model="fake-embeddings",
+            device="cpu",
+            document_name=getattr(self, "document_path", None),
+            ready_for_queries=True,
+        )
 
 
 class FakeEndpointQA(FakeQA):
