@@ -1,7 +1,8 @@
 import pytest
 from langchain_core.embeddings import Embeddings
+from langchain_core.documents import Document
 
-from src.DocumentQA import DocumentQA, MockLLM
+from src.DocumentQA import DocumentQA, FaissVectorStore, MockLLM
 
 
 class FakeEmbeddings(Embeddings):
@@ -45,6 +46,232 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     assert qa.active_llm_backend == "mock"
     assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
     assert "demonstration response" in qa.query("What is Project Phoenix?")
+
+
+def test_text_loader_sets_source_metadata(tmp_path):
+    document = tmp_path / "notes.md"
+    document.write_text("# Notes\nProject Phoenix launch notes.", encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+
+    loaded_documents = qa._load_documents(str(document), ".md")
+
+    assert len(loaded_documents) == 1
+    assert loaded_documents[0].page_content.startswith("# Notes")
+    assert loaded_documents[0].metadata["source"] == str(document)
+
+
+@pytest.mark.parametrize(
+    ("encoding", "text"),
+    [
+        ("latin-1", "Café"),
+        ("latin-1", "Crème brûlée"),
+        ("latin-1", "Voilà"),
+        ("latin-1", "Résumé"),
+        ("latin-1", "naïve façade"),
+        ("latin-1", "piñata"),
+        ("latin-1", "paño Phoenix"),
+        ("latin-1", "mañana Phoenix"),
+        ("latin-1", "Málaga"),
+        ("latin-1", "Córdoba"),
+        ("latin-1", "García"),
+        ("latin-1", "María"),
+        ("latin-1", "Hélène"),
+        ("latin-1", "Québec"),
+        ("latin-1", "Montréal"),
+        ("latin-1", "Montréal Québec"),
+        ("latin-1", "München"),
+        ("latin-1", "Zürich"),
+        ("latin-1", "Düsseldorf"),
+        ("latin-1", "Göteborg"),
+        ("latin-1", "Köln"),
+        ("latin-1", "Jürgen"),
+        ("latin-1", "Bücher"),
+        ("latin-1", "Søren"),
+        ("latin-1", "København"),
+        ("latin-1", "Å"),
+        ("latin-1", "Ångström"),
+        ("latin-1", "Tromsø"),
+        ("latin-1", "smørrebrød"),
+        ("latin-1", "A Coruña"),
+        ("latin-1", "açaí"),
+        ("latin-1", "Ação"),
+        ("latin-1", "coração"),
+        ("latin-1", "João"),
+        ("latin-1", "mãe"),
+        ("latin-1", "smörgåsbord"),
+        ("latin-1", "El Niño"),
+        ("latin-1", "São Paulo"),
+        ("latin-1", "François"),
+        ("latin-1", "über"),
+        ("latin-1", "garçon"),
+        ("latin-1", "Area 10 m²"),
+        ("latin-1", "Volume 5 cm³"),
+        ("latin-1", "Temp 20 °C"),
+        ("latin-1", "Price £10"),
+        ("latin-1", "Half ½ cup"),
+        ("latin-1", "Café Phoenix résumé"),
+        ("cp1252", "Café Phoenix — résumé"),
+        ("cp1252", "Price €10 — Phoenix"),
+        ("cp1252", "¿Cómo estás? Phoenix"),
+        ("cp1252", "Trademark ™ Phoenix"),
+    ],
+)
+def test_text_loader_detects_common_non_utf8_encodings(tmp_path, encoding, text):
+    document = tmp_path / "legacy.txt"
+    document.write_bytes(text.encode(encoding))
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+
+    loaded_documents = qa._load_documents(
+        str(document), ".txt", text_encoding=encoding
+    )
+
+    assert loaded_documents[0].page_content == text
+    assert "\ufffd" not in loaded_documents[0].page_content
+
+
+@pytest.mark.parametrize(
+    ("encoding", "text"),
+    [
+        ("utf-8", "Café Phoenix"),
+        ("utf-8", "Résumé Phoenix"),
+        ("utf-8", "München Phoenix"),
+        ("utf-8", "Price €10 — Phoenix"),
+        ("utf-8-sig", "Café Phoenix"),
+        ("latin-1", "Göteborg Phoenix"),
+        ("cp1252", "Price €10 — Phoenix"),
+    ],
+)
+def test_text_loader_utf8_or_western_mode_preserves_text(tmp_path, encoding, text):
+    document = tmp_path / "default_text.txt"
+    document.write_bytes(text.encode(encoding))
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+
+    loaded_documents = qa._load_documents(
+        str(document), ".txt", text_encoding="utf-8-or-western"
+    )
+
+    assert loaded_documents[0].page_content == text
+    assert "Ã" not in loaded_documents[0].page_content
+    assert "â" not in loaded_documents[0].page_content
+
+
+@pytest.mark.parametrize(
+    ("encoding", "text"),
+    [
+        ("utf-16-le", "Project Phoenix"),
+        ("utf-16-be", "Project Phoenix"),
+        ("utf-32-le", "Project Phoenix"),
+        ("utf-32-be", "Project Phoenix"),
+        ("utf-32", "Project Phoenix"),
+    ],
+)
+def test_text_loader_detects_utf_family_encodings(tmp_path, encoding, text):
+    document = tmp_path / "unicode.txt"
+    document.write_bytes(text.encode(encoding))
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+
+    loaded_documents = qa._load_documents(str(document), ".txt")
+
+    assert loaded_documents[0].page_content == text
+    assert "\x00" not in loaded_documents[0].page_content
+
+
+def test_text_loader_uses_confident_detector_for_legacy_encoding(tmp_path):
+    text = "Zażółć gęślą jaźń"
+    document = tmp_path / "polish.txt"
+    document.write_bytes(text.encode("cp1250"))
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+
+    loaded_documents = qa._load_documents(str(document), ".txt")
+
+    assert loaded_documents[0].page_content == text
+
+
+@pytest.mark.parametrize(
+    ("encoding", "text"),
+    [
+        ("cp1250", "Dvořák Phoenix"),
+        ("cp1250", "město Phoenix"),
+        ("cp1251", "Привет Phoenix"),
+        ("cp1254", "İstanbul Phoenix"),
+        ("cp1257", "māja Phoenix"),
+        ("cp1257", "Rīga Phoenix"),
+    ],
+)
+def test_text_loader_uses_explicit_legacy_encoding(tmp_path, encoding, text):
+    document = tmp_path / "legacy.txt"
+    document.write_bytes(text.encode(encoding))
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+
+    loaded_documents = qa._load_documents(
+        str(document), ".txt", text_encoding=encoding
+    )
+
+    assert loaded_documents[0].page_content == text
+
+
+def test_text_loader_reports_invalid_explicit_encoding(tmp_path):
+    document = tmp_path / "legacy.txt"
+    document.write_bytes("Phoenix".encode("utf-8"))
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+
+    with pytest.raises(ValueError, match="Could not decode text document"):
+        qa._load_documents(str(document), ".txt", text_encoding="not-a-codec")
+
+
+@pytest.mark.parametrize(
+    ("encoding", "text", "mojibake"),
+    [
+        ("cp1251", "Привет Phoenix", "Ïðèâåò Phoenix"),
+        ("cp1251", "аб Phoenix", "àá Phoenix"),
+        ("cp1251", "я и ты Phoenix", "ÿ è òû Phoenix"),
+        ("cp1251", "Привет — Phoenix", "Ïðèâåò — Phoenix"),
+        ("cp1251", "Привет – Phoenix", "Ïðèâåò – Phoenix"),
+        ("cp1251", "Привет… Phoenix", "Ïðèâåò… Phoenix"),
+        ("cp1251", "Ј Phoenix", "£ Phoenix"),
+        ("cp1251", "Јован Phoenix", "£îâàí Phoenix"),
+        ("cp1251", "Ђ Phoenix", "€ Phoenix"),
+        ("cp1251", "№ Phoenix", "¹ Phoenix"),
+        ("gb18030", "项目 Phoenix", "ÏîÄ¿ Phoenix"),
+        ("cp1250", "Ł10 Phoenix", "£10 Phoenix"),
+        ("cp1250", "Łódź Phoenix", "£ódŸ Phoenix"),
+        ("cp1254", "İstanbul Phoenix", "Ýstanbul Phoenix"),
+        ("cp1257", "māja Phoenix", "mâja Phoenix"),
+        ("cp1257", "Rīga Phoenix", "Rîga Phoenix"),
+        ("cp1250", "Dvořák Phoenix", "Dvoøák Phoenix"),
+        ("cp1250", "město Phoenix", "mìsto Phoenix"),
+        ("cp1250", "książka Phoenix", "ksi¹¿ka Phoenix"),
+        ("cp1250", "Dąb Phoenix", "D¹b Phoenix"),
+        ("cp1250", "zażalenie Phoenix", "za¿alenie Phoenix"),
+        ("iso-8859-2", "Łódź Phoenix", "£ód¼ Phoenix"),
+        ("big5", "項目 Phoenix", "¶µ¥Ø Phoenix"),
+    ],
+)
+def test_text_loader_rejects_ambiguous_legacy_text_instead_of_mojibake(
+    tmp_path, encoding, text, mojibake
+):
+    document = tmp_path / "ambiguous.txt"
+    document.write_bytes(text.encode(encoding))
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+
+    with pytest.raises(ValueError, match="Could not decode text document"):
+        qa._load_documents(str(document), ".txt")
+
+    assert document.read_bytes().decode("cp1252") == mojibake
+
+
+def test_faiss_vector_store_returns_relevant_documents():
+    documents = [
+        Document(page_content="Project Phoenix launch notes"),
+        Document(page_content="Unrelated accounting memo"),
+    ]
+    vector_store = FaissVectorStore.from_documents(documents, FakeEmbeddings())
+
+    results = vector_store.as_retriever(
+        search_type="mmr", search_kwargs={"k": 1, "fetch_k": 2}
+    ).invoke("Phoenix project")
+
+    assert results == [documents[0]]
 
 
 def test_rejects_unsupported_file_type_before_model_initialization(tmp_path):
