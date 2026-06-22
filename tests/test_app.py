@@ -3,9 +3,12 @@ from types import SimpleNamespace
 
 from src import app
 from src.DocumentQA import (
+    AnswerCitation,
+    AnswerTrace,
     DocumentProcessingError,
     DocumentProcessingReport,
     DocumentQAStatus,
+    QueryResult,
 )
 
 
@@ -63,6 +66,34 @@ class FakeQA:
             document_name=self.current_document_name,
             ready_for_queries=True,
             processing_report=self.latest_processing_report,
+        )
+
+    def query_with_trace(self, message):
+        active_backend = self.active_llm_backend or self.llm_backend
+        active_model_label = (
+            self.loaded_model_label
+            or self.loaded_model_id
+            or ("MockLLM (fallback)" if active_backend == "mock" else "unknown")
+        )
+        answer = "Project Phoenix is described in the uploaded document."
+        return QueryResult(
+            answer=answer,
+            trace=AnswerTrace(
+                question=message,
+                document_name=self.current_document_name,
+                backend=active_backend,
+                model_label=active_model_label,
+                retrieved_chunk_count=1,
+                citations=[
+                    AnswerCitation(
+                        citation_id=1,
+                        source_name=self.current_document_name or "demo.txt",
+                        page=None,
+                        chunk_index=0,
+                        excerpt="Project Phoenix is a document QA assistant.",
+                    )
+                ],
+            ),
         )
 
 
@@ -291,3 +322,66 @@ def test_process_document_unexpected_error_uses_pre_upload_status(
     assert runtime["phase"] == "unexpected"
     assert runtime["last_success"] is False
     assert runtime["last_error"] == "unexpected boom"
+
+
+def test_format_answer_trace_includes_citations():
+    result = QueryResult(
+        answer="Project Phoenix launches in June 2026 [1].",
+        trace=AnswerTrace(
+            question="When does it launch?",
+            document_name="phoenix.txt",
+            backend="mock",
+            model_label="MockLLM (fallback)",
+            retrieved_chunk_count=1,
+            citations=[
+                AnswerCitation(
+                    citation_id=1,
+                    source_name="phoenix.txt",
+                    page=None,
+                    chunk_index=0,
+                    excerpt="The launch date is June 2026.",
+                )
+            ],
+        ),
+    )
+
+    trace = json.loads(app.format_answer_trace(result))
+
+    assert trace["question"] == "When does it launch?"
+    assert trace["answer"] == "Project Phoenix launches in June 2026 [1]."
+    assert trace["document"] == "phoenix.txt"
+    assert trace["retrieved_chunk_count"] == 1
+    assert trace["citations"][0]["id"] == 1
+    assert trace["citations"][0]["source"] == "phoenix.txt"
+    assert trace["citations"][0]["chunk"] == 1
+    assert "June 2026" in trace["citations"][0]["excerpt"]
+    assert trace["error"] is None
+
+
+def test_chat_returns_answer_and_trace(monkeypatch):
+    fake_qa = FakeQA()
+    fake_qa.current_document_name = "demo.txt"
+    monkeypatch.setattr(app, "qa_system", fake_qa)
+
+    history, message, answer_trace = app.chat("What is Project Phoenix?", [])
+
+    assert message == ""
+    assert history[-1]["role"] == "assistant"
+    assert "Project Phoenix" in history[-1]["content"]
+    trace = json.loads(answer_trace)
+    assert trace["question"] == "What is Project Phoenix?"
+    assert trace["document"] == "demo.txt"
+    assert trace["retrieved_chunk_count"] == 1
+    assert trace["citations"][0]["source"] == "demo.txt"
+
+
+def test_clear_chat_resets_answer_trace(monkeypatch):
+    fake_qa = FakeQA()
+    fake_qa.chat_history = [{"question": "old"}]
+    monkeypatch.setattr(app, "qa_system", fake_qa)
+
+    history, answer_trace = app.clear_chat()
+
+    assert history == []
+    assert fake_qa.chat_history == []
+    assert json.loads(answer_trace)["citations"] == []
