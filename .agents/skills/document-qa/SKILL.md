@@ -33,6 +33,10 @@ decoding, and reproducible validation.
 - `hf_token="dummy"` is valid only for mock/demo paths.
 - Upload status must say `indexed` for real backends, because endpoint readiness
   is not proven until the first inference call.
+- Upload replacement must be transactional. Failed uploads must not replace the
+  previous successful document, vector store, retrieval chain, or query behavior.
+- UI upload/runtime status must come from `DocumentQA.status()` and the latest
+  `DocumentProcessingReport`, not ad hoc reads of internal attributes.
 - Text encoding default is `Auto`. Ambiguous non-UTF legacy files must not be
   silently decoded as Western text.
 - Explicit encoding selections are user intent. Preserve valid CP1250, CP1251,
@@ -53,6 +57,8 @@ decoding, and reproducible validation.
 For ingestion or encoding changes:
 
 - `python -m pytest tests/test_document_qa.py -q`
+- Include replacement-failure tests that prove the previous document remains
+  active and queryable.
 - Add hostile tests for env pollution, mojibake, invalid bytes, or unsupported
   explicit encodings as appropriate.
 

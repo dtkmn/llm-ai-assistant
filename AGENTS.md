@@ -30,6 +30,11 @@ Primary runtime files:
   invalid. Mock mode must be explicit or an `auto` demo fallback.
 - Do not let UI status imply inference readiness before inference has actually
   happened. Document upload means indexed, not proven ready.
+- Document upload replacement must be transactional. Failed uploads must preserve
+  the previous successful document, vector store, retrieval chain, and query
+  behavior while recording the failed attempt in the processing report.
+- `DocumentQA.status()` and its processing report are the source of truth for UI
+  status. UI code and tests should not inspect random internal attributes.
 - Text upload default is `Auto`. Ambiguous legacy bytes must fail closed instead
   of mojibaking. `UTF-8 / Western` and explicit legacy encodings are opt-ins.
 - Docker image publication belongs to `main` only. `dev`, PR, and manual workflow
@@ -57,6 +62,8 @@ Use this loop for every non-trivial change:
 
 - Prefer explicit status/configuration objects over UI code reading random
   internal attributes.
+- Treat failed replacement uploads as hostile state-integrity cases. Assert the
+  old document is still active and queryable after every failed upload path.
 - Keep `DocumentQA` honest before making it clever. Reliability beats agentic
   theater.
 - Add abstractions only when they reduce risk or remove repeated policy logic.

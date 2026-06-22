@@ -1,6 +1,8 @@
+import json
 import logging
 import os
 import sys
+from dataclasses import replace
 
 import gradio as gr
 
@@ -8,9 +10,21 @@ import gradio as gr
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from DocumentQA import DocumentQA, DocumentQAStatus
+    from .DocumentQA import (
+        MAX_DOCUMENT_CHUNKS,
+        DocumentProcessingError,
+        DocumentProcessingReport,
+        DocumentQA,
+        DocumentQAStatus,
+    )
 except ImportError:
-    from src.DocumentQA import DocumentQA, DocumentQAStatus
+    from DocumentQA import (
+        MAX_DOCUMENT_CHUNKS,
+        DocumentProcessingError,
+        DocumentProcessingReport,
+        DocumentQA,
+        DocumentQAStatus,
+    )
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -44,35 +58,131 @@ qa_system = DocumentQA(
 
 
 def format_upload_status(uploaded_name: str, qa_status: DocumentQAStatus) -> str:
+    report = qa_status.processing_report
+    document_name = (
+        report.attempted_document_name
+        if report and report.attempted_document_name
+        else uploaded_name
+    )
+
+    if report and not report.success:
+        active_message = (
+            f"Active document remains `{report.active_document_name}`."
+            if report.active_document_name
+            else "No active document is loaded."
+        )
+        return (
+            f"Document `{document_name}` failed during `{report.phase}`. "
+            f"{active_message} Error: {report.error_message}"
+        )
+
+    chunk_message = ""
+    if report:
+        chunk_message = f" Chunks: `{report.chunk_count}`"
+        if report.truncated:
+            chunk_message += f" (truncated at `{report.max_chunk_limit}`)."
+        else:
+            chunk_message += "."
+
     if qa_status.mock_mode:
         return (
-            f"Document `{uploaded_name}` processed in mock mode. "
+            f"Document `{document_name}` processed in mock mode. "
             f"Profile: `{qa_status.profile_label}`. "
             f"Active model: `{qa_status.active_model_label}`. "
+            f"{chunk_message} "
             "Answers will be demonstration responses until a real LLM backend is configured."
         )
     return (
-        f"Document `{uploaded_name}` indexed. "
+        f"Document `{document_name}` indexed. "
         f"Profile: `{qa_status.profile_label}`. "
         f"Backend: `{qa_status.active_backend}`. "
         f"Active model: `{qa_status.active_model_label}`. "
+        f"{chunk_message} "
         "Inference will be validated on the first question."
     )
+
+
+def format_runtime_status(qa_status: DocumentQAStatus) -> str:
+    report = qa_status.processing_report
+    runtime_status = {
+        "active_document": qa_status.document_name,
+        "last_attempted_document": (
+            report.attempted_document_name if report else None
+        ),
+        "backend": qa_status.active_backend,
+        "model": qa_status.active_model_label,
+        "profile": qa_status.profile_label,
+        "ready_for_queries": qa_status.ready_for_queries,
+        "readiness_scope": "retrieval_pipeline",
+        "inference_validated": False,
+        "last_success": report.success if report else None,
+        "phase": report.phase if report else None,
+        "file_extension": report.file_extension if report else None,
+        "chunk_count": report.chunk_count if report else 0,
+        "truncated": report.truncated if report else False,
+        "max_chunk_limit": report.max_chunk_limit if report else None,
+        "text_encoding_mode": report.text_encoding_mode if report else None,
+        "last_error": report.error_message if report else None,
+    }
+    return json.dumps(runtime_status, indent=2)
+
+
+def status_with_unexpected_upload_error(
+    qa_status: DocumentQAStatus,
+    uploaded_name: str,
+    selected_encoding: str,
+    exc: Exception,
+) -> DocumentQAStatus:
+    previous_report = qa_status.processing_report
+    max_chunk_limit = (
+        previous_report.max_chunk_limit if previous_report else MAX_DOCUMENT_CHUNKS
+    )
+    failure_report = DocumentProcessingReport(
+        attempted_document_name=uploaded_name,
+        active_document_name=qa_status.document_name,
+        success=False,
+        phase="unexpected",
+        file_extension=os.path.splitext(uploaded_name)[1].lower() or None,
+        chunk_count=0,
+        truncated=False,
+        max_chunk_limit=max_chunk_limit,
+        text_encoding_mode=selected_encoding or "auto",
+        backend=qa_status.active_backend,
+        model_label=qa_status.active_model_label,
+        error_message=str(exc),
+    )
+    return replace(qa_status, processing_report=failure_report)
 
 
 def process_document(file, text_encoding="Auto"):
     """Process the uploaded document."""
     if file is None or not getattr(file, "name", None):
-        return "No document uploaded."
+        return "No document uploaded.", format_runtime_status(qa_system.status())
 
+    uploaded_name = os.path.basename(file.name)
+    selected_encoding = TEXT_ENCODING_OPTIONS.get(text_encoding, "auto")
+    pre_upload_status = qa_system.status()
     try:
-        selected_encoding = TEXT_ENCODING_OPTIONS.get(text_encoding, "auto")
-        qa_system.process_document(file.name, text_encoding=selected_encoding)
-        uploaded_name = os.path.basename(file.name)
-        return format_upload_status(uploaded_name, qa_system.status())
-    except RuntimeError as exc:
+        qa_status = qa_system.process_document(
+            file.name, text_encoding=selected_encoding
+        )
+        return format_upload_status(uploaded_name, qa_status), format_runtime_status(
+            qa_status
+        )
+    except DocumentProcessingError as exc:
         LOGGER.warning("Document processing failed: %s", exc)
-        return str(exc)
+        qa_status = exc.status
+        return format_upload_status(uploaded_name, qa_status), format_runtime_status(
+            qa_status
+        )
+    except RuntimeError as exc:
+        LOGGER.exception("Unexpected document processing failure: %s", exc)
+        qa_status = status_with_unexpected_upload_error(
+            pre_upload_status, uploaded_name, selected_encoding, exc
+        )
+        return format_upload_status(uploaded_name, qa_status), format_runtime_status(
+            qa_status
+        )
 
 
 def chat(message, history):
@@ -105,6 +215,12 @@ with gr.Blocks() as demo:
             )
             upload_button = gr.Button("Process Document")
             upload_status = gr.Textbox(label="Status")
+            runtime_status = gr.Textbox(
+                label="Runtime Status",
+                value=format_runtime_status(qa_system.status()),
+                lines=12,
+                interactive=False,
+            )
 
         with gr.Column():
             chatbot = gr.Chatbot()
@@ -112,7 +228,9 @@ with gr.Blocks() as demo:
             clear = gr.Button("Clear")
 
     upload_button.click(
-        process_document, inputs=[file_upload, text_encoding], outputs=upload_status
+        process_document,
+        inputs=[file_upload, text_encoding],
+        outputs=[upload_status, runtime_status],
     )
     msg.submit(chat, [msg, chatbot], [chatbot, msg])
     clear.click(clear_chat, None, chatbot, queue=False)

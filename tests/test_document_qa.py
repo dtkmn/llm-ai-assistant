@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
@@ -20,6 +22,19 @@ class FakeEmbeddings(Embeddings):
             float(lower.count("phoenix")),
             float(lower.count("launch")),
         ]
+
+
+def create_processed_mock_qa(tmp_path):
+    document = tmp_path / "phoenix.txt"
+    document.write_text(
+        "Project Phoenix is a document QA assistant. "
+        "The launch date is June 2026.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa.embeddings = FakeEmbeddings()
+    qa.process_document(str(document))
+    return qa, document
 
 
 def test_query_before_document_asks_for_upload_first():
@@ -54,6 +69,19 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     assert status.document_name == "phoenix.txt"
     assert status.ready_for_queries is True
     assert status.mock_mode is True
+    assert status.processing_report is not None
+    assert status.processing_report.attempted_document_name == "phoenix.txt"
+    assert status.processing_report.active_document_name == "phoenix.txt"
+    assert status.processing_report.success is True
+    assert status.processing_report.phase == "complete"
+    assert status.processing_report.file_extension == ".txt"
+    assert status.processing_report.chunk_count > 0
+    assert status.processing_report.truncated is False
+    assert status.processing_report.max_chunk_limit == qa.max_document_chunks
+    assert status.processing_report.text_encoding_mode == "auto"
+    assert status.processing_report.backend == "mock"
+    assert status.processing_report.model_label == "MockLLM (fallback)"
+    assert status.processing_report.error_message is None
 
 
 def test_status_reports_configured_backend_before_initialization():
@@ -73,6 +101,261 @@ def test_status_reports_configured_backend_before_initialization():
     assert status.active_model_label == "example/model"
     assert status.ready_for_queries is False
     assert status.mock_mode is False
+    assert status.processing_report is None
+
+
+def test_failed_unsupported_replacement_keeps_previous_document_queryable(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    previous_vector_store = qa.vector_store
+    previous_retrieval_chain = qa.retrieval_chain
+    replacement = tmp_path / "replacement.csv"
+    replacement.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Unsupported file type: .csv"):
+        qa.process_document(str(replacement))
+
+    assert qa.current_document_name == "phoenix.txt"
+    assert qa.vector_store is previous_vector_store
+    assert qa.retrieval_chain is previous_retrieval_chain
+    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    report = qa.status().processing_report
+    assert report.success is False
+    assert report.phase == "validate"
+    assert report.attempted_document_name == "replacement.csv"
+    assert report.active_document_name == "phoenix.txt"
+    assert report.file_extension == ".csv"
+    assert report.chunk_count == 0
+    assert "Unsupported file type: .csv" in report.error_message
+
+
+def test_query_uses_active_state_snapshot_not_legacy_mixed_state(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+
+    qa.current_document_name = "replacement.txt"
+    qa.vector_store = None
+    qa.retrieval_chain = None
+
+    assert qa.status().document_name == "phoenix.txt"
+    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+
+
+def test_concurrent_replacement_uploads_are_serialized(monkeypatch, tmp_path):
+    first = tmp_path / "first.txt"
+    first.write_text("First document for Project Phoenix.", encoding="utf-8")
+    second = tmp_path / "second.txt"
+    second.write_text("Second document for Project Phoenix.", encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa.embeddings = FakeEmbeddings()
+    original_process_document = DocumentQA.process_document
+    original_load_documents = DocumentQA._load_documents
+    second_upload_attempted = threading.Event()
+    first_load_started = threading.Event()
+    second_load_started = threading.Event()
+    release_first_load = threading.Event()
+    errors = []
+
+    def tracked_process_document(self, document_path, text_encoding=None):
+        if document_path == str(second):
+            second_upload_attempted.set()
+        return original_process_document(
+            self, document_path, text_encoding=text_encoding
+        )
+
+    def delayed_first_load(self, document_path, file_extension, text_encoding=None):
+        if document_path == str(first):
+            first_load_started.set()
+            assert release_first_load.wait(timeout=5)
+        elif document_path == str(second):
+            second_load_started.set()
+        return original_load_documents(
+            self, document_path, file_extension, text_encoding=text_encoding
+        )
+
+    def process(path):
+        try:
+            qa.process_document(str(path))
+        except Exception as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(DocumentQA, "process_document", tracked_process_document)
+    monkeypatch.setattr(DocumentQA, "_load_documents", delayed_first_load)
+
+    first_thread = threading.Thread(target=process, args=(first,))
+    first_thread.start()
+    assert first_load_started.wait(timeout=5)
+
+    second_thread = threading.Thread(target=process, args=(second,))
+    second_thread.start()
+    assert second_upload_attempted.wait(timeout=5)
+    assert not second_load_started.wait(timeout=0.2)
+    release_first_load.set()
+
+    first_thread.join(timeout=5)
+    second_thread.join(timeout=5)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert second_load_started.is_set()
+    assert errors == []
+    assert qa.status().document_name == "second.txt"
+    assert qa.query("Which file did I upload?") == "The uploaded document is `second.txt`."
+
+
+def test_failed_ambiguous_text_replacement_keeps_previous_document_queryable(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    previous_vector_store = qa.vector_store
+    previous_retrieval_chain = qa.retrieval_chain
+    replacement = tmp_path / "ambiguous.txt"
+    replacement.write_bytes("Привет Phoenix".encode("cp1251"))
+
+    with pytest.raises(RuntimeError, match="Could not decode text document"):
+        qa.process_document(str(replacement))
+
+    assert qa.current_document_name == "phoenix.txt"
+    assert qa.vector_store is previous_vector_store
+    assert qa.retrieval_chain is previous_retrieval_chain
+    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    report = qa.status().processing_report
+    assert report.success is False
+    assert report.phase == "load"
+    assert report.attempted_document_name == "ambiguous.txt"
+    assert report.active_document_name == "phoenix.txt"
+    assert report.file_extension == ".txt"
+    assert report.text_encoding_mode == "auto"
+    assert "Could not decode text document" in report.error_message
+
+
+def test_failed_embedding_initialization_keeps_previous_document_queryable(
+    monkeypatch, tmp_path
+):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    previous_vector_store = qa.vector_store
+    previous_retrieval_chain = qa.retrieval_chain
+    qa.embeddings = None
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_text("Replacement document should not commit.", encoding="utf-8")
+
+    def fail_initialize_embeddings(self):
+        self.embeddings_error = "boom"
+        self.embeddings = None
+
+    monkeypatch.setattr(DocumentQA, "_initialize_embeddings", fail_initialize_embeddings)
+
+    with pytest.raises(RuntimeError, match="Embedding model is unavailable"):
+        qa.process_document(str(replacement))
+
+    assert qa.current_document_name == "phoenix.txt"
+    assert qa.vector_store is previous_vector_store
+    assert qa.retrieval_chain is previous_retrieval_chain
+    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    report = qa.status().processing_report
+    assert report.success is False
+    assert report.phase == "initialize_embeddings"
+    assert report.attempted_document_name == "replacement.txt"
+    assert report.active_document_name == "phoenix.txt"
+    assert "Embedding model is unavailable" in report.error_message
+
+
+def test_empty_replacement_keeps_previous_document_queryable(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    previous_vector_store = qa.vector_store
+    previous_retrieval_chain = qa.retrieval_chain
+    replacement = tmp_path / "empty.txt"
+    replacement.write_text("", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="No text chunks were generated"):
+        qa.process_document(str(replacement))
+
+    assert qa.current_document_name == "phoenix.txt"
+    assert qa.vector_store is previous_vector_store
+    assert qa.retrieval_chain is previous_retrieval_chain
+    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    report = qa.status().processing_report
+    assert report.success is False
+    assert report.phase == "split"
+    assert report.attempted_document_name == "empty.txt"
+    assert report.active_document_name == "phoenix.txt"
+    assert report.chunk_count == 0
+    assert "No text chunks were generated" in report.error_message
+
+
+def test_index_failure_keeps_previous_document_queryable(monkeypatch, tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    previous_vector_store = qa.vector_store
+    previous_retrieval_chain = qa.retrieval_chain
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_text("Replacement document should not commit.", encoding="utf-8")
+
+    def fail_from_documents(documents, embedding):
+        raise ValueError("index boom")
+
+    monkeypatch.setattr(FaissVectorStore, "from_documents", fail_from_documents)
+
+    with pytest.raises(RuntimeError, match="index boom"):
+        qa.process_document(str(replacement))
+
+    assert qa.current_document_name == "phoenix.txt"
+    assert qa.vector_store is previous_vector_store
+    assert qa.retrieval_chain is previous_retrieval_chain
+    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    report = qa.status().processing_report
+    assert report.success is False
+    assert report.phase == "index"
+    assert report.attempted_document_name == "replacement.txt"
+    assert report.active_document_name == "phoenix.txt"
+    assert report.chunk_count > 0
+    assert "index boom" in report.error_message
+
+
+def test_chain_failure_keeps_previous_document_queryable(monkeypatch, tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    previous_vector_store = qa.vector_store
+    previous_retrieval_chain = qa.retrieval_chain
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_text("Replacement document should not commit.", encoding="utf-8")
+
+    def fail_build_retrieval_chain(self, vector_store, document_name):
+        raise RuntimeError("chain boom")
+
+    monkeypatch.setattr(
+        DocumentQA, "_build_retrieval_chain", fail_build_retrieval_chain
+    )
+
+    with pytest.raises(RuntimeError, match="chain boom"):
+        qa.process_document(str(replacement))
+
+    assert qa.current_document_name == "phoenix.txt"
+    assert qa.vector_store is previous_vector_store
+    assert qa.retrieval_chain is previous_retrieval_chain
+    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    report = qa.status().processing_report
+    assert report.success is False
+    assert report.phase == "chain"
+    assert report.attempted_document_name == "replacement.txt"
+    assert report.active_document_name == "phoenix.txt"
+    assert report.chunk_count > 0
+    assert "chain boom" in report.error_message
+
+
+def test_successful_upload_report_records_truncation(tmp_path):
+    document = tmp_path / "long.txt"
+    document.write_text(("Project Phoenix launch notes.\n" * 500), encoding="utf-8")
+    qa = DocumentQA(
+        fast_mode=True,
+        hf_token="dummy",
+        llm_backend="mock",
+        max_document_chunks=1,
+    )
+    qa.embeddings = FakeEmbeddings()
+
+    qa.process_document(str(document))
+
+    report = qa.status().processing_report
+    assert report.success is True
+    assert report.phase == "complete"
+    assert report.chunk_count == 1
+    assert report.truncated is True
+    assert report.max_chunk_limit == 1
 
 
 def test_text_loader_sets_source_metadata(tmp_path):

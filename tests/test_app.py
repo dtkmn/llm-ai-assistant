@@ -1,7 +1,12 @@
+import json
 from types import SimpleNamespace
 
 from src import app
-from src.DocumentQA import DocumentQAStatus
+from src.DocumentQA import (
+    DocumentProcessingError,
+    DocumentProcessingReport,
+    DocumentQAStatus,
+)
 
 
 class FakeQA:
@@ -10,10 +15,34 @@ class FakeQA:
     loaded_model_label = None
     active_llm_backend = "mock"
     llm_backend = "mock"
+    current_document_name = None
+    latest_processing_report = None
 
     def process_document(self, document_path, text_encoding=None):
         self.document_path = document_path
         self.text_encoding = text_encoding
+        self.current_document_name = document_path.split("/")[-1]
+        active_backend = self.active_llm_backend or self.llm_backend
+        active_model_label = (
+            self.loaded_model_label
+            or self.loaded_model_id
+            or ("MockLLM (fallback)" if active_backend == "mock" else "unknown")
+        )
+        self.latest_processing_report = DocumentProcessingReport(
+            attempted_document_name=self.current_document_name,
+            active_document_name=self.current_document_name,
+            success=True,
+            phase="complete",
+            file_extension=".txt",
+            chunk_count=1,
+            truncated=False,
+            max_chunk_limit=2000,
+            text_encoding_mode=text_encoding or "auto",
+            backend=active_backend,
+            model_label=active_model_label,
+            error_message=None,
+        )
+        return self.status()
 
     def status(self):
         active_backend = self.active_llm_backend or self.llm_backend
@@ -31,8 +60,9 @@ class FakeQA:
             loaded_model_label=self.loaded_model_label,
             embeddings_model="fake-embeddings",
             device="cpu",
-            document_name=getattr(self, "document_path", None),
+            document_name=self.current_document_name,
             ready_for_queries=True,
+            processing_report=self.latest_processing_report,
         )
 
 
@@ -48,17 +78,52 @@ class FakeCustomEndpointQA(FakeEndpointQA):
     loaded_model_label = "Custom endpoint (https://example.invalid)"
 
 
+def processed_report(
+    *,
+    document_name="good.txt",
+    success=True,
+    phase="complete",
+    error_message=None,
+):
+    return DocumentProcessingReport(
+        attempted_document_name=document_name,
+        active_document_name=document_name,
+        success=success,
+        phase=phase,
+        file_extension=".txt",
+        chunk_count=1 if success else 0,
+        truncated=False,
+        max_chunk_limit=2000,
+        text_encoding_mode="auto",
+        backend="mock",
+        model_label="MockLLM (fallback)",
+        error_message=error_message,
+    )
+
+
 def test_process_document_reports_mock_mode_without_success_claim(monkeypatch, tmp_path):
     document = tmp_path / "demo.txt"
     document.write_text("demo", encoding="utf-8")
     fake_qa = FakeQA()
     monkeypatch.setattr(app, "qa_system", fake_qa)
 
-    status = app.process_document(SimpleNamespace(name=str(document)))
+    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
 
     assert "processed in mock mode" in status
     assert "processed successfully" not in status
     assert "demonstration responses" in status
+    assert "Chunks: `1`" in status
+    runtime = json.loads(runtime_status)
+    assert runtime["active_document"] == "demo.txt"
+    assert runtime["last_attempted_document"] == "demo.txt"
+    assert runtime["ready_for_queries"] is True
+    assert runtime["readiness_scope"] == "retrieval_pipeline"
+    assert runtime["inference_validated"] is False
+    assert runtime["last_success"] is True
+    assert runtime["file_extension"] == ".txt"
+    assert runtime["chunk_count"] == 1
+    assert runtime["max_chunk_limit"] == 2000
+    assert runtime["last_error"] is None
     assert fake_qa.text_encoding == "auto"
 
 
@@ -72,7 +137,7 @@ def test_process_document_passes_selected_text_encoding(monkeypatch, tmp_path):
     fake_qa = FakeQA()
     monkeypatch.setattr(app, "qa_system", fake_qa)
 
-    status = app.process_document(
+    status, _runtime_status = app.process_document(
         SimpleNamespace(name=str(document)), "Cyrillic (Windows-1251)"
     )
 
@@ -88,7 +153,7 @@ def test_process_document_passes_utf8_or_western_only_when_selected(
     fake_qa = FakeQA()
     monkeypatch.setattr(app, "qa_system", fake_qa)
 
-    status = app.process_document(
+    status, _runtime_status = app.process_document(
         SimpleNamespace(name=str(document)), "UTF-8 / Western"
     )
 
@@ -101,11 +166,17 @@ def test_process_document_reports_endpoint_as_indexed_not_ready(monkeypatch, tmp
     document.write_text("demo", encoding="utf-8")
     monkeypatch.setattr(app, "qa_system", FakeEndpointQA())
 
-    status = app.process_document(SimpleNamespace(name=str(document)))
+    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
 
     assert "indexed" in status
     assert "processed successfully" not in status
     assert "Inference will be validated on the first question" in status
+    runtime = json.loads(runtime_status)
+    assert runtime["backend"] == "endpoint"
+    assert runtime["model"] == "Qwen/Qwen2.5-1.5B-Instruct"
+    assert runtime["ready_for_queries"] is True
+    assert runtime["readiness_scope"] == "retrieval_pipeline"
+    assert runtime["inference_validated"] is False
 
 
 def test_process_document_uses_custom_endpoint_label(monkeypatch, tmp_path):
@@ -113,7 +184,110 @@ def test_process_document_uses_custom_endpoint_label(monkeypatch, tmp_path):
     document.write_text("demo", encoding="utf-8")
     monkeypatch.setattr(app, "qa_system", FakeCustomEndpointQA())
 
-    status = app.process_document(SimpleNamespace(name=str(document)))
+    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
 
     assert "Custom endpoint (https://example.invalid)" in status
     assert "Qwen" not in status
+    assert (
+        json.loads(runtime_status)["model"]
+        == "Custom endpoint (https://example.invalid)"
+    )
+
+
+def test_process_document_reports_failure_without_losing_active_status(
+    monkeypatch, tmp_path
+):
+    document = tmp_path / "bad.txt"
+    document.write_text("bad", encoding="utf-8")
+    fake_qa = FakeQA()
+    fake_qa.current_document_name = "good.txt"
+    fake_qa.latest_processing_report = DocumentProcessingReport(
+        attempted_document_name="good.txt",
+        active_document_name="good.txt",
+        success=True,
+        phase="complete",
+        file_extension=".txt",
+        chunk_count=1,
+        truncated=False,
+        max_chunk_limit=2000,
+        text_encoding_mode="auto",
+        backend="mock",
+        model_label="MockLLM (fallback)",
+        error_message=None,
+    )
+
+    def fail_process_document(document_path, text_encoding=None):
+        fake_qa.text_encoding = text_encoding
+        fake_qa.latest_processing_report = DocumentProcessingReport(
+            attempted_document_name="bad.txt",
+            active_document_name="good.txt",
+            success=False,
+            phase="load",
+            file_extension=".txt",
+            chunk_count=0,
+            truncated=False,
+            max_chunk_limit=2000,
+            text_encoding_mode=text_encoding or "auto",
+            backend="mock",
+            model_label="MockLLM (fallback)",
+            error_message="Could not decode text document",
+        )
+        raise DocumentProcessingError(
+            "Error loading document: Could not decode text document",
+            fake_qa.status(),
+        )
+
+    fake_qa.process_document = fail_process_document
+    monkeypatch.setattr(app, "qa_system", fake_qa)
+
+    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
+
+    assert "failed during `load`" in status
+    assert "Active document remains `good.txt`" in status
+    assert "Could not decode text document" in status
+    runtime = json.loads(runtime_status)
+    assert runtime["active_document"] == "good.txt"
+    assert runtime["last_attempted_document"] == "bad.txt"
+    assert runtime["last_success"] is False
+    assert runtime["file_extension"] == ".txt"
+    assert runtime["last_error"] == "Could not decode text document"
+
+
+def test_process_document_unexpected_error_uses_pre_upload_status(
+    monkeypatch, tmp_path
+):
+    document = tmp_path / "bad.txt"
+    document.write_text("bad", encoding="utf-8")
+
+    class UnexpectedFailureQA(FakeQA):
+        def __init__(self):
+            self.current_document_name = "good.txt"
+            self.latest_processing_report = processed_report()
+            self.status_calls = 0
+
+        def process_document(self, document_path, text_encoding=None):
+            self.current_document_name = "mutated.txt"
+            self.latest_processing_report = processed_report(
+                document_name="mutated.txt"
+            )
+            raise RuntimeError("unexpected boom")
+
+        def status(self):
+            self.status_calls += 1
+            return super().status()
+
+    fake_qa = UnexpectedFailureQA()
+    monkeypatch.setattr(app, "qa_system", fake_qa)
+
+    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
+
+    assert fake_qa.status_calls == 1
+    assert "failed during `unexpected`" in status
+    assert "Active document remains `good.txt`" in status
+    assert "unexpected boom" in status
+    runtime = json.loads(runtime_status)
+    assert runtime["active_document"] == "good.txt"
+    assert runtime["last_attempted_document"] == "bad.txt"
+    assert runtime["phase"] == "unexpected"
+    assert runtime["last_success"] is False
+    assert runtime["last_error"] == "unexpected boom"
