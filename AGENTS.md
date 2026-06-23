@@ -4,12 +4,12 @@
 
 This repository is a compact document QA/RAG assistant. It accepts PDF, DOCX,
 TXT, and MD uploads, chunks document text, indexes chunks with FAISS, and answers
-questions through a configurable Hugging Face LLM backend.
+questions through configurable Hugging Face or Ollama LLM backends.
 
 Primary runtime files:
 
 - `src/DocumentQA.py`: ingestion, encoding detection, embeddings, vector search,
-  LLM backend selection, retrieval chain, and query handling.
+  LLM backend selection, retrieval chain, Ollama adapter, and query handling.
 - `src/app.py`: Gradio UI wiring and user-facing status messages.
 - `tests/`: regression coverage for backend honesty, ingestion, encoding, app
   status, and retrieval behavior.
@@ -25,9 +25,10 @@ Primary runtime files:
 
 ## Non-Negotiable Contracts
 
-- Do not silently fall back from explicit real LLM backends. `LLM_BACKEND=endpoint`
-  and `LLM_BACKEND=local` must fail closed when credentials or model loading are
-  invalid. Mock mode must be explicit or an `auto` demo fallback.
+- Do not silently fall back from explicit real LLM backends. `LLM_BACKEND=endpoint`,
+  `LLM_BACKEND=local`, and `LLM_BACKEND=ollama` must fail closed when credentials,
+  model loading, server reachability, or model availability are invalid. Mock mode
+  must be explicit or an `auto` demo fallback.
 - Do not let UI status imply inference readiness before inference has actually
   happened. Document upload means indexed, not proven ready.
 - Document upload replacement must be transactional. Failed uploads must preserve
@@ -47,6 +48,9 @@ Primary runtime files:
   runs may validate builds, but must not publish release images.
 - Preserve deterministic generation for document QA unless a test-backed product
   reason requires changing it.
+- Ollama support is explicit, not part of `auto`. Use `OLLAMA_MODEL`,
+  `OLLAMA_BASE_URL`, and `OLLAMA_TIMEOUT`; do not route Ollama through
+  Hugging Face model ids or tokens.
 
 ## Engineering Loop
 
@@ -56,7 +60,7 @@ Use this loop for every non-trivial change:
 2. State the narrow behavior contract you are changing.
 3. Make the smallest code change that improves that contract.
 4. Add or update tests for the behavior, including hostile environment cases when
-   env vars, encodings, credentials, or CI triggers are involved.
+   env vars, encodings, credentials, local model servers, or CI triggers are involved.
 5. Run focused tests first, then the broader validation commands when risk
    touches shared behavior.
 6. When subagent tooling is available, ask a review subagent for actionable

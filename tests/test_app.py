@@ -118,6 +118,13 @@ class FakeCustomEndpointQA(FakeEndpointQA):
     loaded_model_label = "Custom endpoint (https://example.invalid)"
 
 
+class FakeOllamaQA(FakeQA):
+    loaded_model_id = "nemotron-3-nano:4b"
+    loaded_model_label = "Ollama (nemotron-3-nano:4b)"
+    active_llm_backend = "ollama"
+    llm_backend = "ollama"
+
+
 def processed_report(
     *,
     document_name="good.txt",
@@ -216,6 +223,23 @@ def test_process_document_reports_endpoint_as_indexed_not_ready(monkeypatch, tmp
     assert runtime["model"] == "Qwen/Qwen2.5-1.5B-Instruct"
     assert runtime["ready_for_queries"] is True
     assert runtime["readiness_scope"] == "retrieval_pipeline"
+    assert runtime["inference_validated"] is False
+
+
+def test_process_document_reports_ollama_as_indexed_not_mock(monkeypatch, tmp_path):
+    document = tmp_path / "demo.txt"
+    document.write_text("demo", encoding="utf-8")
+    monkeypatch.setattr(app, "qa_system", FakeOllamaQA())
+
+    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
+
+    assert "indexed" in status
+    assert "processed in mock mode" not in status
+    assert "Ollama (nemotron-3-nano:4b)" in status
+    runtime = json.loads(runtime_status)
+    assert runtime["backend"] == "ollama"
+    assert runtime["model"] == "Ollama (nemotron-3-nano:4b)"
+    assert runtime["ready_for_queries"] is True
     assert runtime["inference_validated"] is False
 
 

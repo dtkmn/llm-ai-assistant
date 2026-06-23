@@ -5,6 +5,8 @@ import re
 import sys
 import threading
 import unicodedata
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from getpass import getpass
 from typing import Dict, List, Optional, Tuple
@@ -31,8 +33,13 @@ FAST_MODE_ENV_VAR = "FAST_MODE"
 LLM_BACKEND_ENV_VAR = "LLM_BACKEND"
 HF_ENDPOINT_URL_ENV_VAR = "HF_ENDPOINT_URL"
 HF_ENDPOINT_TIMEOUT_ENV_VAR = "HF_ENDPOINT_TIMEOUT"
+OLLAMA_BASE_URL_ENV_VAR = "OLLAMA_BASE_URL"
+OLLAMA_MODEL_ENV_VAR = "OLLAMA_MODEL"
+OLLAMA_TIMEOUT_ENV_VAR = "OLLAMA_TIMEOUT"
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+DEFAULT_OLLAMA_MODEL = "nemotron-3-nano:4b"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
-SUPPORTED_LLM_BACKENDS = {"auto", "endpoint", "local", "mock"}
+SUPPORTED_LLM_BACKENDS = {"auto", "endpoint", "local", "mock", "ollama"}
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_DOCUMENT_CHUNKS = 2_000
 DEFAULT_QUALITY_EMBEDDINGS_MODEL = "Alibaba-NLP/gte-modernbert-base"
@@ -709,6 +716,87 @@ class MockLLM(LLM):
         )
 
 
+class OllamaLLM(LLM):
+    """Minimal Ollama adapter for deterministic local model inference."""
+
+    model: str
+    base_url: str = DEFAULT_OLLAMA_BASE_URL
+    timeout: int = 120
+    options: Dict[str, object] = Field(default_factory=dict)
+
+    @property
+    def _llm_type(self) -> str:
+        return "ollama"
+
+    @property
+    def _api_base_url(self) -> str:
+        return self.base_url.rstrip("/")
+
+    def _post_json(self, path: str, payload: Dict[str, object]) -> Dict[str, object]:
+        request = urllib.request.Request(
+            f"{self._api_base_url}{path}",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"Ollama API returned HTTP {exc.code} for {path}: {detail}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"Could not connect to Ollama at {self._api_base_url}: {exc.reason}"
+            ) from exc
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Ollama returned invalid JSON for {path}") from exc
+
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"Ollama returned unexpected JSON for {path}")
+        return parsed
+
+    def validate_model_available(self) -> None:
+        self._post_json("/api/show", {"model": self.model})
+
+    def _strip_thinking_text(self, text: str) -> str:
+        cleaned = re.sub(
+            r"<think>.*?</think>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        dangling_think_end = re.search(r"</think>", cleaned, flags=re.IGNORECASE)
+        if dangling_think_end:
+            cleaned = cleaned[dangling_think_end.end() :]
+        dangling_think_start = re.search(r"<think>", cleaned, flags=re.IGNORECASE)
+        if dangling_think_start:
+            cleaned = cleaned[: dangling_think_start.start()]
+        return cleaned.strip()
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
+        options = dict(self.options)
+        if stop:
+            options["stop"] = stop
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": False,
+            "think": False,
+            "options": options,
+        }
+        response = self._post_json("/api/generate", payload)
+        generated_text = response.get("response")
+        if not isinstance(generated_text, str):
+            raise RuntimeError("Ollama response did not include generated text.")
+        return self._strip_thinking_text(generated_text)
+
+
 class DocumentQA:
     def __init__(
         self,
@@ -737,6 +825,15 @@ class DocumentQA:
         self.max_document_bytes = max_document_bytes
         self.max_document_chunks = max_document_chunks
         self.profile = FAST_PROFILE if self.fast_mode else QUALITY_PROFILE
+        self.ollama_base_url = (
+            os.getenv(OLLAMA_BASE_URL_ENV_VAR, DEFAULT_OLLAMA_BASE_URL).strip()
+            or DEFAULT_OLLAMA_BASE_URL
+        )
+        self.ollama_model = (
+            os.getenv(OLLAMA_MODEL_ENV_VAR, DEFAULT_OLLAMA_MODEL).strip()
+            or DEFAULT_OLLAMA_MODEL
+        )
+        self.ollama_timeout = env_int(OLLAMA_TIMEOUT_ENV_VAR, 120)
 
         # Lazy initialization keeps web startup fast on constrained environments
         # (for example Hugging Face Spaces CPU instances).
@@ -824,6 +921,8 @@ class DocumentQA:
         endpoint_url = self._endpoint_url()
         if backend == "endpoint" and endpoint_url:
             return f"Custom endpoint ({endpoint_url})"
+        if backend == "ollama":
+            return f"Ollama ({model_id})"
         return model_id
 
     def _load_endpoint_model(self, model_id: str) -> LLM:
@@ -887,6 +986,20 @@ class DocumentQA:
         )
         return HuggingFacePipeline(pipeline=text_pipeline)
 
+    def _load_ollama_model(self, model_id: str) -> OllamaLLM:
+        LOGGER.info("Configuring Ollama model %s at %s", model_id, self.ollama_base_url)
+        llm = OllamaLLM(
+            model=model_id,
+            base_url=self.ollama_base_url,
+            timeout=self.ollama_timeout,
+            options={
+                "temperature": 0,
+                "num_predict": self.profile["max_new_tokens"],
+            },
+        )
+        llm.validate_model_available()
+        return llm
+
     def _candidate_models(self) -> List[str]:
         candidates = [self.model_id]
         default_models = DEFAULT_FAST_MODELS if self.fast_mode else DEFAULT_QUALITY_MODELS
@@ -910,10 +1023,11 @@ class DocumentQA:
             )
             if self.llm_backend in {"endpoint", "local"}:
                 raise RuntimeError(message)
-            LOGGER.warning("%s Falling back to MockLLM.", message)
-            self.active_llm_backend = "mock"
-            self.llm = MockLLM()
-            return
+            if requested_backend != "ollama":
+                LOGGER.warning("%s Falling back to MockLLM.", message)
+                self.active_llm_backend = "mock"
+                self.llm = MockLLM()
+                return
 
         if requested_backend == "endpoint" and not self.hf_token:
             message = (
@@ -926,6 +1040,24 @@ class DocumentQA:
                 self.llm = MockLLM()
                 return
             raise RuntimeError(message)
+
+        if requested_backend == "ollama":
+            try:
+                self.llm = self._load_ollama_model(self.ollama_model)
+                self.active_llm_backend = "ollama"
+                self.loaded_model_id = self.ollama_model
+                self.loaded_model_label = self._loaded_model_label(
+                    self.ollama_model, "ollama"
+                )
+                LOGGER.info("Using Ollama model %s", self.ollama_model)
+                return
+            except Exception as exc:
+                self.llm = None
+                self.active_llm_backend = None
+                raise RuntimeError(
+                    f"Unable to initialize ollama LLM `{self.ollama_model}` at "
+                    f"{self.ollama_base_url}. Last error: {exc}"
+                ) from exc
 
         last_error = None
         for candidate_model in self._candidate_models():
@@ -1082,6 +1214,8 @@ class DocumentQA:
         active_backend = self._active_backend()
         if active_backend == "mock":
             return "MockLLM (fallback)"
+        if active_backend == "ollama":
+            return self._loaded_model_label(self.ollama_model, "ollama")
         return self.model_id
 
     def _text_encoding_mode(self, text_encoding: Optional[str]) -> str:

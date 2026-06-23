@@ -9,12 +9,12 @@ app_port: 7860
 
 
 # LLM AI Assistant
-This project uses LangChain, Hugging Face models, FAISS, and Gradio to answer questions from uploaded document context. It is a compact retrieval-augmented generation (RAG) assistant designed to run locally, in Docker, or on Hugging Face Spaces.
+This project uses LangChain, Hugging Face or Ollama LLM backends, FAISS, and Gradio to answer questions from uploaded document context. It is a compact retrieval-augmented generation (RAG) assistant designed to run locally, in Docker, or on Hugging Face Spaces.
 
 https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ## Features
-- **Configurable LLM Backend:** Uses hosted Hugging Face inference on CPU by default, local model weights on GPU/MPS, or explicit mock mode for demos/tests
+- **Configurable LLM Backend:** Uses hosted Hugging Face inference on CPU by default, local Hugging Face weights on GPU/MPS, explicit Ollama, or mock mode for demos/tests
 - **Document Processing:** Supports PDF, DOCX, and text documents with intelligent chunking
 - **Vector Search:** Uses FAISS for efficient similarity search with HuggingFace embeddings
 - **Gradio Interface:** Modern, user-friendly web interface for document upload and chat
@@ -27,7 +27,7 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ### Prerequisites
 - Python 3.11 or higher
-- HuggingFace account and API token for hosted endpoint inference or gated models ([get one here](https://huggingface.co/settings/tokens))
+- HuggingFace account and API token for hosted endpoint inference or gated models ([get one here](https://huggingface.co/settings/tokens)); not required for `LLM_BACKEND=ollama`
 - At least 8GB RAM if forcing local model execution on CPU; GPU/MPS is strongly preferred for local models
 
 ### Local Setup
@@ -52,13 +52,13 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     pip install -r requirements.txt
     ```
 
-4. Set up your HuggingFace token:    
+4. Set up your HuggingFace token if you use hosted endpoint inference, CPU `auto`, or gated Hugging Face `local` models:
 
     ```bash
     export HUGGINGFACEHUB_API_TOKEN=your_token_here
     ```
 
-5. (Optional) choose a different local model:
+5. (Optional) choose a different Hugging Face local model:
 
     ```bash
     export LLM_MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct
@@ -74,7 +74,18 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     - `auto` uses hosted Hugging Face inference on CPU and local weights on CUDA/MPS
     - `endpoint` always uses hosted Hugging Face inference
     - `local` always downloads and runs model weights in-process
+    - `ollama` uses a local Ollama server
     - `mock` disables real inference for demos/tests
+
+    For Ollama:
+
+    ```bash
+    ollama serve
+    ollama pull nemotron-3-nano:4b
+    export LLM_BACKEND=ollama
+    export OLLAMA_MODEL=nemotron-3-nano:4b
+    export OLLAMA_BASE_URL=http://localhost:11434
+    ```
 
 7. (Optional) enable fast mode (lower latency, lower quality):
 
@@ -112,7 +123,7 @@ The application is containerized for easy deployment.
      llm-ai-assistant
    ```
 
-**Note:** With `LLM_BACKEND=auto`, CPU deployments use hosted Hugging Face inference and avoid downloading LLM weights. Local backends still download model weights, which can take several GB.
+**Note:** With `LLM_BACKEND=auto`, CPU deployments use hosted Hugging Face inference and avoid downloading LLM weights. The `local` backend downloads Hugging Face model weights in-process. The `ollama` backend expects an already-running Ollama server and a pulled model.
 
 
 ## Usage
@@ -129,11 +140,13 @@ The application is containerized for easy deployment.
   - `auto` (default): hosted endpoint on CPU, local model on CUDA/MPS
   - `endpoint`: hosted Hugging Face inference
   - `local`: in-process Transformers pipeline
+  - `ollama`: local Ollama server via `OLLAMA_BASE_URL`
   - `mock`: deterministic demo/test fallback
 - **LLM model:** Configurable via `LLM_MODEL_ID`
   - **Quality mode (default):** tries `Qwen/Qwen2.5-1.5B-Instruct`, then `Qwen/Qwen2.5-7B-Instruct`, then `meta-llama/Llama-3.2-3B-Instruct`
   - **Fast mode (`FAST_MODE=true`):** tries `Qwen/Qwen2.5-1.5B-Instruct` first, then `meta-llama/Llama-3.2-3B-Instruct`
 - **Hosted endpoint:** optionally configurable with `HF_ENDPOINT_URL` and `HF_ENDPOINT_TIMEOUT`
+- **Ollama:** optionally configurable with `OLLAMA_MODEL` (default `nemotron-3-nano:4b`), `OLLAMA_BASE_URL` (default `http://localhost:11434`), and `OLLAMA_TIMEOUT`
 - **Embeddings:**
   - **Quality mode:** `Alibaba-NLP/gte-modernbert-base`
   - **Fast mode:** `sentence-transformers/all-MiniLM-L6-v2`

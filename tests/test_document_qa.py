@@ -1,12 +1,19 @@
-import threading
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 
-from src.DocumentQA import AnswerCitation, DocumentQA, FaissVectorStore, MockLLM
+from src.DocumentQA import (
+    DEFAULT_OLLAMA_MODEL,
+    AnswerCitation,
+    DocumentQA,
+    FaissVectorStore,
+    MockLLM,
+    OllamaLLM,
+)
 
 
 class FakeEmbeddings(Embeddings):
@@ -1592,6 +1599,53 @@ def test_explicit_local_backend_failure_fails_closed(monkeypatch):
     assert qa.llm is None
 
 
+def test_explicit_ollama_backend_uses_ollama_without_hf_token(monkeypatch):
+    loaded_models = []
+
+    def fake_ollama_loader(self, model_id):
+        loaded_models.append(model_id)
+        return MockLLM()
+
+    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
+    monkeypatch.setenv("OLLAMA_MODEL", "nemotron-3-nano:4b")
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
+    qa = DocumentQA(device="cpu", llm_backend="ollama", hf_token=None)
+
+    qa._initialize_llm()
+
+    assert loaded_models == ["nemotron-3-nano:4b"]
+    assert qa.active_llm_backend == "ollama"
+    assert qa.loaded_model_id == "nemotron-3-nano:4b"
+    assert qa.loaded_model_label == "Ollama (nemotron-3-nano:4b)"
+    assert qa.status().active_model_label == "Ollama (nemotron-3-nano:4b)"
+
+
+def test_explicit_ollama_backend_with_dummy_hf_token_does_not_mock(monkeypatch):
+    def fake_ollama_loader(self, model_id):
+        return MockLLM()
+
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
+    qa = DocumentQA(device="cpu", llm_backend="ollama", hf_token="dummy")
+
+    qa._initialize_llm()
+
+    assert qa.active_llm_backend == "ollama"
+
+
+def test_explicit_ollama_backend_failure_fails_closed(monkeypatch):
+    def failing_ollama_loader(self, model_id):
+        raise ValueError("ollama down")
+
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", failing_ollama_loader)
+    qa = DocumentQA(device="cpu", llm_backend="ollama", hf_token=None)
+
+    with pytest.raises(RuntimeError, match="Unable to initialize ollama LLM"):
+        qa._initialize_llm()
+
+    assert qa.active_llm_backend is None
+    assert qa.llm is None
+
+
 @pytest.mark.parametrize("backend", ["endpoint", "local"])
 def test_explicit_real_backend_with_dummy_token_fails_closed(backend):
     qa = DocumentQA(device="cpu", llm_backend=backend, hf_token="dummy")
@@ -1616,3 +1670,65 @@ def test_local_backend_without_token_still_attempts_local_public_model(monkeypat
 
     assert qa.active_llm_backend == "local"
     assert qa.loaded_model_id == "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_ollama_llm_validates_model_and_generates(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        payload = json.loads(request.data.decode("utf-8"))
+        requests.append((request.full_url, payload, timeout))
+        if request.full_url.endswith("/api/show"):
+            return FakeResponse({"model_info": {}})
+        if request.full_url.endswith("/api/generate"):
+            return FakeResponse(
+                {
+                    "response": (
+                        "The model is reasoning about the prompt.\n"
+                        "</think>\nProject Phoenix answer [1]."
+                    )
+                }
+            )
+        raise AssertionError(f"Unexpected Ollama URL: {request.full_url}")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    llm = OllamaLLM(
+        model=DEFAULT_OLLAMA_MODEL,
+        base_url="http://ollama.test/",
+        timeout=7,
+        options={"temperature": 0, "num_predict": 160},
+    )
+
+    llm.validate_model_available()
+    answer = llm.invoke("Answer with citation.", stop=["END"])
+
+    assert answer == "Project Phoenix answer [1]."
+    assert llm._strip_thinking_text("<think>unfinished reasoning") == ""
+    assert requests[0] == (
+        "http://ollama.test/api/show",
+        {"model": DEFAULT_OLLAMA_MODEL},
+        7,
+    )
+    assert requests[1][0] == "http://ollama.test/api/generate"
+    assert requests[1][1]["model"] == DEFAULT_OLLAMA_MODEL
+    assert requests[1][1]["prompt"] == "Answer with citation."
+    assert requests[1][1]["stream"] is False
+    assert requests[1][1]["think"] is False
+    assert requests[1][1]["options"] == {
+        "temperature": 0,
+        "num_predict": 160,
+        "stop": ["END"],
+    }

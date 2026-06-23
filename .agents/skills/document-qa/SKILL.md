@@ -30,7 +30,10 @@ decoding, and reproducible validation.
 
 - `auto` backend may fall back to `MockLLM` for demos when credentials are
   absent, but explicit `endpoint` and `local` backends must fail closed.
-- `hf_token="dummy"` is valid only for mock/demo paths.
+- `ollama` is an explicit local-server backend, not part of `auto`; it must fail
+  closed when the server or configured model is unavailable.
+- `hf_token="dummy"` is valid only for Hugging Face mock/demo paths. Ollama does
+  not use Hugging Face tokens.
 - Upload status must say `indexed` for real backends, because endpoint readiness
   is not proven until the first inference call.
 - Upload replacement must be transactional. Failed uploads must not replace the
@@ -76,9 +79,10 @@ For UI status changes:
 
 For backend routing changes:
 
-- Exercise `LLM_BACKEND=auto`, `mock`, `endpoint`, and `local` paths.
-- Clear or set `HUGGINGFACEHUB_API_TOKEN`, `HF_ENDPOINT_URL`, and `LLM_BACKEND`
-  inside tests so shell state cannot poison CI.
+- Exercise `LLM_BACKEND=auto`, `mock`, `endpoint`, `local`, and `ollama` paths
+  when the change touches backend selection.
+- Clear or set `HUGGINGFACEHUB_API_TOKEN`, `HF_ENDPOINT_URL`, `LLM_BACKEND`,
+  `OLLAMA_MODEL`, and `OLLAMA_BASE_URL` inside tests so shell state cannot poison CI.
 
 For release automation:
 
