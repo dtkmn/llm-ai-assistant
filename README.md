@@ -204,7 +204,9 @@ honest, agent features will only make the failure harder to see.
 
 CI stays provider-free. When you want to compare pulled local Ollama models,
 run the live eval command manually. Each case performs answer and verifier
-calls, so start small on memory-constrained Macs:
+calls, so start small on memory-constrained Macs. The live eval command only
+accepts loopback Ollama URLs such as `http://localhost:11434` or
+`http://127.0.0.1:11434`; it is not an arbitrary remote model benchmark tool.
 
 ```bash
 python -m src.ollama_model_eval \

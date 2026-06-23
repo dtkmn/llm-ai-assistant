@@ -48,7 +48,8 @@ Primary runtime files:
 - Live Ollama model comparison is optional and manual. Do not add it to CI; use
   provider-free tests for CI, keep live model runs unload-aware, and keep
   multi-model local eval behind an explicit override because Mac unified memory
-  can be exhausted quickly.
+  can be exhausted quickly. The live eval command must accept only loopback
+  Ollama base URLs.
 - Text upload default is `Auto`. Ambiguous legacy bytes must fail closed instead
   of mojibaking. `UTF-8 / Western` and explicit legacy encodings are opt-ins.
 - Docker image publication belongs to `main` only. `dev`, PR, and manual workflow

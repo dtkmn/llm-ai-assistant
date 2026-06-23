@@ -28,6 +28,7 @@ from pydantic import ConfigDict, Field
 from pypdf import PdfReader
 
 LOGGER = logging.getLogger(__name__)
+OLLAMA_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 HF_TOKEN_ENV_VAR = "HUGGINGFACEHUB_API_TOKEN"
 FAST_MODE_ENV_VAR = "FAST_MODE"
 LLM_BACKEND_ENV_VAR = "LLM_BACKEND"
@@ -166,6 +167,12 @@ SELF_CHECK_REFUSAL_ANSWER = (
 )
 SELF_CHECK_PASS_OUTCOMES = {"supported", "not_verified"}
 VERIFIER_OUTCOMES = {"supported", "unsupported", "insufficient"}
+
+
+def open_ollama_request_no_proxy(request, *, timeout: int):
+    return OLLAMA_NO_PROXY_OPENER.open(request, timeout=timeout)
+
+
 ANSWER_SUPPORT_STOPWORDS = {
     "a",
     "an",
@@ -740,7 +747,9 @@ class OllamaLLM(LLM):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with open_ollama_request_no_proxy(
+                request, timeout=self.timeout
+            ) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")

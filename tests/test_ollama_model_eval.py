@@ -1,6 +1,7 @@
 import io
 import json
 
+import src.ollama_model_eval as ollama_model_eval
 from src.DocumentQA import (
     SELF_CHECK_REFUSAL_ANSWER,
     AnswerCitation,
@@ -8,7 +9,12 @@ from src.DocumentQA import (
     AnswerTrace,
     QueryResult,
 )
-from src.ollama_model_eval import evaluate_model, main
+from src.ollama_model_eval import (
+    evaluate_model,
+    main,
+    normalize_local_ollama_base_url,
+    unload_ollama_model,
+)
 
 
 def traced_result(answer, *, outcome="supported", reasons=None, citation_count=1):
@@ -220,6 +226,77 @@ def test_evaluate_model_cleanup_ignores_malformed_base_url():
     assert result.initialization_error == "ollama model not found"
 
 
+def test_normalize_local_ollama_base_url_accepts_loopback_forms():
+    assert (
+        normalize_local_ollama_base_url("http://localhost:11434/")
+        == "http://localhost:11434"
+    )
+    assert (
+        normalize_local_ollama_base_url("http://127.0.0.1:11435")
+        == "http://127.0.0.1:11435"
+    )
+    assert normalize_local_ollama_base_url("http://[::1]:11434") == "http://[::1]:11434"
+
+
+def test_main_rejects_remote_ollama_base_url_before_running_model():
+    called = False
+
+    def fail_if_called(model, base_url, timeout):
+        nonlocal called
+        called = True
+        return PassingEvalQA()
+
+    output = io.StringIO()
+
+    exit_code = main(
+        ["--models", "model-a", "--base-url", "http://ollama.example"],
+        qa_factory=fail_if_called,
+        output_stream=output,
+    )
+
+    assert exit_code == 2
+    assert called is False
+    assert "loopback base URLs" in output.getvalue()
+
+
+def test_unload_ollama_model_uses_no_proxy_opener(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    def fake_open(request, timeout):
+        calls.append((request.full_url, json.loads(request.data.decode("utf-8")), timeout))
+        return FakeResponse()
+
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8443")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(
+            AssertionError("Ollama cleanup must bypass proxy-aware urlopen")
+        ),
+    )
+    monkeypatch.setattr(ollama_model_eval.NO_PROXY_OPENER, "open", fake_open)
+
+    unload_ollama_model("model-a", base_url="http://localhost:11434", timeout=3)
+
+    assert calls == [
+        (
+            "http://localhost:11434/api/generate",
+            {"model": "model-a", "prompt": "", "stream": False, "keep_alive": 0},
+            3,
+        )
+    ]
+
+
 def test_main_can_run_single_case_for_low_memory_smoke(monkeypatch):
     monkeypatch.setattr(
         "src.ollama_model_eval.unload_ollama_model",
@@ -269,7 +346,7 @@ def test_main_uses_ollama_base_url_from_environment(monkeypatch):
         observed_base_urls.append(base_url)
         return PassingEvalQA()
 
-    monkeypatch.setenv("OLLAMA_BASE_URL", "http://ollama.example")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11435/")
     monkeypatch.setattr(
         "src.ollama_model_eval.unload_ollama_model",
         lambda model, **kwargs: unloaded_models.append(kwargs["base_url"]),
@@ -283,5 +360,5 @@ def test_main_uses_ollama_base_url_from_environment(monkeypatch):
     )
 
     assert exit_code == 0
-    assert observed_base_urls == ["http://ollama.example"]
-    assert unloaded_models == ["http://ollama.example"]
+    assert observed_base_urls == ["http://127.0.0.1:11435"]
+    assert unloaded_models == ["http://127.0.0.1:11435"]

@@ -1,10 +1,12 @@
 import argparse
+import ipaddress
 import json
 import os
 import re
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -51,12 +53,48 @@ class ModelEvalResult:
 
 
 QaFactory = Callable[[str, str, int], DocumentQA]
+NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized_host = host.strip().lower()
+    if normalized_host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized_host).is_loopback
+    except ValueError:
+        return False
+
+
+def normalize_local_ollama_base_url(base_url: str) -> str:
+    parsed = urllib.parse.urlsplit(base_url.strip())
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Ollama base URL must use http or https.")
+    if parsed.username or parsed.password:
+        raise ValueError("Ollama base URL must not include credentials.")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Ollama base URL must not include query or fragment data.")
+    if parsed.path not in {"", "/"}:
+        raise ValueError("Ollama base URL must not include a path.")
+    if not parsed.hostname or not _is_loopback_host(parsed.hostname):
+        raise ValueError(
+            "Live Ollama eval only accepts loopback base URLs such as "
+            "http://localhost:11434 or http://127.0.0.1:11434."
+        )
+
+    # Accessing port forces urllib to reject invalid port values before use.
+    port = parsed.port
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{port}" if port is not None else host
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, "", "", ""))
 
 
 def build_ollama_qa(model: str, base_url: str, timeout: int) -> DocumentQA:
     qa = DocumentQA(fast_mode=True, llm_backend="ollama", hf_token=None)
     qa.ollama_model = model
-    qa.ollama_base_url = base_url
+    qa.ollama_base_url = normalize_local_ollama_base_url(base_url)
     qa.ollama_timeout = timeout
     qa.embeddings = GoldenEvalEmbeddings()
     return qa
@@ -187,6 +225,7 @@ def unload_ollama_model(
     timeout: int = 15,
 ) -> None:
     try:
+        safe_base_url = normalize_local_ollama_base_url(base_url)
         payload = {
             "model": model,
             "prompt": "",
@@ -194,12 +233,12 @@ def unload_ollama_model(
             "keep_alive": 0,
         }
         request = urllib.request.Request(
-            f"{base_url.rstrip('/')}/api/generate",
+            f"{safe_base_url}/api/generate",
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with NO_PROXY_OPENER.open(request, timeout=timeout) as response:
             response.read()
     except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError):
         # Unloading is a best-effort memory hygiene step. The eval result should
@@ -336,6 +375,11 @@ def main(
     except ValueError as exc:
         print(str(exc), file=output_stream)
         return 2
+    try:
+        base_url = normalize_local_ollama_base_url(args.base_url)
+    except ValueError as exc:
+        print(str(exc), file=output_stream)
+        return 2
     models = models_from_args(args)
     if len(models) > 1 and not args.allow_multi_model:
         print(
@@ -348,7 +392,7 @@ def main(
     results = [
         evaluate_model(
             model,
-            base_url=args.base_url,
+            base_url=base_url,
             timeout=args.timeout,
             qa_factory=qa_factory,
             cases=cases,

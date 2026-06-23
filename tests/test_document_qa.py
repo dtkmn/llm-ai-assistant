@@ -1688,7 +1688,7 @@ def test_ollama_llm_validates_model_and_generates(monkeypatch):
         def read(self):
             return json.dumps(self.payload).encode("utf-8")
 
-    def fake_urlopen(request, timeout):
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
         payload = json.loads(request.data.decode("utf-8"))
         requests.append((request.full_url, payload, timeout))
         if request.full_url.endswith("/api/show"):
@@ -1704,7 +1704,16 @@ def test_ollama_llm_validates_model_and_generates(monkeypatch):
             )
         raise AssertionError(f"Unexpected Ollama URL: {request.full_url}")
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(
+            AssertionError("OllamaLLM must bypass proxy-aware urlopen")
+        ),
+    )
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
     llm = OllamaLLM(
         model=DEFAULT_OLLAMA_MODEL,
         base_url="http://ollama.test/",

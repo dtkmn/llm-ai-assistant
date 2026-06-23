@@ -52,7 +52,7 @@ decoding, and reproducible validation.
   require a live Ollama or Hugging Face backend for these CI checks.
 - Live Ollama model comparison is optional and manual. Keep it unload-aware,
   keep multi-model runs behind an explicit override, and never make CI require
-  resident local models.
+  resident local models. Keep the live eval base URL loopback-only.
 - Text encoding default is `Auto`. Ambiguous non-UTF legacy files must not be
   silently decoded as Western text.
 - Explicit encoding selections are user intent. Preserve valid CP1250, CP1251,
