@@ -200,6 +200,51 @@ Use these before adding planner loops, tools, multi-document memory, or more
 agent-like behavior. Blunt rule: if the boring document loop is not measurably
 honest, agent features will only make the failure harder to see.
 
+### Optional Live Ollama Model Eval
+
+CI stays provider-free. When you want to compare pulled local Ollama models,
+run the live eval command manually. Each case performs answer and verifier
+calls, so start small on memory-constrained Macs:
+
+```bash
+python -m src.ollama_model_eval \
+  --models nemotron-3-nano:4b \
+  --case launch_date \
+  --timeout 30 \
+  --no-fail
+```
+
+Then run the full golden set for one model:
+
+```bash
+python -m src.ollama_model_eval \
+  --models nemotron-3-nano:4b \
+  --timeout 60 \
+  --no-fail
+```
+
+The command refuses multiple models by default so a comparison run does not
+accidentally overload a local Mac. Prefer one model per command. Only use the
+override when you have enough free unified memory and are comfortable watching
+resource pressure:
+
+```bash
+python -m src.ollama_model_eval \
+  --models nemotron-3-nano:4b qwen3:8b \
+  --allow-multi-model \
+  --timeout 60 \
+  --no-fail
+```
+
+The command asks Ollama to unload each model after its run by default. If your
+machine still feels memory pressure, stop the run and inspect resident models:
+
+```bash
+ollama ps
+ollama stop nemotron-3-nano:4b
+ollama stop qwen3:8b
+```
+
 ## Security and Dependency Maintenance
 - Dependencies are pinned in `requirements.txt` for reproducible installs.
 - Dependabot is enabled weekly (`.github/dependabot.yml`) for dependency updates.
@@ -211,6 +256,7 @@ honest, agent features will only make the failure harder to see.
   ```bash
   pip install -r requirements-dev.txt
   pytest tests/test_golden_document_eval.py -q
+  pytest tests/test_ollama_model_eval.py -q
   pytest
   python -m pip_audit -r requirements.txt --strict
   python -m pip check

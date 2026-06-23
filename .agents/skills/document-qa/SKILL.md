@@ -50,6 +50,9 @@ decoding, and reproducible validation.
 - Golden document evals must exercise the full provider-free QA loop: upload,
   retrieval, cited answer, self-check, retry, and fail-closed refusal. Do not
   require a live Ollama or Hugging Face backend for these CI checks.
+- Live Ollama model comparison is optional and manual. Keep it unload-aware,
+  keep multi-model runs behind an explicit override, and never make CI require
+  resident local models.
 - Text encoding default is `Auto`. Ambiguous non-UTF legacy files must not be
   silently decoded as Western text.
 - Explicit encoding selections are user intent. Preserve valid CP1250, CP1251,
@@ -60,9 +63,12 @@ decoding, and reproducible validation.
 
 - `src/DocumentQA.py`
 - `src/app.py`
+- `src/golden_eval.py`
+- `src/ollama_model_eval.py`
 - `tests/test_document_qa.py`
 - `tests/test_app.py`
 - `tests/test_golden_document_eval.py`
+- `tests/test_ollama_model_eval.py`
 - `.github/workflows/tests.yml`
 - `.github/workflows/docker-publish.yml`
 
@@ -91,8 +97,11 @@ For backend routing changes:
 For answer-loop or agent-pattern changes:
 
 - `python -m pytest tests/test_golden_document_eval.py -q`
+- `python -m pytest tests/test_ollama_model_eval.py -q`
 - Assert cited supported answers, unsupported-answer refusal, and retry behavior.
 - Keep eval fixtures deterministic and provider-free.
+- Keep live Ollama comparison manual. Prefer one-model, one-case smoke runs on
+  memory-constrained Macs, and do not make multi-model live eval the default.
 
 For release automation:
 

@@ -20,7 +20,7 @@ Primary runtime files:
 - Install test/audit dependencies: `python -m pip install -r requirements-dev.txt`
 - Run the app locally: `python src/app.py`
 - Run tests: `python -m pytest`
-- Compile check: `python -m py_compile src/app.py src/DocumentQA.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py`
+- Compile check: `python -m py_compile src/app.py src/DocumentQA.py src/golden_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_ollama_model_eval.py`
 - Dependency checks: `python -m pip check` and `python -m pip_audit -r requirements.txt --strict`
 
 ## Non-Negotiable Contracts
@@ -45,6 +45,10 @@ Primary runtime files:
 - Golden document evals must remain provider-free and deterministic. They should
   exercise upload, retrieval, citation trace, self-check, retry, and fail-closed
   behavior without requiring a live Ollama or Hugging Face backend in CI.
+- Live Ollama model comparison is optional and manual. Do not add it to CI; use
+  provider-free tests for CI, keep live model runs unload-aware, and keep
+  multi-model local eval behind an explicit override because Mac unified memory
+  can be exhausted quickly.
 - Text upload default is `Auto`. Ambiguous legacy bytes must fail closed instead
   of mojibaking. `UTF-8 / Western` and explicit legacy encodings are opt-ins.
 - Docker image publication belongs to `main` only. `dev`, PR, and manual workflow
@@ -101,7 +105,7 @@ For Python behavior changes:
 
 - `python -m pytest`
 - `python -m pytest tests/test_golden_document_eval.py -q`
-- `python -m py_compile src/app.py src/DocumentQA.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py`
+- `python -m py_compile src/app.py src/DocumentQA.py src/golden_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_ollama_model_eval.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:

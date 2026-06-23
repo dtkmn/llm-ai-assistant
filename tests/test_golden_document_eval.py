@@ -1,39 +1,11 @@
 import json
 
 import pytest
-from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.llms import LLM
 from pydantic import Field
 
 from src.DocumentQA import DocumentQA, SELF_CHECK_REFUSAL_ANSWER
-
-
-GOLDEN_DOCUMENT_TEXT = """# Project Phoenix Brief
-
-Project Phoenix launches in June 2026.
-The approved Project Phoenix budget is $42 million.
-Alex Rivera owns the Project Phoenix rollout.
-Unsupported claims must be refused instead of invented.
-"""
-
-
-class GoldenEvalEmbeddings(Embeddings):
-    def embed_documents(self, texts):
-        return [self._embed(text) for text in texts]
-
-    def embed_query(self, text):
-        return self._embed(text)
-
-    def _embed(self, text):
-        lower = text.lower()
-        return [
-            float(len(text)),
-            float(lower.count("phoenix")),
-            float(lower.count("launch")),
-            float(lower.count("budget")),
-            float(lower.count("owner") + lower.count("owns")),
-            float(lower.count("venue") + lower.count("location")),
-        ]
+from src.golden_eval import GOLDEN_DOCUMENT_TEXT, GoldenEvalEmbeddings
 
 
 class GoldenEvalLLM(LLM):
