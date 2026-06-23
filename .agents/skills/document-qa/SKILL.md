@@ -40,6 +40,10 @@ decoding, and reproducible validation.
 - Answer traces and citations must come from the same retrieved chunks used in
   the prompt. Keep `query()` string-compatible and expose richer evidence
   through structured APIs such as `query_with_trace()`.
+- Answer self-checking should inspect the generated answer and trace. Cheap
+  mechanical checks and deterministic refutation prefilters may reject bad
+  answers, but only a real backend verifier may label an answer `supported`.
+  Mock/demo mode must report mechanically valid answers as `not_verified`.
 - Text encoding default is `Auto`. Ambiguous non-UTF legacy files must not be
   silently decoded as Western text.
 - Explicit encoding selections are user intent. Preserve valid CP1250, CP1251,

@@ -1,5 +1,7 @@
+import json
 import logging
 import os
+import re
 import sys
 import threading
 import unicodedata
@@ -152,6 +154,67 @@ UTF_NUL_FAMILY_ENCODINGS = {
     "utf_32_le",
 }
 ALLOWED_TEXT_CONTROL_CHARACTERS = {"\n", "\r", "\t", "\f"}
+SELF_CHECK_REFUSAL_ANSWER = (
+    "I could not find enough relevant information in the document to answer that."
+)
+SELF_CHECK_PASS_OUTCOMES = {"supported", "not_verified"}
+VERIFIER_OUTCOMES = {"supported", "unsupported", "insufficient"}
+ANSWER_SUPPORT_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "based",
+    "be",
+    "because",
+    "by",
+    "can",
+    "configured",
+    "context",
+    "currently",
+    "demonstration",
+    "did",
+    "do",
+    "does",
+    "document",
+    "for",
+    "from",
+    "has",
+    "have",
+    "how",
+    "i",
+    "identify",
+    "in",
+    "information",
+    "is",
+    "it",
+    "language",
+    "model",
+    "no",
+    "of",
+    "on",
+    "or",
+    "provided",
+    "real",
+    "related",
+    "response",
+    "that",
+    "the",
+    "this",
+    "to",
+    "using",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+}
 
 
 @dataclass(frozen=True)
@@ -206,6 +269,7 @@ class AnswerTrace:
     model_label: str
     retrieved_chunk_count: int
     citations: List[AnswerCitation]
+    self_check: Optional["AnswerSelfCheck"] = None
     error_message: Optional[str] = None
 
 
@@ -213,6 +277,13 @@ class AnswerTrace:
 class QueryResult:
     answer: str
     trace: AnswerTrace
+
+
+@dataclass(frozen=True)
+class AnswerSelfCheck:
+    outcome: str
+    reasons: List[str]
+    retry_attempted: bool = False
 
 
 @dataclass(frozen=True)
@@ -343,6 +414,7 @@ class RetrievalChainResult:
     answer: str
     retrieved_chunk_count: int
     citations: List[AnswerCitation]
+    context: str = ""
 
 
 class DocumentRetrievalChain:
@@ -363,21 +435,53 @@ class DocumentRetrievalChain:
     def invoke(self, question: str) -> str:
         return self.invoke_with_trace(question).answer
 
-    def invoke_with_trace(self, question: str) -> RetrievalChainResult:
+    def invoke_with_trace(
+        self, question: str, self_check_instruction: str = ""
+    ) -> RetrievalChainResult:
         docs = self.retriever.invoke(question)
         context, citations = self._format_context_and_citations(docs)
+        response = self._generate_answer(
+            question=question,
+            context=context,
+            self_check_instruction=self_check_instruction,
+        )
+        return RetrievalChainResult(
+            answer=response,
+            retrieved_chunk_count=len(citations),
+            citations=citations,
+            context=context,
+        )
+
+    def retry_with_trace(
+        self,
+        question: str,
+        previous_result: RetrievalChainResult,
+        self_check_instruction: str,
+    ) -> RetrievalChainResult:
+        response = self._generate_answer(
+            question=question,
+            context=previous_result.context,
+            self_check_instruction=self_check_instruction,
+        )
+        return RetrievalChainResult(
+            answer=response,
+            retrieved_chunk_count=previous_result.retrieved_chunk_count,
+            citations=previous_result.citations,
+            context=previous_result.context,
+        )
+
+    def _generate_answer(
+        self, *, question: str, context: str, self_check_instruction: str = ""
+    ) -> str:
         response = self.answer_chain.invoke(
             {
                 "context": context,
                 "question": question,
                 "document_name": self.document_name or "unknown",
+                "self_check_instruction": self_check_instruction,
             }
         )
-        return RetrievalChainResult(
-            answer=str(response).strip(),
-            retrieved_chunk_count=len(citations),
-            citations=citations,
-        )
+        return str(response).strip()
 
     def _format_context_and_citations(
         self, docs: List[Document]
@@ -586,14 +690,19 @@ class MockLLM(LLM):
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
         if "context:" in prompt.lower():
-            parts = prompt.split("Question:")
-            if len(parts) > 1:
-                question = parts[1].strip()
-                return (
-                    "Based on the provided context, I can identify information related to "
-                    f"{question.lower()}. This is a demonstration response because no real "
-                    "language model is currently configured."
-                )
+            context = prompt.split("Context:", 1)[1].split("Question:", 1)[0]
+            citation_id = None
+            for line in context.splitlines():
+                stripped_line = line.strip()
+                if not stripped_line:
+                    continue
+                citation_match = re.match(r"\[(\d+)\]", stripped_line)
+                if citation_match:
+                    citation_id = citation_match.group(1)
+                    continue
+                if citation_id:
+                    sentence = re.split(r"(?<=[.!?])\s+", stripped_line, maxsplit=1)[0]
+                    return f"{sentence} [{citation_id}]"
         return (
             "This is a mock response. Configure a valid HuggingFace token to enable real "
             "AI-powered answers."
@@ -1034,6 +1143,7 @@ class DocumentQA:
             "Uploaded document name: {document_name}\n\n"
             "Context:\n{context}\n\n"
             "Question: {question}\n\n"
+            "{self_check_instruction}\n\n"
             "Answer:"
         )
 
@@ -1419,6 +1529,562 @@ class DocumentQA:
         lowered = prompt.lower()
         return any(hint in lowered for hint in DOCUMENT_IDENTITY_QUESTION_HINTS)
 
+    def _answer_is_refusal(self, answer: str) -> bool:
+        lowered = answer.lower()
+        refusal_markers = (
+            "could not find",
+            "not in the context",
+            "not enough relevant information",
+            "not provided in the context",
+            "cannot answer",
+            "can't answer",
+            "insufficient information",
+        )
+        return any(marker in lowered for marker in refusal_markers)
+
+    def _inline_citation_ids(self, answer: str) -> List[int]:
+        citation_ids = []
+        for match in re.findall(r"\[(\d+)\]", answer):
+            try:
+                citation_ids.append(int(match))
+            except ValueError:
+                continue
+        return citation_ids
+
+    def _citation_ids_are_valid(
+        self, inline_citation_ids: List[int], citations: List[AnswerCitation]
+    ) -> bool:
+        valid_citation_ids = {citation.citation_id for citation in citations}
+        return set(inline_citation_ids).issubset(valid_citation_ids)
+
+    def _cited_citations_for_answer(
+        self, answer: str, citations: List[AnswerCitation]
+    ) -> List[AnswerCitation]:
+        inline_citation_ids = set(self._inline_citation_ids(answer))
+        return [
+            citation for citation in citations if citation.citation_id in inline_citation_ids
+        ]
+
+    def _support_token(self, token: str) -> str:
+        if len(token) > 4 and token.endswith("ies"):
+            return f"{token[:-3]}y"
+        if len(token) > 4 and token.endswith("es"):
+            return token[:-2]
+        if len(token) > 3 and token.endswith("s"):
+            return token[:-1]
+        return token
+
+    def _support_tokens(self, text: str) -> set:
+        normalized_text = re.sub(r"\[\d+\]", " ", text.lower())
+        tokens = re.findall(r"\w+", normalized_text, flags=re.UNICODE)
+        return {
+            self._support_token(token)
+            for token in tokens
+            if (not token.isascii() or len(token) > 2)
+            and token not in ANSWER_SUPPORT_STOPWORDS
+        }
+
+    def _normalize_support_text(self, text: str) -> str:
+        without_citations = re.sub(r"\[\d+\]", " ", text.lower())
+        normalized_chars = []
+        for char in without_citations:
+            if char.isalnum():
+                normalized_chars.append(char)
+            else:
+                normalized_chars.append(" ")
+        return " ".join("".join(normalized_chars).split())
+
+    def _matched_claim_is_denied(
+        self,
+        normalized_answer: str,
+        normalized_evidence: str,
+        raw_evidence: str = "",
+    ) -> bool:
+        if not normalized_answer:
+            return False
+
+        match_starts = []
+        search_start = 0
+        while True:
+            start = normalized_evidence.find(normalized_answer, search_start)
+            if start < 0:
+                break
+            match_starts.append(start)
+            search_start = start + len(normalized_answer)
+
+        if not match_starts:
+            return False
+
+        if raw_evidence:
+            claim_pattern = r"\b" + r"\W+".join(
+                re.escape(token) for token in normalized_answer.split()
+            )
+            qa_denial_pattern = (
+                rf"{claim_pattern}\b\s*(?:\?|\:|[-–—])\s*"
+                r"(?:no|nope)\b(?=\s*(?:[.!?,;:]|$))"
+            )
+            if re.search(qa_denial_pattern, raw_evidence, flags=re.IGNORECASE):
+                return True
+
+        prefix_denial_markers = (
+            "it is false that",
+            "it is not true that",
+            "it is incorrect that",
+            "it is wrong that",
+            "it was false that",
+            "it was not true that",
+            "it was incorrect that",
+            "it was wrong that",
+            "false that",
+            "not true that",
+            "incorrect that",
+            "wrong that",
+            "denied that",
+            "refuted that",
+        )
+
+        denial_markers = (
+            "is false",
+            "is not true",
+            "is incorrect",
+            "is wrong",
+            "is denied",
+            "is refuted",
+            "is rejected",
+            "is debunked",
+            "is contradicted",
+            "is untrue",
+            "is unsupported",
+            "is not supported",
+            "is disputed",
+            "is inaccurate",
+            "is baseless",
+            "is unfounded",
+            "is disproven",
+            "is disproved",
+            "has been denied",
+            "has been refuted",
+            "has been rejected",
+            "has been debunked",
+            "has been contradicted",
+            "has been unsupported",
+            "has been disputed",
+            "has been disproven",
+            "has been disproved",
+            "have been denied",
+            "have been refuted",
+            "have been rejected",
+            "have been debunked",
+            "have been contradicted",
+            "have been unsupported",
+            "have been disputed",
+            "have been disproven",
+            "have been disproved",
+            "had been denied",
+            "had been refuted",
+            "had been rejected",
+            "had been debunked",
+            "had been contradicted",
+            "had been unsupported",
+            "had been disputed",
+            "had been disproven",
+            "had been disproved",
+            "was false",
+            "was not true",
+            "was incorrect",
+            "was wrong",
+            "was denied",
+            "was refuted",
+            "was rejected",
+            "was debunked",
+            "was contradicted",
+            "was untrue",
+            "was unsupported",
+            "was not supported",
+            "was disputed",
+            "was inaccurate",
+            "was baseless",
+            "was unfounded",
+            "was disproven",
+            "was disproved",
+            "are false",
+            "are not true",
+            "are incorrect",
+            "are wrong",
+            "are denied",
+            "are refuted",
+            "are rejected",
+            "are debunked",
+            "are contradicted",
+            "are untrue",
+            "are unsupported",
+            "are not supported",
+            "are disputed",
+            "are inaccurate",
+            "are baseless",
+            "are unfounded",
+            "are disproven",
+            "are disproved",
+            "were false",
+            "were not true",
+            "were incorrect",
+            "were wrong",
+            "were denied",
+            "were refuted",
+            "were rejected",
+            "were debunked",
+            "were contradicted",
+            "were untrue",
+            "were unsupported",
+            "were not supported",
+            "were disputed",
+            "were inaccurate",
+            "were baseless",
+            "were unfounded",
+            "were disproven",
+            "were disproved",
+            "not true",
+            "not supported",
+            "false",
+            "incorrect",
+            "wrong",
+            "denied",
+            "refuted",
+            "rejected",
+            "debunked",
+            "contradicted",
+            "untrue",
+            "unsupported",
+            "disputed",
+            "inaccurate",
+            "baseless",
+            "unfounded",
+            "disproven",
+            "disproved",
+        )
+
+        def has_denial_marker(tokens: List[str]) -> bool:
+            text = " ".join(tokens[:8])
+            return any(
+                text == marker or text.startswith(f"{marker} ")
+                for marker in denial_markers
+            )
+
+        referent_tokens = {"it", "that", "this", "they", "these", "those"}
+        referential_determiners = {"a", "an", "the"}
+        referential_nouns = {
+            "answer",
+            "assertion",
+            "assertions",
+            "claim",
+            "claims",
+            "idea",
+            "ideas",
+            "premise",
+            "premises",
+            "report",
+            "reports",
+            "statement",
+            "statements",
+        }
+        referential_modifiers = {"above", "previous", "prior", "same"}
+
+        def has_referential_denial_marker(tokens: List[str]) -> bool:
+            if has_denial_marker(tokens):
+                return True
+
+            if tokens and tokens[0] in referent_tokens:
+                if has_denial_marker(tokens[1:]):
+                    return True
+                if len(tokens) > 1 and tokens[1] in referential_nouns:
+                    return has_denial_marker(tokens[2:])
+
+            if tokens and tokens[0] in referential_determiners:
+                noun_tokens = tokens[1:]
+                if noun_tokens and noun_tokens[0] in referential_modifiers:
+                    noun_tokens = noun_tokens[1:]
+                if noun_tokens and noun_tokens[0] in referential_nouns:
+                    return has_denial_marker(noun_tokens[1:])
+
+            return False
+
+        discourse_connectors = {
+            "although",
+            "but",
+            "however",
+            "that",
+            "this",
+            "though",
+            "which",
+            "yet",
+        }
+
+        for start in match_starts:
+            before_match = normalized_evidence[:start]
+            previous_tokens = before_match.split()[-6:]
+            previous_text = " ".join(previous_tokens)
+            if any(
+                previous_text == marker or previous_text.endswith(f" {marker}")
+                for marker in prefix_denial_markers
+            ):
+                return True
+
+            after_match = normalized_evidence[start + len(normalized_answer) :]
+            following_tokens = after_match.split()[:8]
+            following_text = " ".join(following_tokens)
+            if following_tokens and following_tokens[0] in {"no", "nope"}:
+                if len(following_tokens) == 1:
+                    return True
+                if following_tokens[1] in {"it", "this", "that", "instead", "rather"}:
+                    return True
+                if following_text.startswith(
+                    ("no not true", "no false", "no incorrect")
+                ):
+                    return True
+
+            if has_referential_denial_marker(following_tokens):
+                return True
+
+            if following_tokens and following_tokens[0] in discourse_connectors:
+                connector_tail = following_tokens[1:]
+                if has_referential_denial_marker(connector_tail):
+                    return True
+
+        return False
+
+    def _citation_text_refutes_answer(
+        self, answer: str, citations: List[AnswerCitation], question: str
+    ) -> bool:
+        cited_citations = self._cited_citations_for_answer(answer, citations)
+        if not cited_citations:
+            return False
+
+        evidence_text_parts = []
+        for citation in cited_citations:
+            evidence_text_parts.append(citation.excerpt)
+
+        answer_tokens = self._support_tokens(answer)
+        if not answer_tokens:
+            return False
+
+        normalized_answer = self._normalize_support_text(answer)
+        normalized_evidence = self._normalize_support_text(" ".join(evidence_text_parts))
+        if not normalized_answer or normalized_answer not in normalized_evidence:
+            return False
+        return self._matched_claim_is_denied(
+            normalized_answer,
+            normalized_evidence,
+            " ".join(evidence_text_parts),
+        )
+
+    def _mechanical_self_check_answer(
+        self,
+        answer: str,
+        citations: List[AnswerCitation],
+        *,
+        question: str = "",
+        retry_attempted: bool = False,
+    ) -> AnswerSelfCheck:
+        clean_answer = answer.strip()
+        if len(clean_answer) < 3:
+            return AnswerSelfCheck(
+                outcome="needs_retry",
+                reasons=["answer_too_short"],
+                retry_attempted=retry_attempted,
+            )
+
+        if not citations:
+            if self._answer_is_refusal(clean_answer):
+                return AnswerSelfCheck(
+                    outcome="not_verified",
+                    reasons=["refused_without_prompt_evidence"],
+                    retry_attempted=retry_attempted,
+                )
+            return AnswerSelfCheck(
+                outcome="needs_refusal",
+                reasons=["no_prompt_evidence"],
+                retry_attempted=retry_attempted,
+            )
+
+        if self._answer_is_refusal(clean_answer):
+            return AnswerSelfCheck(
+                outcome="needs_retry",
+                reasons=["answer_refused_despite_prompt_evidence"],
+                retry_attempted=retry_attempted,
+            )
+
+        inline_citation_ids = self._inline_citation_ids(clean_answer)
+        if not inline_citation_ids:
+            return AnswerSelfCheck(
+                outcome="needs_retry",
+                reasons=["missing_inline_citation"],
+                retry_attempted=retry_attempted,
+            )
+
+        if not self._citation_ids_are_valid(inline_citation_ids, citations):
+            return AnswerSelfCheck(
+                outcome="needs_retry",
+                reasons=["invalid_inline_citation"],
+                retry_attempted=retry_attempted,
+            )
+
+        if self._citation_text_refutes_answer(clean_answer, citations, question):
+            return AnswerSelfCheck(
+                outcome="needs_refusal",
+                reasons=[
+                    "citation_text_does_not_support_answer",
+                    "deterministic_refutation_detected",
+                ],
+                retry_attempted=retry_attempted,
+            )
+
+        return AnswerSelfCheck(
+            outcome="mechanical_checks_passed",
+            reasons=["mechanical_checks_passed"],
+            retry_attempted=retry_attempted,
+        )
+
+    def _self_check_answer(
+        self,
+        answer: str,
+        citations: List[AnswerCitation],
+        *,
+        question: str = "",
+        retry_attempted: bool = False,
+    ) -> AnswerSelfCheck:
+        mechanical_check = self._mechanical_self_check_answer(
+            answer,
+            citations,
+            question=question,
+            retry_attempted=retry_attempted,
+        )
+        if mechanical_check.outcome != "mechanical_checks_passed":
+            return mechanical_check
+
+        if self._active_backend() == "mock":
+            return AnswerSelfCheck(
+                outcome="not_verified",
+                reasons=[
+                    "mechanical_checks_passed",
+                    "verifier_unavailable_mock_backend",
+                ],
+                retry_attempted=retry_attempted,
+            )
+
+        return self._verify_answer_with_llm(
+            question=question,
+            answer=answer,
+            citations=citations,
+            retry_attempted=retry_attempted,
+        )
+
+    def _verifier_prompt(
+        self, *, question: str, answer: str, citations: List[AnswerCitation]
+    ) -> str:
+        cited_citations = self._cited_citations_for_answer(answer, citations)
+        cited_excerpts = "\n\n".join(
+            f"[{citation.citation_id}] {citation.excerpt.strip()}"
+            for citation in cited_citations
+        )
+        return (
+            "You are a strict citation verifier for a document QA system.\n"
+            "Use only the cited excerpts. Do not use outside knowledge.\n"
+            "Decide whether every factual claim in the answer is directly supported "
+            "by the cited excerpts.\n"
+            "Return only JSON with this schema: "
+            '{"outcome":"supported|unsupported|insufficient","reason":"short reason"}.\n'
+            "Use unsupported when the cited excerpts contradict any answer claim.\n"
+            "Use insufficient when the cited excerpts do not contain enough evidence.\n\n"
+            f"Question:\n{question}\n\n"
+            f"Answer:\n{answer}\n\n"
+            f"Cited excerpts:\n{cited_excerpts}"
+        )
+
+    def _parse_verifier_response(self, raw_response: str) -> Tuple[Optional[str], str]:
+        json_match = re.search(r"\{.*\}", raw_response, flags=re.DOTALL)
+        if not json_match:
+            return None, "missing_json"
+        try:
+            payload = json.loads(json_match.group(0))
+        except json.JSONDecodeError:
+            return None, "invalid_json"
+
+        outcome = str(payload.get("outcome", "")).strip().lower()
+        if outcome not in VERIFIER_OUTCOMES:
+            return None, "invalid_outcome"
+        reason = str(payload.get("reason", "")).strip()
+        return outcome, reason
+
+    def _verify_answer_with_llm(
+        self,
+        *,
+        question: str,
+        answer: str,
+        citations: List[AnswerCitation],
+        retry_attempted: bool,
+    ) -> AnswerSelfCheck:
+        if self.llm is None:
+            return AnswerSelfCheck(
+                outcome="needs_refusal",
+                reasons=["llm_verifier_unavailable"],
+                retry_attempted=retry_attempted,
+            )
+
+        prompt = self._verifier_prompt(
+            question=question,
+            answer=answer,
+            citations=citations,
+        )
+        try:
+            raw_response = str(self.llm.invoke(prompt)).strip()
+        except Exception as exc:
+            LOGGER.warning("LLM verifier failed: %s", exc)
+            return AnswerSelfCheck(
+                outcome="needs_refusal",
+                reasons=["llm_verifier_error"],
+                retry_attempted=retry_attempted,
+            )
+
+        verifier_outcome, parse_reason = self._parse_verifier_response(raw_response)
+        if verifier_outcome is None:
+            return AnswerSelfCheck(
+                outcome="needs_refusal",
+                reasons=["llm_verifier_parse_failed", parse_reason],
+                retry_attempted=retry_attempted,
+            )
+
+        if verifier_outcome == "supported":
+            return AnswerSelfCheck(
+                outcome="supported",
+                reasons=["mechanical_checks_passed", "llm_verifier_supported"],
+                retry_attempted=retry_attempted,
+            )
+
+        return AnswerSelfCheck(
+            outcome="needs_refusal",
+            reasons=[f"llm_verifier_{verifier_outcome}"],
+            retry_attempted=retry_attempted,
+        )
+
+    def _fail_closed_self_check(self, self_check: AnswerSelfCheck) -> AnswerSelfCheck:
+        reasons = list(self_check.reasons)
+        if "self_check_failed_closed" not in reasons:
+            reasons.insert(0, "self_check_failed_closed")
+        return AnswerSelfCheck(
+            outcome="needs_refusal",
+            reasons=reasons,
+            retry_attempted=self_check.retry_attempted,
+        )
+
+    def _self_check_retry_instruction(self, self_check: AnswerSelfCheck) -> str:
+        reasons = ", ".join(self_check.reasons)
+        return (
+            "Self-check retry instruction: the previous answer failed checks "
+            f"({reasons}). Answer again using only the context above. Include at least "
+            "one bracketed citation like [1] for supported claims. If the context does "
+            "not contain the answer, say that clearly."
+        )
+
     def _query_result(
         self,
         *,
@@ -1427,6 +2093,7 @@ class DocumentQA:
         active_state: ActiveDocumentState,
         retrieved_chunk_count: int = 0,
         citations: Optional[List[AnswerCitation]] = None,
+        self_check: Optional[AnswerSelfCheck] = None,
         error_message: Optional[str] = None,
     ) -> QueryResult:
         return QueryResult(
@@ -1438,6 +2105,7 @@ class DocumentQA:
                 model_label=self._active_model_label(),
                 retrieved_chunk_count=retrieved_chunk_count,
                 citations=citations or [],
+                self_check=self_check,
                 error_message=error_message,
             ),
         )
@@ -1484,22 +2152,52 @@ class DocumentQA:
                 response = chain_result.answer
                 retrieved_chunk_count = chain_result.retrieved_chunk_count
                 citations = chain_result.citations
+                self_check = self._self_check_answer(
+                    response, citations, question=clean_prompt
+                )
+                if self_check.outcome == "needs_retry" and hasattr(
+                    active_state.retrieval_chain, "retry_with_trace"
+                ):
+                    retry_result = active_state.retrieval_chain.retry_with_trace(
+                        clean_prompt,
+                        chain_result,
+                        self_check_instruction=self._self_check_retry_instruction(
+                            self_check
+                        ),
+                    )
+                    response = retry_result.answer
+                    retrieved_chunk_count = retry_result.retrieved_chunk_count
+                    citations = retry_result.citations
+                    self_check = self._self_check_answer(
+                        response,
+                        citations,
+                        question=clean_prompt,
+                        retry_attempted=True,
+                    )
             else:
                 response = active_state.retrieval_chain.invoke(clean_prompt)
                 retrieved_chunk_count = 0
                 citations = []
+                self_check = None
 
             response = str(response).strip()
             if len(response) < 3:
-                response = (
-                    "I could not find enough relevant information in the document to answer that."
+                response = SELF_CHECK_REFUSAL_ANSWER
+                self_check = self._self_check_answer(
+                    response, citations, question=clean_prompt
                 )
+
+            if self_check and self_check.outcome not in SELF_CHECK_PASS_OUTCOMES:
+                response = SELF_CHECK_REFUSAL_ANSWER
+                if self_check.outcome != "needs_refusal":
+                    self_check = self._fail_closed_self_check(self_check)
             result = self._query_result(
                 answer=response,
                 question=clean_prompt,
                 active_state=active_state,
                 retrieved_chunk_count=retrieved_chunk_count,
                 citations=citations,
+                self_check=self_check,
             )
 
             self.chat_history.append(
@@ -1517,6 +2215,15 @@ class DocumentQA:
                         }
                         for citation in citations
                     ],
+                    "self_check": (
+                        {
+                            "outcome": self_check.outcome,
+                            "reasons": self_check.reasons,
+                            "retry_attempted": self_check.retry_attempted,
+                        }
+                        if self_check
+                        else None
+                    ),
                 }
             )
             return result

@@ -1,10 +1,12 @@
 import threading
+import json
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 
-from src.DocumentQA import DocumentQA, FaissVectorStore, MockLLM
+from src.DocumentQA import AnswerCitation, DocumentQA, FaissVectorStore, MockLLM
 
 
 class FakeEmbeddings(Embeddings):
@@ -67,7 +69,9 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     assert qa.retrieval_chain is not None
     assert qa.active_llm_backend == "mock"
     assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
-    assert "demonstration response" in qa.query("What is Project Phoenix?")
+    mock_answer = qa.query("What is Project Phoenix?")
+    assert "Project Phoenix" in mock_answer
+    assert "[1]" in mock_answer
 
     status = qa.status()
     assert status.profile_label == "FAST"
@@ -96,13 +100,20 @@ def test_query_with_trace_returns_retrieved_citations(tmp_path):
 
     result = qa.query_with_trace("What is Project Phoenix?")
 
-    assert "demonstration response" in result.answer
+    assert "Project Phoenix" in result.answer
+    assert "[1]" in result.answer
     assert result.trace.question == "What is Project Phoenix?"
     assert result.trace.document_name == "phoenix.txt"
     assert result.trace.backend == "mock"
     assert result.trace.model_label == "MockLLM (fallback)"
     assert result.trace.retrieved_chunk_count > 0
     assert result.trace.error_message is None
+    assert result.trace.self_check.outcome == "not_verified"
+    assert result.trace.self_check.reasons == [
+        "mechanical_checks_passed",
+        "verifier_unavailable_mock_backend",
+    ]
+    assert result.trace.self_check.retry_attempted is False
     assert len(result.trace.citations) >= 1
     citation = result.trace.citations[0]
     assert citation.citation_id == 1
@@ -132,6 +143,840 @@ def test_query_trace_counts_only_prompt_included_chunks(tmp_path):
 
     assert result.trace.retrieved_chunk_count == 1
     assert len(result.trace.citations) == 1
+
+
+def replace_retrieval_chain(qa, retrieval_chain):
+    active_state = qa._snapshot_active_document_state()
+    qa._commit_active_document_state(
+        document_name=active_state.document_name,
+        vector_store=active_state.vector_store,
+        retrieval_chain=retrieval_chain,
+        processing_report=qa.status().processing_report,
+    )
+
+
+def citation_for(document_name="phoenix.txt"):
+    return AnswerCitation(
+        citation_id=1,
+        source_name=document_name,
+        page=None,
+        chunk_index=0,
+        excerpt="Project Phoenix launches in June 2026.",
+    )
+
+
+class FakeVerifierLLM:
+    def __init__(self, outcome="supported", raw_response=None, error=None):
+        self.outcome = outcome
+        self.raw_response = raw_response
+        self.error = error
+        self.calls = []
+
+    def invoke(self, prompt):
+        self.calls.append(prompt)
+        if self.error:
+            raise self.error
+        if self.raw_response is not None:
+            return self.raw_response
+        return json.dumps({"outcome": self.outcome, "reason": "test verifier"})
+
+
+def enable_fake_verifier(qa, outcome="supported", raw_response=None, error=None):
+    verifier = FakeVerifierLLM(
+        outcome=outcome,
+        raw_response=raw_response,
+        error=error,
+    )
+    qa.active_llm_backend = "endpoint"
+    qa.llm = verifier
+    qa.loaded_model_label = "Fake verifier endpoint"
+    return verifier
+
+
+def test_self_check_refuses_when_answer_has_no_prompt_evidence(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+
+    class NoEvidenceChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow.",
+                retrieved_chunk_count=0,
+                citations=[],
+            )
+
+    replace_retrieval_chain(qa, NoEvidenceChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert result.trace.self_check.reasons == ["no_prompt_evidence"]
+    assert result.trace.self_check.retry_attempted is False
+    assert result.trace.citations == []
+
+
+def test_self_check_retries_missing_inline_citation(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+
+    class RetryCitationChain:
+        def __init__(self):
+            self.calls = []
+
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            self.calls.append(self_check_instruction)
+            answer = "Project Phoenix launches in June 2026."
+            return SimpleNamespace(
+                answer=answer,
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="original context",
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            self.calls.append(self_check_instruction)
+            return SimpleNamespace(
+                answer="Project Phoenix launches in June 2026 [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    retrieval_chain = RetryCitationChain()
+    replace_retrieval_chain(qa, retrieval_chain)
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert len(retrieval_chain.calls) == 2
+    assert retrieval_chain.calls[0] == ""
+    assert "missing_inline_citation" in retrieval_chain.calls[1]
+    assert result.answer == "Project Phoenix launches in June 2026 [1]."
+    assert result.trace.self_check.outcome == "not_verified"
+    assert result.trace.self_check.reasons == [
+        "mechanical_checks_passed",
+        "verifier_unavailable_mock_backend",
+    ]
+    assert result.trace.self_check.retry_attempted is True
+    assert qa.chat_history[-1]["self_check"]["retry_attempted"] is True
+
+
+def test_self_check_refuses_when_retry_still_fails(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+
+    class FailedRetryChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches in June 2026.",
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="original context",
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow.",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, FailedRetryChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert "self_check_failed_closed" in result.trace.self_check.reasons
+    assert "missing_inline_citation" in result.trace.self_check.reasons
+    assert result.trace.self_check.retry_attempted is True
+
+
+def test_self_check_rejects_cited_but_unsupported_answer(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+    verifier = enable_fake_verifier(qa, outcome="unsupported")
+
+    class ContradictedCitationChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, ContradictedCitationChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert result.trace.self_check.reasons == ["llm_verifier_unsupported"]
+    assert result.trace.self_check.retry_attempted is False
+    assert len(verifier.calls) == 1
+    assert "Project Phoenix launches tomorrow [1]." in verifier.calls[0]
+    assert "Project Phoenix launches in June 2026." in verifier.calls[0]
+
+
+def test_llm_verifier_marks_real_backend_answer_supported(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+    verifier = enable_fake_verifier(qa, outcome="supported")
+
+    class SupportedCitationChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches in June 2026 [1].",
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+    replace_retrieval_chain(qa, SupportedCitationChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == "Project Phoenix launches in June 2026 [1]."
+    assert result.trace.backend == "endpoint"
+    assert result.trace.self_check.outcome == "supported"
+    assert result.trace.self_check.reasons == [
+        "mechanical_checks_passed",
+        "llm_verifier_supported",
+    ]
+    assert len(verifier.calls) == 1
+    assert "When does Project Phoenix launch?" in verifier.calls[0]
+    assert "Project Phoenix launches in June 2026." in verifier.calls[0]
+
+
+def test_self_check_retries_hallucinated_inline_citation_id(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+    verifier = enable_fake_verifier(qa, outcome="supported")
+
+    class HallucinatedCitationChain:
+        def __init__(self):
+            self.calls = []
+
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            self.calls.append(self_check_instruction)
+            return SimpleNamespace(
+                answer=(
+                    "Project Phoenix launches in June 2026 [1]. "
+                    "Budget is $10 [999]."
+                ),
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            self.calls.append(self_check_instruction)
+            return SimpleNamespace(
+                answer="Project Phoenix launches in June 2026 [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    retrieval_chain = HallucinatedCitationChain()
+    replace_retrieval_chain(qa, retrieval_chain)
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == "Project Phoenix launches in June 2026 [1]."
+    assert result.trace.self_check.outcome == "supported"
+    assert result.trace.self_check.retry_attempted is True
+    assert len(retrieval_chain.calls) == 2
+    assert "invalid_inline_citation" in retrieval_chain.calls[1]
+    assert len(verifier.calls) == 1
+    assert "[999]" not in verifier.calls[0]
+
+
+def test_self_check_refuses_when_retry_keeps_hallucinated_inline_citation_id(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+    verifier = enable_fake_verifier(qa, outcome="supported")
+
+    class StillHallucinatedCitationChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer=(
+                    "Project Phoenix launches in June 2026 [1]. "
+                    "Budget is $10 [999]."
+                ),
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer=(
+                    "Project Phoenix launches in June 2026 [1]. "
+                    "Budget is $10 [999]."
+                ),
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, StillHallucinatedCitationChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert "self_check_failed_closed" in result.trace.self_check.reasons
+    assert "invalid_inline_citation" in result.trace.self_check.reasons
+    assert result.trace.self_check.retry_attempted is True
+    assert verifier.calls == []
+
+
+@pytest.mark.parametrize(
+    "verifier_kwargs, expected_reasons",
+    [
+        ({"outcome": "insufficient"}, ["llm_verifier_insufficient"]),
+        ({"raw_response": "not-json"}, ["llm_verifier_parse_failed", "missing_json"]),
+        ({"error": RuntimeError("verifier down")}, ["llm_verifier_error"]),
+    ],
+)
+def test_llm_verifier_failures_refuse_answer(
+    tmp_path, verifier_kwargs, expected_reasons
+):
+    qa, document = create_processed_mock_qa(tmp_path)
+    enable_fake_verifier(qa, **verifier_kwargs)
+
+    class SupportedCitationChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches in June 2026 [1].",
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+    replace_retrieval_chain(qa, SupportedCitationChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert result.trace.self_check.reasons == expected_reasons
+
+
+def test_self_check_rejects_inverted_relationship_claim(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    enable_fake_verifier(qa, outcome="unsupported")
+    citation = AnswerCitation(
+        citation_id=1,
+        source_name="acquisition.txt",
+        page=None,
+        chunk_index=0,
+        excerpt="Alice acquired Bob in 2026.",
+    )
+
+    class InvertedRelationshipChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Bob acquired Alice in 2026 [1].",
+                retrieved_chunk_count=1,
+                citations=[citation],
+                context=citation.excerpt,
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Bob acquired Alice in 2026 [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, InvertedRelationshipChain())
+
+    result = qa.query_with_trace("Who acquired whom?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert result.trace.self_check.reasons == ["llm_verifier_unsupported"]
+
+
+def test_self_check_rejects_denied_extractive_claim(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    citation = AnswerCitation(
+        citation_id=1,
+        source_name="denial.txt",
+        page=None,
+        chunk_index=0,
+        excerpt="Project Phoenix launches tomorrow is false.",
+    )
+
+    class DeniedClaimChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation],
+                context=citation.excerpt,
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, DeniedClaimChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
+
+
+def test_self_check_rejects_later_refuted_repeated_claim(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    citation = AnswerCitation(
+        citation_id=1,
+        source_name="later-denial.txt",
+        page=None,
+        chunk_index=0,
+        excerpt=(
+            "Project Phoenix launches tomorrow. "
+            "Project Phoenix launches tomorrow is false."
+        ),
+    )
+
+    class LaterDeniedClaimChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation],
+                context=citation.excerpt,
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, LaterDeniedClaimChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
+
+
+@pytest.mark.parametrize(
+    "excerpt",
+    [
+        "Project Phoenix launches tomorrow, but that is false.",
+        "Project Phoenix launches tomorrow; however, that is false.",
+        "Project Phoenix launches tomorrow, although that is not true.",
+        "Project Phoenix launches tomorrow, which is incorrect.",
+    ],
+)
+def test_self_check_rejects_connector_refuted_extractive_claim(tmp_path, excerpt):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    citation = AnswerCitation(
+        citation_id=1,
+        source_name="connector-denial.txt",
+        page=None,
+        chunk_index=0,
+        excerpt=excerpt,
+    )
+
+    class ConnectorDeniedClaimChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation],
+                context=citation.excerpt,
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, ConnectorDeniedClaimChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
+
+
+@pytest.mark.parametrize(
+    "excerpt",
+    [
+        "Project Phoenix launches tomorrow, but that claim is false.",
+        "Project Phoenix launches tomorrow, but that claim has been denied.",
+        "Project Phoenix launches tomorrow, but that claim has been rejected.",
+        "Project Phoenix launches tomorrow, but that claim has been debunked.",
+        "Project Phoenix launches tomorrow, but that claim is contradicted by the schedule.",
+        "Project Phoenix launches tomorrow, but that claim is untrue.",
+        "Project Phoenix launches tomorrow, but that claim is unsupported.",
+        "Project Phoenix launches tomorrow, but that claim is not supported by the schedule.",
+        "Project Phoenix launches tomorrow, but that claim is disputed.",
+        "Project Phoenix launches tomorrow, but that claim is inaccurate.",
+        "Project Phoenix launches tomorrow, but that claim is baseless.",
+        "Project Phoenix launches tomorrow, but that claim is unfounded.",
+        "Project Phoenix launches tomorrow, but that claim has been disproven.",
+        "Project Phoenix launches tomorrow, but that claim has been disproved.",
+        "Project Phoenix launches tomorrow, but the claim is false.",
+        "Project Phoenix launches tomorrow, but the prior claim is false.",
+        "Project Phoenix launches tomorrow, but the statement is false.",
+        "Project Phoenix launches tomorrow, but this assertion has been refuted.",
+        "Project Phoenix launches tomorrow, but this claim is not true.",
+    ],
+)
+def test_self_check_rejects_connector_noun_phrase_refutation(tmp_path, excerpt):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    citation = AnswerCitation(
+        citation_id=1,
+        source_name="connector-noun-denial.txt",
+        page=None,
+        chunk_index=0,
+        excerpt=excerpt,
+    )
+
+    class ConnectorNounDeniedClaimChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation],
+                context=citation.excerpt,
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, ConnectorNounDeniedClaimChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
+
+
+@pytest.mark.parametrize(
+    "excerpt",
+    [
+        "Project Phoenix launches tomorrow, which is correct.",
+        "Project Phoenix launches tomorrow, but that claim is correct.",
+        "Project Phoenix launches tomorrow, but that claim has not been rejected.",
+        "Project Phoenix launches tomorrow, but that claim has not been disproven.",
+    ],
+)
+def test_self_check_does_not_treat_positive_connector_as_denial(tmp_path, excerpt):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    citation = AnswerCitation(
+        citation_id=1,
+        source_name="positive-connector.txt",
+        page=None,
+        chunk_index=0,
+        excerpt=excerpt,
+    )
+
+    class PositiveConnectorClaimChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation],
+                context=citation.excerpt,
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, PositiveConnectorClaimChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == "Project Phoenix launches tomorrow [1]."
+    assert result.trace.self_check.outcome == "not_verified"
+    assert result.trace.self_check.reasons == [
+        "mechanical_checks_passed",
+        "verifier_unavailable_mock_backend",
+    ]
+
+
+def test_self_check_rejects_prefix_refuted_extractive_claim(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    citation = AnswerCitation(
+        citation_id=1,
+        source_name="prefix-denial.txt",
+        page=None,
+        chunk_index=0,
+        excerpt="It is false that Project Phoenix launches tomorrow.",
+    )
+
+    class PrefixDeniedClaimChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation],
+                context=citation.excerpt,
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, PrefixDeniedClaimChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
+
+
+@pytest.mark.parametrize(
+    "excerpt",
+    [
+        "Project Phoenix launches tomorrow? No.",
+        "Project Phoenix launches tomorrow? No, it launches in June 2026.",
+    ],
+)
+def test_self_check_rejects_qa_style_denied_extractive_claim(tmp_path, excerpt):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    citation = AnswerCitation(
+        citation_id=1,
+        source_name="qa-denial.txt",
+        page=None,
+        chunk_index=0,
+        excerpt=excerpt,
+    )
+
+    class QaDeniedClaimChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation],
+                context=citation.excerpt,
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, QaDeniedClaimChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
+
+
+def test_self_check_does_not_treat_no_later_qualifier_as_denial(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    citation = AnswerCitation(
+        citation_id=1,
+        source_name="schedule.txt",
+        page=None,
+        chunk_index=0,
+        excerpt="Project Phoenix launches tomorrow no later than noon.",
+    )
+
+    class QualifiedClaimChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation],
+                context=citation.excerpt,
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, QualifiedClaimChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == "Project Phoenix launches tomorrow [1]."
+    assert result.trace.self_check.outcome == "not_verified"
+    assert result.trace.self_check.reasons == [
+        "mechanical_checks_passed",
+        "verifier_unavailable_mock_backend",
+    ]
+
+
+def test_self_check_rejects_false_premise_question_token_laundering(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+    enable_fake_verifier(qa, outcome="unsupported")
+
+    class FalsePremiseChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    replace_retrieval_chain(qa, FalsePremiseChain())
+
+    result = qa.query_with_trace("Does Project Phoenix launch tomorrow?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert result.trace.self_check.reasons == ["llm_verifier_unsupported"]
+
+
+def test_self_check_rejects_unchecked_unicode_claim(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+    enable_fake_verifier(qa, outcome="unsupported")
+
+    class UnicodeClaimChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Привет [1].",
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+    replace_retrieval_chain(qa, UnicodeClaimChain())
+
+    result = qa.query_with_trace("What greeting is in the document?")
+
+    assert result.answer == (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert result.trace.self_check.reasons == ["llm_verifier_unsupported"]
+
+
+def test_self_check_retry_reuses_original_prompt_evidence(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+
+    class DriftingEvidenceChain:
+        def __init__(self):
+            self.invoke_calls = 0
+            self.retry_context = None
+
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            self.invoke_calls += 1
+            if self.invoke_calls == 1:
+                return SimpleNamespace(
+                    answer="Project Phoenix launches in June 2026.",
+                    retrieved_chunk_count=1,
+                    citations=[citation_for(document.name)],
+                    context="original prompt evidence",
+                )
+            return SimpleNamespace(
+                answer="Project Phoenix launches tomorrow [1].",
+                retrieved_chunk_count=1,
+                citations=[citation_for("drift.txt")],
+                context="drifted prompt evidence",
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            self.retry_context = previous_result.context
+            return SimpleNamespace(
+                answer="Project Phoenix launches in June 2026 [1].",
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    retrieval_chain = DriftingEvidenceChain()
+    replace_retrieval_chain(qa, retrieval_chain)
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert retrieval_chain.invoke_calls == 1
+    assert retrieval_chain.retry_context == "original prompt evidence"
+    assert result.trace.citations[0].source_name == document.name
+    assert result.trace.self_check.outcome == "not_verified"
+    assert result.trace.self_check.reasons == [
+        "mechanical_checks_passed",
+        "verifier_unavailable_mock_backend",
+    ]
+    assert result.trace.self_check.retry_attempted is True
 
 
 def test_document_chunks_record_citation_metadata(tmp_path):
