@@ -4,12 +4,12 @@
 
 This repository is a compact document QA/RAG assistant. It accepts PDF, DOCX,
 TXT, and MD uploads, chunks document text, indexes chunks with FAISS, and answers
-questions through a configurable Hugging Face LLM backend.
+questions through configurable Hugging Face or Ollama LLM backends.
 
 Primary runtime files:
 
 - `src/DocumentQA.py`: ingestion, encoding detection, embeddings, vector search,
-  LLM backend selection, retrieval chain, and query handling.
+  LLM backend selection, retrieval chain, Ollama adapter, and query handling.
 - `src/app.py`: Gradio UI wiring and user-facing status messages.
 - `tests/`: regression coverage for backend honesty, ingestion, encoding, app
   status, and retrieval behavior.
@@ -20,14 +20,15 @@ Primary runtime files:
 - Install test/audit dependencies: `python -m pip install -r requirements-dev.txt`
 - Run the app locally: `python src/app.py`
 - Run tests: `python -m pytest`
-- Compile check: `python -m py_compile src/app.py src/DocumentQA.py tests/test_app.py tests/test_document_qa.py`
+- Compile check: `python -m py_compile src/app.py src/DocumentQA.py src/golden_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_ollama_model_eval.py`
 - Dependency checks: `python -m pip check` and `python -m pip_audit -r requirements.txt --strict`
 
 ## Non-Negotiable Contracts
 
-- Do not silently fall back from explicit real LLM backends. `LLM_BACKEND=endpoint`
-  and `LLM_BACKEND=local` must fail closed when credentials or model loading are
-  invalid. Mock mode must be explicit or an `auto` demo fallback.
+- Do not silently fall back from explicit real LLM backends. `LLM_BACKEND=endpoint`,
+  `LLM_BACKEND=local`, and `LLM_BACKEND=ollama` must fail closed when credentials,
+  model loading, server reachability, or model availability are invalid. Mock mode
+  must be explicit or an `auto` demo fallback.
 - Do not let UI status imply inference readiness before inference has actually
   happened. Document upload means indexed, not proven ready.
 - Document upload replacement must be transactional. Failed uploads must preserve
@@ -41,12 +42,26 @@ Primary runtime files:
   deterministic refutation prefilters may reject bad answers, but only a real
   backend verifier may label an answer `supported`. Mock/demo mode must report
   mechanically valid answers as `not_verified`, not `supported`.
+- Golden document evals must remain provider-free and deterministic. They should
+  exercise upload, retrieval, citation trace, self-check, retry, and fail-closed
+  behavior without requiring a live Ollama or Hugging Face backend in CI.
+- Live Ollama model comparison is optional and manual. Do not add it to CI; use
+  provider-free tests for CI, keep live model runs unload-aware, and keep
+  multi-model local eval behind an explicit override because Mac unified memory
+  can be exhausted quickly. The live eval command must accept only loopback
+  Ollama base URLs.
 - Text upload default is `Auto`. Ambiguous legacy bytes must fail closed instead
   of mojibaking. `UTF-8 / Western` and explicit legacy encodings are opt-ins.
 - Docker image publication belongs to `main` only. `dev`, PR, and manual workflow
   runs may validate builds, but must not publish release images.
 - Preserve deterministic generation for document QA unless a test-backed product
   reason requires changing it.
+- Ollama support is explicit, not part of `auto`. Use `OLLAMA_MODEL`,
+  `OLLAMA_BASE_URL`, and `OLLAMA_TIMEOUT`; do not route Ollama through
+  Hugging Face model ids or tokens.
+- Product direction is local-first. Keep Hugging Face support as an optional
+  hosted/deployment path, but do not make new happy-path features require a
+  Hugging Face token when they can run through Ollama.
 
 ## Engineering Loop
 
@@ -56,7 +71,7 @@ Use this loop for every non-trivial change:
 2. State the narrow behavior contract you are changing.
 3. Make the smallest code change that improves that contract.
 4. Add or update tests for the behavior, including hostile environment cases when
-   env vars, encodings, credentials, or CI triggers are involved.
+   env vars, encodings, credentials, local model servers, or CI triggers are involved.
 5. Run focused tests first, then the broader validation commands when risk
    touches shared behavior.
 6. When subagent tooling is available, ask a review subagent for actionable
@@ -74,6 +89,9 @@ Use this loop for every non-trivial change:
   evidence through structured result objects such as `query_with_trace()`.
 - Keep `DocumentQA` honest before making it clever. Reliability beats agentic
   theater.
+- Before adding planner/tool/agent loops, add or update golden document evals
+  that prove the base RAG loop still cites, verifies, retries, and refuses
+  honestly.
 - Add abstractions only when they reduce risk or remove repeated policy logic.
 - Keep docs and comments aligned with runtime behavior. Stale comments are bugs
   waiting to be reintroduced.
@@ -87,7 +105,8 @@ For narrow docs-only changes:
 For Python behavior changes:
 
 - `python -m pytest`
-- `python -m py_compile src/app.py src/DocumentQA.py tests/test_app.py tests/test_document_qa.py`
+- `python -m pytest tests/test_golden_document_eval.py -q`
+- `python -m py_compile src/app.py src/DocumentQA.py src/golden_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_ollama_model_eval.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:

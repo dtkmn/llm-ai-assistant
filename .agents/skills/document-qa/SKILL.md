@@ -30,7 +30,10 @@ decoding, and reproducible validation.
 
 - `auto` backend may fall back to `MockLLM` for demos when credentials are
   absent, but explicit `endpoint` and `local` backends must fail closed.
-- `hf_token="dummy"` is valid only for mock/demo paths.
+- `ollama` is an explicit local-server backend, not part of `auto`; it must fail
+  closed when the server or configured model is unavailable.
+- `hf_token="dummy"` is valid only for Hugging Face mock/demo paths. Ollama does
+  not use Hugging Face tokens.
 - Upload status must say `indexed` for real backends, because endpoint readiness
   is not proven until the first inference call.
 - Upload replacement must be transactional. Failed uploads must not replace the
@@ -44,6 +47,12 @@ decoding, and reproducible validation.
   mechanical checks and deterministic refutation prefilters may reject bad
   answers, but only a real backend verifier may label an answer `supported`.
   Mock/demo mode must report mechanically valid answers as `not_verified`.
+- Golden document evals must exercise the full provider-free QA loop: upload,
+  retrieval, cited answer, self-check, retry, and fail-closed refusal. Do not
+  require a live Ollama or Hugging Face backend for these CI checks.
+- Live Ollama model comparison is optional and manual. Keep it unload-aware,
+  keep multi-model runs behind an explicit override, and never make CI require
+  resident local models. Keep the live eval base URL loopback-only.
 - Text encoding default is `Auto`. Ambiguous non-UTF legacy files must not be
   silently decoded as Western text.
 - Explicit encoding selections are user intent. Preserve valid CP1250, CP1251,
@@ -54,8 +63,12 @@ decoding, and reproducible validation.
 
 - `src/DocumentQA.py`
 - `src/app.py`
+- `src/golden_eval.py`
+- `src/ollama_model_eval.py`
 - `tests/test_document_qa.py`
 - `tests/test_app.py`
+- `tests/test_golden_document_eval.py`
+- `tests/test_ollama_model_eval.py`
 - `.github/workflows/tests.yml`
 - `.github/workflows/docker-publish.yml`
 
@@ -76,9 +89,19 @@ For UI status changes:
 
 For backend routing changes:
 
-- Exercise `LLM_BACKEND=auto`, `mock`, `endpoint`, and `local` paths.
-- Clear or set `HUGGINGFACEHUB_API_TOKEN`, `HF_ENDPOINT_URL`, and `LLM_BACKEND`
-  inside tests so shell state cannot poison CI.
+- Exercise `LLM_BACKEND=auto`, `mock`, `endpoint`, `local`, and `ollama` paths
+  when the change touches backend selection.
+- Clear or set `HUGGINGFACEHUB_API_TOKEN`, `HF_ENDPOINT_URL`, `LLM_BACKEND`,
+  `OLLAMA_MODEL`, and `OLLAMA_BASE_URL` inside tests so shell state cannot poison CI.
+
+For answer-loop or agent-pattern changes:
+
+- `python -m pytest tests/test_golden_document_eval.py -q`
+- `python -m pytest tests/test_ollama_model_eval.py -q`
+- Assert cited supported answers, unsupported-answer refusal, and retry behavior.
+- Keep eval fixtures deterministic and provider-free.
+- Keep live Ollama comparison manual. Prefer one-model, one-case smoke runs on
+  memory-constrained Macs, and do not make multi-model live eval the default.
 
 For release automation:
 
