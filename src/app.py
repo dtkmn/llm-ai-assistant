@@ -168,6 +168,79 @@ def public_trace_error(
     return query_result.trace.error_message
 
 
+def public_loop_report_dict(query_result: QueryResult) -> Optional[dict]:
+    return (
+        query_result.loop_report.to_public_dict()
+        if query_result.loop_report
+        else None
+    )
+
+
+def format_loop_summary(query_result: Optional[QueryResult]) -> str:
+    if query_result is None:
+        return json.dumps(
+            {
+                "context_provider": None,
+                "document": None,
+                "backend": None,
+                "model": None,
+                "retrieved_chunk_count": 0,
+                "draft_attempt_count": 0,
+                "mechanical_check": None,
+                "verifier": None,
+                "retry_attempted": False,
+                "refused": False,
+                "final_decision": None,
+                "last_error": None,
+            },
+            indent=2,
+        )
+
+    public_loop_report = public_loop_report_dict(query_result)
+    run = (public_loop_report or {}).get("run") or {}
+    steps = run.get("steps") or []
+    trace = query_result.trace
+    mechanical_steps = [
+        step for step in steps if step.get("phase") == "mechanical_check"
+    ]
+    verify_steps = [step for step in steps if step.get("phase") == "verify"]
+    retry_attempted = any(step.get("phase") == "retry" for step in steps)
+    if trace.self_check:
+        retry_attempted = retry_attempted or trace.self_check.retry_attempted
+    final_decision = run.get("final_decision")
+
+    verifier = None
+    if verify_steps:
+        verify_step = verify_steps[-1]
+        verification = verify_step.get("verification") or {}
+        verifier = {
+            "decision": verify_step.get("decision"),
+            "outcome": verification.get("outcome") or verify_step.get("output_summary"),
+            "reasons": verification.get("reasons") or verify_step.get("metadata", {}).get("reasons", []),
+        }
+
+    summary = {
+        "context_provider": run.get("context_provider"),
+        "document": trace.document_name,
+        "backend": trace.backend,
+        "model": trace.model_label,
+        "retrieved_chunk_count": trace.retrieved_chunk_count,
+        "draft_attempt_count": sum(
+            1 for step in steps if step.get("phase") == "draft"
+        ),
+        "mechanical_check": (
+            mechanical_steps[-1].get("output_summary") if mechanical_steps else None
+        ),
+        "verifier": verifier,
+        "retry_attempted": retry_attempted,
+        "refused": final_decision == "refuse"
+        or any(step.get("phase") == "refuse" for step in steps),
+        "final_decision": final_decision,
+        "last_error": public_trace_error(query_result, public_loop_report),
+    }
+    return json.dumps(summary, indent=2)
+
+
 def format_answer_trace(query_result: Optional[QueryResult]) -> str:
     if query_result is None:
         return json.dumps(
@@ -188,11 +261,7 @@ def format_answer_trace(query_result: Optional[QueryResult]) -> str:
 
     trace = query_result.trace
     self_check = trace.self_check
-    public_loop_report = (
-        query_result.loop_report.to_public_dict()
-        if query_result.loop_report
-        else None
-    )
+    public_loop_report = public_loop_report_dict(query_result)
     return json.dumps(
         {
             "question": trace.question,
@@ -270,14 +339,19 @@ def chat(message, history):
         response = query_result.answer
         history.append({"role": "user", "content": message})
         history.append({"role": "assistant", "content": response})
-        return history, "", format_answer_trace(query_result)
-    return history, "", format_answer_trace(None)
+        return (
+            history,
+            "",
+            format_loop_summary(query_result),
+            format_answer_trace(query_result),
+        )
+    return history, "", format_loop_summary(None), format_answer_trace(None)
 
 
 def clear_chat():
     """Clear the chat history."""
     qa_system.chat_history.clear()
-    return [], format_answer_trace(None)
+    return [], format_loop_summary(None), format_answer_trace(None)
 
 
 # Create the Gradio interface
@@ -304,6 +378,12 @@ with gr.Blocks() as demo:
         with gr.Column():
             chatbot = gr.Chatbot()
             msg = gr.Textbox(label="Ask a question")
+            loop_summary = gr.Textbox(
+                label="Loop Summary",
+                value=format_loop_summary(None),
+                lines=12,
+                interactive=False,
+            )
             answer_trace = gr.Textbox(
                 label="Loop Trace",
                 value=format_answer_trace(None),
@@ -317,8 +397,8 @@ with gr.Blocks() as demo:
         inputs=[file_upload, text_encoding],
         outputs=[upload_status, runtime_status],
     )
-    msg.submit(chat, [msg, chatbot], [chatbot, msg, answer_trace])
-    clear.click(clear_chat, None, [chatbot, answer_trace], queue=False)
+    msg.submit(chat, [msg, chatbot], [chatbot, msg, loop_summary, answer_trace])
+    clear.click(clear_chat, None, [chatbot, loop_summary, answer_trace], queue=False)
 
 
 if __name__ == "__main__":

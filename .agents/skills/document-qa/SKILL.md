@@ -36,6 +36,8 @@ first context provider, not the product boundary.
   not use Hugging Face tokens.
 - Product identity is AI Loop Engine. Treat document answering as
   the first context provider capability, not the repo's strategic identity.
+- Document context is the first `ContextProvider`; keep provider identity in
+  loop reports instead of hardcoding document-specific assumptions in UI code.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,
   `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and

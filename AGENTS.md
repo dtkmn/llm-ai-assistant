@@ -12,7 +12,8 @@ document-grounded agent loop.
 Primary runtime files:
 
 - `src/DocumentQA.py`: ingestion, encoding detection, embeddings, vector search,
-  LLM backend selection, retrieval chain, Ollama adapter, and query handling.
+  document context provider wrapper, LLM backend selection, retrieval chain,
+  Ollama adapter, and query handling.
 - `src/loop_engine.py`: provider-neutral loop primitives for typed run, step,
   policy, verifier, human-review, and report records.
 - `src/app.py`: Gradio UI wiring and user-facing status messages.
