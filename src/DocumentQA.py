@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from getpass import getpass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import docx2txt
 import faiss
@@ -26,6 +26,33 @@ from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import ConfigDict, Field
 from pypdf import PdfReader
+
+try:
+    from .loop_engine import (
+        GuardrailDecision,
+        LoopDecision,
+        LoopMiddleware,
+        LoopPhase,
+        LoopPolicy,
+        LoopReport,
+        LoopRun,
+        LoopStep,
+        VerificationOutcome,
+        VerificationResult,
+    )
+except ImportError:
+    from loop_engine import (
+        GuardrailDecision,
+        LoopDecision,
+        LoopMiddleware,
+        LoopPhase,
+        LoopPolicy,
+        LoopReport,
+        LoopRun,
+        LoopStep,
+        VerificationOutcome,
+        VerificationResult,
+    )
 
 LOGGER = logging.getLogger(__name__)
 OLLAMA_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -291,6 +318,7 @@ class AnswerTrace:
 class QueryResult:
     answer: str
     trace: AnswerTrace
+    loop_report: Optional[LoopReport] = None
 
 
 @dataclass(frozen=True)
@@ -431,6 +459,13 @@ class RetrievalChainResult:
     context: str = ""
 
 
+@dataclass(frozen=True)
+class RetrievedContext:
+    retrieved_chunk_count: int
+    citations: List[AnswerCitation]
+    context: str
+
+
 class DocumentRetrievalChain:
     def __init__(
         self,
@@ -452,18 +487,38 @@ class DocumentRetrievalChain:
     def invoke_with_trace(
         self, question: str, self_check_instruction: str = ""
     ) -> RetrievalChainResult:
+        retrieved_context = self.retrieve_with_trace(question)
+        return self.draft_with_trace(
+            question,
+            retrieved_context,
+            self_check_instruction=self_check_instruction,
+        )
+
+    def retrieve_with_trace(self, question: str) -> RetrievedContext:
         docs = self.retriever.invoke(question)
         context, citations = self._format_context_and_citations(docs)
+        return RetrievedContext(
+            retrieved_chunk_count=len(citations),
+            citations=citations,
+            context=context,
+        )
+
+    def draft_with_trace(
+        self,
+        question: str,
+        retrieved_context: RetrievedContext,
+        self_check_instruction: str = "",
+    ) -> RetrievalChainResult:
         response = self._generate_answer(
             question=question,
-            context=context,
+            context=retrieved_context.context,
             self_check_instruction=self_check_instruction,
         )
         return RetrievalChainResult(
             answer=response,
-            retrieved_chunk_count=len(citations),
-            citations=citations,
-            context=context,
+            retrieved_chunk_count=retrieved_context.retrieved_chunk_count,
+            citations=retrieved_context.citations,
+            context=retrieved_context.context,
         )
 
     def retry_with_trace(
@@ -818,6 +873,7 @@ class DocumentQA:
         allow_interactive_token: bool = False,
         max_document_bytes: int = MAX_DOCUMENT_BYTES,
         max_document_chunks: int = MAX_DOCUMENT_CHUNKS,
+        loop_middlewares: Optional[Tuple[LoopMiddleware, ...]] = None,
     ):
         self.device = device or self._detect_device()
         self.fast_mode = env_flag(FAST_MODE_ENV_VAR, False) if fast_mode is None else fast_mode
@@ -864,6 +920,7 @@ class DocumentQA:
         self.current_document_name: Optional[str] = None
         self.latest_processing_report: Optional[DocumentProcessingReport] = None
         self.chat_history: List[Dict[str, str]] = []
+        self.loop_middlewares = tuple(loop_middlewares or ())
 
     def _detect_device(self) -> str:
         if torch.cuda.is_available():
@@ -2087,6 +2144,162 @@ class DocumentQA:
             retry_attempted=retry_attempted,
         )
 
+    def _loop_decision_for_self_check(self, self_check: AnswerSelfCheck) -> LoopDecision:
+        if self_check.outcome == "mechanical_checks_passed":
+            return LoopDecision.CONTINUE
+        if self_check.outcome == "supported":
+            return LoopDecision.SUPPORTED
+        if self_check.outcome == "not_verified":
+            return LoopDecision.NOT_VERIFIED
+        if self_check.outcome == "needs_retry":
+            return LoopDecision.RETRY
+        if self_check.outcome == "needs_refusal":
+            return LoopDecision.REFUSE
+        return LoopDecision.ERROR
+
+    def _verification_result_for_self_check(
+        self, self_check: AnswerSelfCheck
+    ) -> VerificationResult:
+        reasons = tuple(self_check.reasons)
+        if self_check.outcome == "supported":
+            outcome = VerificationOutcome.SUPPORTED
+        elif self_check.outcome == "not_verified":
+            outcome = VerificationOutcome.NOT_VERIFIED
+        elif "llm_verifier_unsupported" in reasons:
+            outcome = VerificationOutcome.UNSUPPORTED
+        elif "llm_verifier_insufficient" in reasons:
+            outcome = VerificationOutcome.INSUFFICIENT
+        else:
+            outcome = VerificationOutcome.ERROR
+
+        return VerificationResult(
+            outcome=outcome,
+            reasons=reasons,
+            verifier=self._active_backend(),
+            metadata={
+                "retry_attempted": self_check.retry_attempted,
+                "self_check_outcome": self_check.outcome,
+            },
+        )
+
+    def _loop_step(
+        self,
+        phase: LoopPhase,
+        *,
+        decision: LoopDecision = LoopDecision.CONTINUE,
+        name: Optional[str] = None,
+        input_summary: Optional[str] = None,
+        output_summary: Optional[str] = None,
+        retry_count: int = 0,
+        error_message: Optional[str] = None,
+        verification: Optional[VerificationResult] = None,
+        human_review=None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> LoopStep:
+        return self._planned_loop_step(
+            phase,
+            decision=decision,
+            name=name,
+            input_summary=input_summary,
+            retry_count=retry_count,
+            error_message=error_message,
+            verification=verification,
+            human_review=human_review,
+            metadata=metadata,
+        ).complete(output_summary=output_summary, error_message=error_message)
+
+    def _planned_loop_step(
+        self,
+        phase: LoopPhase,
+        *,
+        decision: LoopDecision = LoopDecision.CONTINUE,
+        name: Optional[str] = None,
+        input_summary: Optional[str] = None,
+        retry_count: int = 0,
+        error_message: Optional[str] = None,
+        verification: Optional[VerificationResult] = None,
+        human_review=None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> LoopStep:
+        return LoopStep(
+            phase=phase,
+            decision=decision,
+            name=name,
+            input_summary=input_summary,
+            backend=self._active_backend(),
+            model_label=self._active_model_label(),
+            retry_count=retry_count,
+            error_message=error_message,
+            verification=verification,
+            human_review=human_review,
+            metadata=metadata or {},
+        )
+
+    def _self_check_answer_with_loop_steps(
+        self,
+        answer: str,
+        citations: List[AnswerCitation],
+        *,
+        question: str = "",
+        retry_attempted: bool = False,
+    ) -> Tuple[AnswerSelfCheck, List[LoopStep]]:
+        mechanical_check = self._mechanical_self_check_answer(
+            answer,
+            citations,
+            question=question,
+            retry_attempted=retry_attempted,
+        )
+        retry_count = 1 if retry_attempted else 0
+        mechanical_step = self._loop_step(
+            LoopPhase.MECHANICAL_CHECK,
+            decision=self._loop_decision_for_self_check(mechanical_check),
+            name="Mechanical answer checks",
+            input_summary="answer plus prompt citations",
+            output_summary=mechanical_check.outcome,
+            retry_count=retry_count,
+            metadata={
+                "reasons": list(mechanical_check.reasons),
+                "citation_count": len(citations),
+                "inline_citation_ids": self._inline_citation_ids(answer),
+                "retry_attempted": retry_attempted,
+            },
+        )
+        if mechanical_check.outcome != "mechanical_checks_passed":
+            return mechanical_check, [mechanical_step]
+
+        if self._active_backend() == "mock":
+            self_check = AnswerSelfCheck(
+                outcome="not_verified",
+                reasons=[
+                    "mechanical_checks_passed",
+                    "verifier_unavailable_mock_backend",
+                ],
+                retry_attempted=retry_attempted,
+            )
+        else:
+            self_check = self._verify_answer_with_llm(
+                question=question,
+                answer=answer,
+                citations=citations,
+                retry_attempted=retry_attempted,
+            )
+
+        verify_step = self._loop_step(
+            LoopPhase.VERIFY,
+            decision=self._loop_decision_for_self_check(self_check),
+            name="Answer verifier",
+            input_summary="answer plus cited excerpts",
+            output_summary=self_check.outcome,
+            retry_count=retry_count,
+            verification=self._verification_result_for_self_check(self_check),
+            metadata={
+                "reasons": list(self_check.reasons),
+                "citation_count": len(citations),
+                "retry_attempted": retry_attempted,
+            },
+        )
+        return self_check, [mechanical_step, verify_step]
+
     def _self_check_answer(
         self,
         answer: str,
@@ -2095,31 +2308,13 @@ class DocumentQA:
         question: str = "",
         retry_attempted: bool = False,
     ) -> AnswerSelfCheck:
-        mechanical_check = self._mechanical_self_check_answer(
+        self_check, _steps = self._self_check_answer_with_loop_steps(
             answer,
             citations,
             question=question,
             retry_attempted=retry_attempted,
         )
-        if mechanical_check.outcome != "mechanical_checks_passed":
-            return mechanical_check
-
-        if self._active_backend() == "mock":
-            return AnswerSelfCheck(
-                outcome="not_verified",
-                reasons=[
-                    "mechanical_checks_passed",
-                    "verifier_unavailable_mock_backend",
-                ],
-                retry_attempted=retry_attempted,
-            )
-
-        return self._verify_answer_with_llm(
-            question=question,
-            answer=answer,
-            citations=citations,
-            retry_attempted=retry_attempted,
-        )
+        return self_check
 
     def _verifier_prompt(
         self, *, question: str, answer: str, citations: List[AnswerCitation]
@@ -2238,6 +2433,7 @@ class DocumentQA:
         citations: Optional[List[AnswerCitation]] = None,
         self_check: Optional[AnswerSelfCheck] = None,
         error_message: Optional[str] = None,
+        loop_report: Optional[LoopReport] = None,
     ) -> QueryResult:
         return QueryResult(
             answer=answer,
@@ -2251,56 +2447,665 @@ class DocumentQA:
                 self_check=self_check,
                 error_message=error_message,
             ),
+            loop_report=loop_report,
+        )
+
+    def _start_loop_run(
+        self,
+        *,
+        prompt: str,
+        session_id: str,
+        active_state: ActiveDocumentState,
+    ) -> LoopRun:
+        return LoopRun(
+            user_input=prompt,
+            context_provider="document",
+            backend=self._active_backend(),
+            model_label=self._active_model_label(),
+            session_id=session_id,
+            policy=LoopPolicy(max_retries=1),
+            metadata={
+                "document_name": active_state.document_name,
+                "profile": "FAST" if self.fast_mode else "QUALITY",
+                "allow_tool_calls": False,
+                "untrusted_inputs": [
+                    "document_text",
+                    "retrieved_chunks",
+                    "model_output",
+                    "future_tool_output",
+                ],
+            },
+        )
+
+    def _coerce_guardrail_decision(self, decision) -> Optional[GuardrailDecision]:
+        if decision is None:
+            return None
+        if isinstance(decision, GuardrailDecision):
+            return decision
+        return GuardrailDecision(decision=LoopDecision(decision))
+
+    def _run_loop_middleware(
+        self, hook_name: str, *args
+    ) -> Optional[GuardrailDecision]:
+        for middleware in self.loop_middlewares:
+            hook = getattr(middleware, hook_name, None)
+            if not callable(hook):
+                continue
+            try:
+                decision = self._coerce_guardrail_decision(hook(*args))
+            except Exception as exc:
+                LOGGER.exception("Loop middleware %s failed in %s.", middleware, hook_name)
+                return GuardrailDecision(
+                    decision=LoopDecision.BLOCK,
+                    reason=f"middleware_{hook_name}_error",
+                    metadata={
+                        "middleware": middleware.__class__.__name__,
+                        "error": str(exc),
+                    },
+                )
+            if decision and not decision.can_continue:
+                return decision
+        return None
+
+    def _append_loop_step(
+        self, run: LoopRun, step: LoopStep
+    ) -> Tuple[LoopRun, Optional[GuardrailDecision]]:
+        guardrail_decision = self._prepare_loop_step(run, step)
+        if guardrail_decision:
+            return run, guardrail_decision
+
+        return self._record_loop_step(run, step)
+
+    def _prepare_loop_step(
+        self, run: LoopRun, step: LoopStep
+    ) -> Optional[GuardrailDecision]:
+        return self._run_loop_middleware("before_step", run, step)
+
+    def _record_loop_step(
+        self, run: LoopRun, step: LoopStep
+    ) -> Tuple[LoopRun, Optional[GuardrailDecision]]:
+        next_run = run.with_step(step)
+        guardrail_decision = self._run_loop_middleware(
+            "after_step", next_run, step
+        )
+        if guardrail_decision:
+            return next_run, guardrail_decision
+        return next_run, None
+
+    def _append_loop_steps(
+        self, run: LoopRun, steps: List[LoopStep]
+    ) -> Tuple[LoopRun, Optional[GuardrailDecision]]:
+        for step in steps:
+            run, guardrail_decision = self._append_loop_step(run, step)
+            if guardrail_decision:
+                return run, guardrail_decision
+        return run, None
+
+    def _run_self_check_with_loop(
+        self,
+        *,
+        run: LoopRun,
+        answer: str,
+        citations: List[AnswerCitation],
+        question: str,
+        retry_attempted: bool = False,
+    ) -> Tuple[LoopRun, Optional[GuardrailDecision], Optional[AnswerSelfCheck]]:
+        retry_count = 1 if retry_attempted else 0
+        planned_mechanical_step = self._planned_loop_step(
+            LoopPhase.MECHANICAL_CHECK,
+            name="Mechanical answer checks",
+            input_summary="answer plus prompt citations",
+            retry_count=retry_count,
+        )
+        guardrail_decision = self._prepare_loop_step(run, planned_mechanical_step)
+        if guardrail_decision:
+            return run, guardrail_decision, None
+
+        mechanical_check = self._mechanical_self_check_answer(
+            answer,
+            citations,
+            question=question,
+            retry_attempted=retry_attempted,
+        )
+        mechanical_step = self._loop_step(
+            LoopPhase.MECHANICAL_CHECK,
+            decision=self._loop_decision_for_self_check(mechanical_check),
+            name="Mechanical answer checks",
+            input_summary="answer plus prompt citations",
+            output_summary=mechanical_check.outcome,
+            retry_count=retry_count,
+            metadata={
+                "reasons": list(mechanical_check.reasons),
+                "citation_count": len(citations),
+                "inline_citation_ids": self._inline_citation_ids(answer),
+                "retry_attempted": retry_attempted,
+            },
+        )
+        run, guardrail_decision = self._record_loop_step(run, mechanical_step)
+        if guardrail_decision or mechanical_check.outcome != "mechanical_checks_passed":
+            return run, guardrail_decision, mechanical_check
+
+        planned_verify_step = self._planned_loop_step(
+            LoopPhase.VERIFY,
+            name="Answer verifier",
+            input_summary="answer plus cited excerpts",
+            retry_count=retry_count,
+        )
+        guardrail_decision = self._prepare_loop_step(run, planned_verify_step)
+        if guardrail_decision:
+            return run, guardrail_decision, None
+
+        if self._active_backend() == "mock":
+            self_check = AnswerSelfCheck(
+                outcome="not_verified",
+                reasons=[
+                    "mechanical_checks_passed",
+                    "verifier_unavailable_mock_backend",
+                ],
+                retry_attempted=retry_attempted,
+            )
+        else:
+            self_check = self._verify_answer_with_llm(
+                question=question,
+                answer=answer,
+                citations=citations,
+                retry_attempted=retry_attempted,
+            )
+
+        verify_step = self._loop_step(
+            LoopPhase.VERIFY,
+            decision=self._loop_decision_for_self_check(self_check),
+            name="Answer verifier",
+            input_summary="answer plus cited excerpts",
+            output_summary=self_check.outcome,
+            retry_count=retry_count,
+            verification=self._verification_result_for_self_check(self_check),
+            metadata={
+                "reasons": list(self_check.reasons),
+                "citation_count": len(citations),
+                "retry_attempted": retry_attempted,
+            },
+        )
+        run, guardrail_decision = self._record_loop_step(run, verify_step)
+        return run, guardrail_decision, self_check
+
+    def _guardrail_answer(self, decision: GuardrailDecision) -> str:
+        if decision.decision == LoopDecision.REQUIRES_REVIEW:
+            return "This query requires human review before the loop can continue."
+        if decision.decision == LoopDecision.REFUSE:
+            return "A loop guardrail refused this query before it could safely complete."
+        if decision.decision == LoopDecision.RETRY:
+            return "A loop guardrail requested a retry, but no safe retry path is available for this step."
+        return "A loop guardrail blocked this query before it could complete."
+
+    def _terminal_decision_for_guardrail(
+        self, decision: GuardrailDecision
+    ) -> LoopDecision:
+        if decision.decision == LoopDecision.RETRY:
+            return LoopDecision.BLOCK
+        return decision.decision
+
+    def _error_message_for_guardrail(self, decision: GuardrailDecision) -> str:
+        if decision.decision == LoopDecision.RETRY:
+            return "guardrail_retry_unavailable"
+        return decision.reason or decision.decision.value
+
+    def _guardrail_step(self, decision: GuardrailDecision) -> LoopStep:
+        return self._loop_step(
+            LoopPhase.ERROR,
+            decision=decision.decision,
+            name="Guardrail decision",
+            output_summary=decision.reason or decision.decision.value,
+            error_message=decision.reason,
+            human_review=decision.human_review,
+            metadata={
+                "guardrail_decision": decision.decision.value,
+                "guardrail_reason": decision.reason,
+                **dict(decision.metadata),
+            },
+        )
+
+    def _finish_loop_report(
+        self,
+        *,
+        run: LoopRun,
+        answer: str,
+        final_decision: LoopDecision,
+        error_message: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[
+        LoopReport,
+        str,
+        LoopDecision,
+        Optional[str],
+        Optional[GuardrailDecision],
+    ]:
+        applied_guardrail_decision = None
+        final_step = self._loop_step(
+            LoopPhase.FINAL,
+            decision=final_decision,
+            name="Final answer",
+            output_summary=final_decision.value,
+            error_message=error_message,
+            metadata=metadata or {},
+        )
+        run, guardrail_decision = self._append_loop_step(run, final_step)
+        if guardrail_decision:
+            applied_guardrail_decision = guardrail_decision
+            answer = self._guardrail_answer(guardrail_decision)
+            final_decision = self._terminal_decision_for_guardrail(
+                guardrail_decision
+            )
+            error_message = self._error_message_for_guardrail(guardrail_decision)
+            run = run.with_step(self._guardrail_step(guardrail_decision))
+
+        completed_run = run.complete(
+            final_decision=final_decision,
+            final_answer=answer,
+            error_message=error_message,
+            metadata=metadata or {},
+        )
+        after_run_decision = self._run_loop_middleware("after_run", completed_run)
+        if after_run_decision:
+            applied_guardrail_decision = after_run_decision
+            answer = self._guardrail_answer(after_run_decision)
+            final_decision = self._terminal_decision_for_guardrail(
+                after_run_decision
+            )
+            error_message = self._error_message_for_guardrail(after_run_decision)
+            completed_run = completed_run.with_step(
+                self._guardrail_step(after_run_decision)
+            ).complete(
+                final_decision=final_decision,
+                final_answer=answer,
+                error_message=error_message,
+                metadata={
+                    **dict(metadata or {}),
+                    "after_run_guardrail": True,
+                },
+            )
+        return (
+            LoopReport(run=completed_run),
+            answer,
+            final_decision,
+            error_message,
+            applied_guardrail_decision,
+        )
+
+    def _finish_query_result(
+        self,
+        *,
+        answer: str,
+        question: str,
+        active_state: ActiveDocumentState,
+        run: LoopRun,
+        final_decision: LoopDecision,
+        retrieved_chunk_count: int = 0,
+        citations: Optional[List[AnswerCitation]] = None,
+        self_check: Optional[AnswerSelfCheck] = None,
+        error_message: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> QueryResult:
+        (
+            loop_report,
+            answer,
+            final_decision,
+            error_message,
+            applied_guardrail_decision,
+        ) = self._finish_loop_report(
+            run=run,
+            answer=answer,
+            final_decision=final_decision,
+            error_message=error_message,
+            metadata=metadata,
+        )
+        if applied_guardrail_decision:
+            retrieved_chunk_count = 0
+            citations = []
+            self_check = None
+        return self._query_result(
+            answer=answer,
+            question=question,
+            active_state=active_state,
+            retrieved_chunk_count=retrieved_chunk_count,
+            citations=citations,
+            self_check=self_check,
+            error_message=error_message,
+            loop_report=loop_report,
+        )
+
+    def _finish_guardrail_query_result(
+        self,
+        *,
+        decision: GuardrailDecision,
+        question: str,
+        active_state: ActiveDocumentState,
+        run: LoopRun,
+    ) -> QueryResult:
+        run = run.with_step(self._guardrail_step(decision))
+        return self._finish_query_result(
+            answer=self._guardrail_answer(decision),
+            question=question,
+            active_state=active_state,
+            run=run,
+            final_decision=self._terminal_decision_for_guardrail(decision),
+            error_message=self._error_message_for_guardrail(decision),
+            metadata={"guardrail_decision": decision.decision.value},
         )
 
     def query_with_trace(self, prompt: str, session_id: str = "default") -> QueryResult:
         """Answer a user query and return the retrieved evidence used."""
         active_state = self._snapshot_active_document_state()
         clean_prompt = (prompt or "").strip()
+        run = self._start_loop_run(
+            prompt=clean_prompt,
+            session_id=session_id,
+            active_state=active_state,
+        )
 
-        if not active_state.retrieval_chain:
-            return self._query_result(
-                answer="Please upload and process a document first.",
+        guardrail_decision = self._run_loop_middleware("before_run", run)
+        if guardrail_decision:
+            return self._finish_guardrail_query_result(
+                decision=guardrail_decision,
                 question=clean_prompt,
                 active_state=active_state,
-                error_message="document_not_loaded",
-            )
-
-        if not self.llm:
-            return self._query_result(
-                answer="Language model is not initialized. Please check your HuggingFace token setup.",
-                question=clean_prompt,
-                active_state=active_state,
-                error_message="llm_not_initialized",
+                run=run,
             )
 
         if not clean_prompt:
-            return self._query_result(
+            run, guardrail_decision = self._append_loop_step(
+                run,
+                self._loop_step(
+                    LoopPhase.INPUT,
+                    decision=LoopDecision.BLOCK,
+                    name="Input validation",
+                    output_summary="empty_question",
+                    error_message="empty_question",
+                ),
+            )
+            if guardrail_decision:
+                return self._finish_guardrail_query_result(
+                    decision=guardrail_decision,
+                    question=clean_prompt,
+                    active_state=active_state,
+                    run=run,
+                )
+            return self._finish_query_result(
                 answer="Please provide a question.",
                 question=clean_prompt,
                 active_state=active_state,
+                run=run,
+                final_decision=LoopDecision.BLOCK,
                 error_message="empty_question",
             )
 
+        if not active_state.retrieval_chain:
+            run, guardrail_decision = self._append_loop_step(
+                run,
+                self._loop_step(
+                    LoopPhase.CONTEXT_SELECT,
+                    decision=LoopDecision.BLOCK,
+                    name="Select document context",
+                    output_summary="document_not_loaded",
+                    error_message="document_not_loaded",
+                    metadata={"document_name": active_state.document_name},
+                ),
+            )
+            if guardrail_decision:
+                return self._finish_guardrail_query_result(
+                    decision=guardrail_decision,
+                    question=clean_prompt,
+                    active_state=active_state,
+                    run=run,
+                )
+            return self._finish_query_result(
+                answer="Please upload and process a document first.",
+                question=clean_prompt,
+                active_state=active_state,
+                run=run,
+                final_decision=LoopDecision.BLOCK,
+                error_message="document_not_loaded",
+            )
+
+        run, guardrail_decision = self._append_loop_step(
+            run,
+            self._loop_step(
+                LoopPhase.CONTEXT_SELECT,
+                decision=LoopDecision.CONTINUE,
+                name="Select document context",
+                output_summary=active_state.document_name,
+                metadata={"document_name": active_state.document_name},
+            ),
+        )
+        if guardrail_decision:
+            return self._finish_guardrail_query_result(
+                decision=guardrail_decision,
+                question=clean_prompt,
+                active_state=active_state,
+                run=run,
+            )
+
+        if not self.llm:
+            run, guardrail_decision = self._append_loop_step(
+                run,
+                self._loop_step(
+                    LoopPhase.ERROR,
+                    decision=LoopDecision.ERROR,
+                    name="LLM readiness",
+                    output_summary="llm_not_initialized",
+                    error_message="llm_not_initialized",
+                ),
+            )
+            if guardrail_decision:
+                return self._finish_guardrail_query_result(
+                    decision=guardrail_decision,
+                    question=clean_prompt,
+                    active_state=active_state,
+                    run=run,
+                )
+            return self._finish_query_result(
+                answer="Language model is not initialized. Please check your HuggingFace token setup.",
+                question=clean_prompt,
+                active_state=active_state,
+                run=run,
+                final_decision=LoopDecision.ERROR,
+                error_message="llm_not_initialized",
+            )
+
         if active_state.document_name and self._is_document_identity_question(clean_prompt):
-            return self._query_result(
+            return self._finish_query_result(
                 answer=f"The uploaded document is `{active_state.document_name}`.",
                 question=clean_prompt,
                 active_state=active_state,
+                run=run,
+                final_decision=LoopDecision.FINAL,
+                metadata={"identity_answer": True},
             )
 
         try:
             if hasattr(active_state.retrieval_chain, "invoke_with_trace"):
-                chain_result = active_state.retrieval_chain.invoke_with_trace(clean_prompt)
+                supports_split_trace = (
+                    hasattr(active_state.retrieval_chain, "retrieve_with_trace")
+                    and hasattr(active_state.retrieval_chain, "draft_with_trace")
+                )
+                planned_retrieve_step = self._planned_loop_step(
+                    LoopPhase.RETRIEVE,
+                    name="Retrieve prompt evidence",
+                    input_summary=clean_prompt,
+                )
+                guardrail_decision = self._prepare_loop_step(
+                    run, planned_retrieve_step
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                if supports_split_trace:
+                    retrieved_context = active_state.retrieval_chain.retrieve_with_trace(
+                        clean_prompt
+                    )
+                    retrieved_chunk_count = retrieved_context.retrieved_chunk_count
+                    citations = retrieved_context.citations
+                    run, guardrail_decision = self._record_loop_step(
+                        run,
+                        self._loop_step(
+                            LoopPhase.RETRIEVE,
+                            decision=LoopDecision.CONTINUE,
+                            name="Retrieve prompt evidence",
+                            input_summary=clean_prompt,
+                            output_summary=(f"{retrieved_chunk_count} prompt chunks"),
+                            metadata={
+                                "retrieved_chunk_count": retrieved_chunk_count,
+                                "citation_ids": [
+                                    citation.citation_id for citation in citations
+                                ],
+                                "context_chars": len(retrieved_context.context),
+                            },
+                        ),
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    planned_draft_step = self._planned_loop_step(
+                        LoopPhase.DRAFT,
+                        name="Draft answer",
+                        input_summary=clean_prompt,
+                    )
+                    guardrail_decision = self._prepare_loop_step(
+                        run, planned_draft_step
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    chain_result = active_state.retrieval_chain.draft_with_trace(
+                        clean_prompt,
+                        retrieved_context,
+                    )
+                else:
+                    planned_draft_step = self._planned_loop_step(
+                        LoopPhase.DRAFT,
+                        name="Draft answer",
+                        input_summary=clean_prompt,
+                    )
+                    guardrail_decision = self._prepare_loop_step(
+                        run, planned_draft_step
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    chain_result = active_state.retrieval_chain.invoke_with_trace(
+                        clean_prompt
+                    )
+                    retrieved_chunk_count = chain_result.retrieved_chunk_count
+                    citations = chain_result.citations
+
                 response = chain_result.answer
                 retrieved_chunk_count = chain_result.retrieved_chunk_count
                 citations = chain_result.citations
-                self_check = self._self_check_answer(
-                    response, citations, question=clean_prompt
+                draft_metadata = {
+                    "answer_chars": len(str(response).strip()),
+                    "inline_citation_ids": self._inline_citation_ids(str(response)),
+                }
+                if not supports_split_trace:
+                    draft_metadata.update(
+                        {
+                            "combined_retrieve_and_draft": True,
+                            "retrieved_chunk_count": retrieved_chunk_count,
+                            "citation_ids": [
+                                citation.citation_id for citation in citations
+                            ],
+                            "context_chars": len(
+                                getattr(chain_result, "context", "") or ""
+                            ),
+                        }
+                    )
+                run, guardrail_decision = self._record_loop_step(
+                    run,
+                    self._loop_step(
+                        LoopPhase.DRAFT,
+                        decision=LoopDecision.CONTINUE,
+                        name="Draft answer",
+                        input_summary=clean_prompt,
+                        output_summary=str(response).strip()[:500],
+                        metadata=draft_metadata,
+                    ),
                 )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                run, guardrail_decision, self_check = self._run_self_check_with_loop(
+                    run=run,
+                    answer=response,
+                    citations=citations,
+                    question=clean_prompt,
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                if self_check is None:
+                    self_check = AnswerSelfCheck(
+                        outcome="needs_refusal",
+                        reasons=["self_check_interrupted"],
+                    )
                 if self_check.outcome == "needs_retry" and hasattr(
                     active_state.retrieval_chain, "retry_with_trace"
                 ):
+                    run, guardrail_decision = self._append_loop_step(
+                        run,
+                        self._loop_step(
+                            LoopPhase.RETRY,
+                            decision=LoopDecision.RETRY,
+                            name="Retry answer",
+                            output_summary="retrying after self-check failure",
+                            metadata={"reasons": list(self_check.reasons)},
+                        ),
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    planned_retry_draft_step = self._planned_loop_step(
+                        LoopPhase.DRAFT,
+                        name="Draft retry answer",
+                        input_summary=clean_prompt,
+                        retry_count=1,
+                    )
+                    guardrail_decision = self._prepare_loop_step(
+                        run, planned_retry_draft_step
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
                     retry_result = active_state.retrieval_chain.retry_with_trace(
                         clean_prompt,
                         chain_result,
@@ -2311,43 +3116,167 @@ class DocumentQA:
                     response = retry_result.answer
                     retrieved_chunk_count = retry_result.retrieved_chunk_count
                     citations = retry_result.citations
-                    self_check = self._self_check_answer(
-                        response,
-                        citations,
+                    run, guardrail_decision = self._record_loop_step(
+                        run,
+                        self._loop_step(
+                            LoopPhase.DRAFT,
+                            decision=LoopDecision.CONTINUE,
+                            name="Draft retry answer",
+                            input_summary=clean_prompt,
+                            output_summary=str(response).strip()[:500],
+                            retry_count=1,
+                            metadata={
+                                "answer_chars": len(str(response).strip()),
+                                "inline_citation_ids": self._inline_citation_ids(
+                                    str(response)
+                                ),
+                            },
+                        ),
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    (
+                        run,
+                        guardrail_decision,
+                        self_check,
+                    ) = self._run_self_check_with_loop(
+                        run=run,
+                        answer=response,
+                        citations=citations,
                         question=clean_prompt,
                         retry_attempted=True,
                     )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    if self_check is None:
+                        self_check = AnswerSelfCheck(
+                            outcome="needs_refusal",
+                            reasons=["self_check_interrupted"],
+                            retry_attempted=True,
+                        )
             else:
+                planned_draft_step = self._planned_loop_step(
+                    LoopPhase.DRAFT,
+                    name="Draft answer",
+                    input_summary=clean_prompt,
+                )
+                guardrail_decision = self._prepare_loop_step(run, planned_draft_step)
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
                 response = active_state.retrieval_chain.invoke(clean_prompt)
                 retrieved_chunk_count = 0
                 citations = []
                 self_check = None
+                run, guardrail_decision = self._record_loop_step(
+                    run,
+                    self._loop_step(
+                        LoopPhase.DRAFT,
+                        decision=LoopDecision.CONTINUE,
+                        name="Draft answer",
+                        input_summary=clean_prompt,
+                        output_summary=str(response).strip()[:500],
+                        metadata={"trace_available": False},
+                    ),
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
 
             response = str(response).strip()
             if len(response) < 3:
                 response = SELF_CHECK_REFUSAL_ANSWER
-                self_check = self._self_check_answer(
-                    response, citations, question=clean_prompt
+                run, guardrail_decision, self_check = self._run_self_check_with_loop(
+                    run=run,
+                    answer=response,
+                    citations=citations,
+                    question=clean_prompt,
                 )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                if self_check is None:
+                    self_check = AnswerSelfCheck(
+                        outcome="needs_refusal",
+                        reasons=["self_check_interrupted"],
+                    )
 
             if self_check and self_check.outcome not in SELF_CHECK_PASS_OUTCOMES:
                 response = SELF_CHECK_REFUSAL_ANSWER
                 if self_check.outcome != "needs_refusal":
                     self_check = self._fail_closed_self_check(self_check)
-            result = self._query_result(
+                run, guardrail_decision = self._append_loop_step(
+                    run,
+                    self._loop_step(
+                        LoopPhase.REFUSE,
+                        decision=LoopDecision.REFUSE,
+                        name="Refuse unsupported answer",
+                        output_summary=self_check.outcome,
+                        metadata={
+                            "reasons": list(self_check.reasons),
+                            "retry_attempted": self_check.retry_attempted,
+                        },
+                    ),
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+
+            final_decision = (
+                self._loop_decision_for_self_check(self_check)
+                if self_check
+                else LoopDecision.FINAL
+            )
+            if final_decision == LoopDecision.CONTINUE:
+                final_decision = LoopDecision.FINAL
+            result = self._finish_query_result(
                 answer=response,
                 question=clean_prompt,
                 active_state=active_state,
+                run=run,
+                final_decision=final_decision,
                 retrieved_chunk_count=retrieved_chunk_count,
                 citations=citations,
                 self_check=self_check,
+                metadata={
+                    "self_check_outcome": self_check.outcome if self_check else None,
+                    "retry_attempted": (
+                        self_check.retry_attempted if self_check else False
+                    ),
+                },
             )
 
             self.chat_history.append(
                 {
                     "session_id": session_id,
                     "question": clean_prompt,
-                    "answer": response,
+                    "answer": result.answer,
                     "citations": [
                         {
                             "id": citation.citation_id,
@@ -2356,26 +3285,46 @@ class DocumentQA:
                             "chunk_index": citation.chunk_index,
                             "excerpt": citation.excerpt,
                         }
-                        for citation in citations
+                        for citation in result.trace.citations
                     ],
                     "self_check": (
                         {
-                            "outcome": self_check.outcome,
-                            "reasons": self_check.reasons,
-                            "retry_attempted": self_check.retry_attempted,
+                            "outcome": result.trace.self_check.outcome,
+                            "reasons": result.trace.self_check.reasons,
+                            "retry_attempted": result.trace.self_check.retry_attempted,
                         }
-                        if self_check
+                        if result.trace.self_check
                         else None
                     ),
                 }
             )
             return result
-        except Exception:
+        except Exception as exc:
             LOGGER.exception("Error while processing query.")
-            return self._query_result(
+            error_decision = self._run_loop_middleware("on_error", run, exc)
+            if error_decision:
+                return self._finish_guardrail_query_result(
+                    decision=error_decision,
+                    question=clean_prompt,
+                    active_state=active_state,
+                    run=run,
+                )
+            run = run.with_step(
+                self._loop_step(
+                    LoopPhase.ERROR,
+                    decision=LoopDecision.ERROR,
+                    name="Query error",
+                    output_summary="query_failed",
+                    error_message="query_failed",
+                    metadata={"error_type": exc.__class__.__name__},
+                )
+            )
+            return self._finish_query_result(
                 answer="I hit an internal error while processing your question. Please try again.",
                 question=clean_prompt,
                 active_state=active_state,
+                run=run,
+                final_decision=LoopDecision.ERROR,
                 error_message="query_failed",
             )
 

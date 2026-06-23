@@ -6,6 +6,7 @@ from pydantic import Field
 
 from src.DocumentQA import DocumentQA, SELF_CHECK_REFUSAL_ANSWER
 from src.golden_eval import GOLDEN_DOCUMENT_TEXT, GoldenEvalEmbeddings
+from src.loop_engine import LoopDecision, LoopPhase
 
 
 class GoldenEvalLLM(LLM):
@@ -114,6 +115,18 @@ def test_golden_document_supported_answer_is_cited_and_verified(tmp_path):
     assert result.trace.citations[0].citation_id == 1
     assert result.trace.citations[0].source_name == document.name
     assert "June 2026" in result.trace.citations[0].excerpt
+    assert result.loop_report.run.final_decision == LoopDecision.SUPPORTED
+    assert result.loop_report.run.final_answer == result.answer
+    assert [
+        step.phase for step in result.loop_report.run.steps
+    ] == [
+        LoopPhase.CONTEXT_SELECT,
+        LoopPhase.RETRIEVE,
+        LoopPhase.DRAFT,
+        LoopPhase.MECHANICAL_CHECK,
+        LoopPhase.VERIFY,
+        LoopPhase.FINAL,
+    ]
     assert qa.chat_history[-1]["self_check"]["outcome"] == "supported"
 
 
@@ -127,6 +140,8 @@ def test_golden_document_unsupported_answer_fails_closed(tmp_path):
     assert result.trace.self_check.reasons == ["llm_verifier_insufficient"]
     assert result.trace.self_check.retry_attempted is False
     assert result.trace.retrieved_chunk_count == len(result.trace.citations) == 1
+    assert result.loop_report.run.final_decision == LoopDecision.REFUSE
+    assert LoopPhase.REFUSE in [step.phase for step in result.loop_report.run.steps]
     assert qa.chat_history[-1]["answer"] == SELF_CHECK_REFUSAL_ANSWER
 
 
@@ -140,6 +155,8 @@ def test_golden_document_missing_citation_retries_then_passes(tmp_path):
     assert result.answer == "Project Phoenix launches in June 2026 [1]."
     assert result.trace.self_check.outcome == "supported"
     assert result.trace.self_check.retry_attempted is True
+    assert result.loop_report.run.final_decision == LoopDecision.SUPPORTED
+    assert LoopPhase.RETRY in [step.phase for step in result.loop_report.run.steps]
     assert any("missing_inline_citation" in call for call in qa.llm.calls)
     answer_calls = [
         call for call in qa.llm.calls if "You are a helpful AI assistant" in call

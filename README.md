@@ -18,7 +18,7 @@ with FAISS, and talk to an agent whose answer loop is visible and testable.
 https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ## Features
-- **Loop Engineering Core:** Treats retrieval, drafting, self-checking, retry, refusal, and evals as the product surface rather than hidden plumbing
+- **Loop Engineering Core:** Treats retrieval, drafting, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
 - **Document Context Provider:** Supports PDF, DOCX, and text documents with safe decoding, chunking, and transactional replacement
 - **Local-first LLM Backend:** Recommended local path is Ollama; Hugging Face endpoint/local backends remain available for hosted deployments, gated models, and Hugging Face Spaces
 - **Vector Search:** Uses FAISS for efficient similarity search with Hugging Face embeddings
@@ -147,7 +147,9 @@ The application is containerized for easy deployment.
 ### Loop Contract
 - **Current context provider:** Document context
 - **Current loop shape:** validate/decode -> split -> embed/index -> retrieve -> draft answer -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
-- **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`, `VerificationResult`, and `HumanReviewRequest`
+- **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
+- **Runtime reports:** `DocumentQA.query_with_trace()` returns a `QueryResult` with both the legacy answer trace and a first-class `LoopReport`
+- **Middleware boundary:** loop middleware can observe runs/steps, block unsafe progress, request retry/refusal, or mark a human-review pending state without introducing autonomous tool use
 - **Framework posture:** OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter targets, not core dependencies
 
 ### Model
@@ -194,6 +196,8 @@ This repo is intentionally built around two loops:
 - **Runtime agent loop:** select context -> retrieve prompt evidence -> draft an
   answer with inline citations -> run mechanical checks -> verify cited claims
   with the active real backend -> retry once or fail closed -> return trace/status.
+- **Guardrail loop:** middleware hooks can run before/after runs and steps, and
+  can return typed decisions: continue, retry, refuse, block, or requires_review.
 - **Engineering loop:** change one contract -> add focused regressions -> run
   golden loop evals -> run broad validation -> ask for review -> stage only
   intentional files.

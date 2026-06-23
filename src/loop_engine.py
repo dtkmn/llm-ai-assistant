@@ -3,11 +3,28 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Protocol, Tuple
 from uuid import uuid4
 
 
 SCHEMA_VERSION = "loop-report/v1"
+GUARDRAIL_DECISION_VALUES = frozenset(
+    {
+        "continue",
+        "retry",
+        "refuse",
+        "block",
+        "requires_review",
+    }
+)
+TERMINAL_GUARDRAIL_DECISION_VALUES = frozenset(
+    {
+        "refuse",
+        "block",
+        "requires_review",
+    }
+)
+PUBLIC_REDACTION_TEXT = "[redacted: terminal guardrail decision]"
 
 
 def _new_id(prefix: str) -> str:
@@ -85,6 +102,68 @@ class VerificationOutcome(str, Enum):
     INSUFFICIENT = "insufficient"
     NOT_VERIFIED = "not_verified"
     ERROR = "error"
+
+
+@dataclass(frozen=True)
+class GuardrailDecision:
+    decision: LoopDecision = LoopDecision.CONTINUE
+    reason: Optional[str] = None
+    human_review: Optional[HumanReviewRequest] = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision, LoopDecision):
+            object.__setattr__(self, "decision", LoopDecision(self.decision))
+        if self.decision.value not in GUARDRAIL_DECISION_VALUES:
+            raise ValueError(f"{self.decision.value} is not a guardrail decision")
+        object.__setattr__(self, "metadata", _metadata_dict(self.metadata))
+
+    @property
+    def can_continue(self) -> bool:
+        return self.decision == LoopDecision.CONTINUE
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "decision": self.decision.value,
+            "reason": self.reason,
+            "human_review": (
+                self.human_review.to_dict() if self.human_review else None
+            ),
+            "metadata": _metadata_dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "GuardrailDecision":
+        human_review = data.get("human_review")
+        return cls(
+            decision=LoopDecision(data.get("decision", LoopDecision.CONTINUE.value)),
+            reason=data.get("reason"),
+            human_review=(
+                HumanReviewRequest.from_dict(human_review) if human_review else None
+            ),
+            metadata=_metadata_dict(data.get("metadata")),
+        )
+
+
+class LoopMiddleware(Protocol):
+    def before_run(self, run: "LoopRun") -> Optional[GuardrailDecision]:
+        ...
+
+    def before_step(
+        self, run: "LoopRun", step: "LoopStep"
+    ) -> Optional[GuardrailDecision]:
+        ...
+
+    def after_step(
+        self, run: "LoopRun", step: "LoopStep"
+    ) -> Optional[GuardrailDecision]:
+        ...
+
+    def after_run(self, run: "LoopRun") -> Optional[GuardrailDecision]:
+        ...
+
+    def on_error(self, run: "LoopRun", error: Exception) -> Optional[GuardrailDecision]:
+        ...
 
 
 @dataclass(frozen=True)
@@ -401,6 +480,39 @@ class LoopReport:
             "run": self.run.to_dict(),
         }
 
+    def to_public_dict(self) -> Dict[str, Any]:
+        report = self.to_dict()
+        run = report["run"]
+        steps = run.get("steps", [])
+        final_decision = run.get("final_decision")
+        guardrail_step_index = next(
+            (
+                index
+                for index, step in enumerate(steps)
+                if _step_has_guardrail_decision(step)
+            ),
+            None,
+        )
+        if (
+            final_decision not in TERMINAL_GUARDRAIL_DECISION_VALUES
+            or guardrail_step_index is None
+        ):
+            return report
+
+        run["user_input"] = PUBLIC_REDACTION_TEXT
+        run["final_answer"] = PUBLIC_REDACTION_TEXT
+        run["error_message"] = "terminal_guardrail_decision"
+        run["metadata"] = {
+            "redacted": True,
+            "redaction_reason": "terminal_guardrail_decision",
+        }
+        run["steps"] = [_redact_public_step(step) for step in steps]
+        report["public_redaction"] = {
+            "applied": True,
+            "reason": "terminal_guardrail_decision",
+        }
+        return report
+
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "LoopReport":
         schema_version = str(data.get("schema_version", SCHEMA_VERSION))
@@ -410,3 +522,37 @@ class LoopReport:
             schema_version=schema_version,
             run=LoopRun.from_dict(data["run"]),
         )
+
+
+def _step_has_guardrail_decision(step: Mapping[str, Any]) -> bool:
+    metadata = step.get("metadata") or {}
+    return (
+        step.get("name") == "Guardrail decision"
+        or "guardrail_decision" in metadata
+    )
+
+
+def _redact_public_step(step: Mapping[str, Any]) -> Dict[str, Any]:
+    redacted = dict(step)
+    if redacted.get("input_summary") is not None:
+        redacted["input_summary"] = PUBLIC_REDACTION_TEXT
+    if redacted.get("output_summary") is not None:
+        redacted["output_summary"] = PUBLIC_REDACTION_TEXT
+    if redacted.get("error_message") is not None:
+        redacted["error_message"] = "terminal_guardrail_decision"
+    redacted["metadata"] = {
+        "redacted": True,
+        "redaction_reason": "terminal_guardrail_decision",
+    }
+    if redacted.get("human_review") is not None:
+        redacted["human_review"] = None
+    verification = redacted.get("verification")
+    if verification:
+        redacted_verification = dict(verification)
+        redacted_verification["raw_response"] = None
+        redacted_verification["metadata"] = {
+            "redacted": True,
+            "redaction_reason": "terminal_guardrail_decision",
+        }
+        redacted["verification"] = redacted_verification
+    return redacted

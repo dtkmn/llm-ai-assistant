@@ -157,6 +157,16 @@ def status_with_unexpected_upload_error(
     return replace(qa_status, processing_report=failure_report)
 
 
+def public_trace_error(
+    query_result: QueryResult,
+    public_loop_report: Optional[dict],
+) -> Optional[str]:
+    redaction = (public_loop_report or {}).get("public_redaction") or {}
+    if redaction.get("applied"):
+        return "terminal_guardrail_decision"
+    return query_result.trace.error_message
+
+
 def format_answer_trace(query_result: Optional[QueryResult]) -> str:
     if query_result is None:
         return json.dumps(
@@ -169,6 +179,7 @@ def format_answer_trace(query_result: Optional[QueryResult]) -> str:
                 "retrieved_chunk_count": 0,
                 "citations": [],
                 "self_check": None,
+                "loop_report": None,
                 "error": None,
             },
             indent=2,
@@ -176,6 +187,11 @@ def format_answer_trace(query_result: Optional[QueryResult]) -> str:
 
     trace = query_result.trace
     self_check = trace.self_check
+    public_loop_report = (
+        query_result.loop_report.to_public_dict()
+        if query_result.loop_report
+        else None
+    )
     return json.dumps(
         {
             "question": trace.question,
@@ -207,7 +223,8 @@ def format_answer_trace(query_result: Optional[QueryResult]) -> str:
                 if self_check
                 else None
             ),
-            "error": trace.error_message,
+            "loop_report": public_loop_report,
+            "error": public_trace_error(query_result, public_loop_report),
         },
         indent=2,
     )

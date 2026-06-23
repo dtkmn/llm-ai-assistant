@@ -38,8 +38,14 @@ first context provider, not the product boundary.
   the first context provider capability, not the repo's strategic identity.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,
-  `VerificationResult`, and `HumanReviewRequest` before adding planner,
-  multi-agent, tool, replay, or framework-adapter behavior.
+  `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
+  `HumanReviewRequest` before adding planner, multi-agent, tool, replay, or
+  framework-adapter behavior.
+- `DocumentQA.query_with_trace()` must expose a `LoopReport` that matches the
+  actual query path: prompt evidence, draft, mechanical check, verifier outcome,
+  retry/refusal state, and final answer.
+- Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
+  or request human review, but it must not introduce autonomous tools by itself.
 - Upload status must say `indexed` for real backends, because endpoint readiness
   is not proven until the first inference call.
 - Upload replacement must be transactional. Failed uploads must not replace the

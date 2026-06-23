@@ -14,6 +14,7 @@ from src.DocumentQA import (
     MockLLM,
     OllamaLLM,
 )
+from src.loop_engine import GuardrailDecision, LoopDecision, LoopPhase
 
 
 class FakeEmbeddings(Embeddings):
@@ -152,6 +153,248 @@ def test_query_trace_counts_only_prompt_included_chunks(tmp_path):
     assert len(result.trace.citations) == 1
 
 
+def test_query_with_trace_includes_loop_report_for_prompt_evidence(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+
+    result = qa.query_with_trace("What is Project Phoenix?", session_id="session_a")
+
+    report = result.loop_report
+    assert report is not None
+    run = report.run
+    assert run.session_id == "session_a"
+    assert run.user_input == "What is Project Phoenix?"
+    assert run.context_provider == "document"
+    assert run.backend == "mock"
+    assert run.model_label == "MockLLM (fallback)"
+    assert run.policy.allow_tool_calls is False
+    assert "document_text" in run.metadata["untrusted_inputs"]
+    assert run.final_decision == LoopDecision.NOT_VERIFIED
+    assert run.final_answer == result.answer
+
+    phases = [step.phase for step in run.steps]
+    assert phases == [
+        LoopPhase.CONTEXT_SELECT,
+        LoopPhase.RETRIEVE,
+        LoopPhase.DRAFT,
+        LoopPhase.MECHANICAL_CHECK,
+        LoopPhase.VERIFY,
+        LoopPhase.FINAL,
+    ]
+    retrieve_step = next(step for step in run.steps if step.phase == LoopPhase.RETRIEVE)
+    verify_step = next(step for step in run.steps if step.phase == LoopPhase.VERIFY)
+    assert retrieve_step.metadata["retrieved_chunk_count"] == len(result.trace.citations)
+    assert retrieve_step.metadata["citation_ids"] == [1]
+    assert verify_step.decision == LoopDecision.NOT_VERIFIED
+    assert verify_step.verification.outcome.value == "not_verified"
+    assert verify_step.verification.reasons == tuple(result.trace.self_check.reasons)
+
+
+def test_loop_middleware_can_block_before_retrieval(tmp_path):
+    class BlockRetrieveMiddleware:
+        def before_step(self, run, step):
+            if step.phase == LoopPhase.RETRIEVE:
+                return GuardrailDecision(
+                    decision=LoopDecision.BLOCK,
+                    reason="retrieval_blocked",
+                    metadata={"policy": "test"},
+                )
+            return None
+
+    document = tmp_path / "phoenix.txt"
+    document.write_text(
+        "Project Phoenix launches in June 2026.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(
+        fast_mode=True,
+        hf_token="dummy",
+        llm_backend="mock",
+        loop_middlewares=(BlockRetrieveMiddleware(),),
+    )
+    qa.embeddings = FakeEmbeddings()
+    qa.process_document(str(document))
+
+    class CountingRetrievalChain:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            self.calls += 1
+            return SimpleNamespace(
+                answer="Project Phoenix launches in June 2026 [1].",
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+    retrieval_chain = CountingRetrievalChain()
+    replace_retrieval_chain(qa, retrieval_chain)
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert retrieval_chain.calls == 0
+    assert result.answer == "A loop guardrail blocked this query before it could complete."
+    assert result.trace.error_message == "retrieval_blocked"
+    assert result.loop_report.run.final_decision == LoopDecision.BLOCK
+    phases = [step.phase for step in result.loop_report.run.steps]
+    assert phases == [
+        LoopPhase.CONTEXT_SELECT,
+        LoopPhase.ERROR,
+        LoopPhase.FINAL,
+    ]
+    guardrail_step = next(
+        step for step in result.loop_report.run.steps if step.phase == LoopPhase.ERROR
+    )
+    assert guardrail_step.metadata["guardrail_decision"] == "block"
+    assert guardrail_step.metadata["policy"] == "test"
+    assert LoopPhase.RETRIEVE not in phases
+
+
+def test_loop_middleware_can_block_after_retrieval_before_draft(tmp_path):
+    class BlockAfterRetrieveMiddleware:
+        def after_step(self, run, step):
+            if step.phase == LoopPhase.RETRIEVE:
+                return GuardrailDecision(
+                    decision=LoopDecision.BLOCK,
+                    reason="post_retrieval_blocked",
+                )
+            return None
+
+    qa, _document = create_processed_mock_qa(tmp_path)
+    qa.loop_middlewares = (BlockAfterRetrieveMiddleware(),)
+    active_state = qa._snapshot_active_document_state()
+
+    class CountingSplitRetrievalChain:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+            self.draft_calls = 0
+
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return self.wrapped.invoke_with_trace(question, self_check_instruction)
+
+        def retrieve_with_trace(self, question):
+            return self.wrapped.retrieve_with_trace(question)
+
+        def draft_with_trace(
+            self, question, retrieved_context, self_check_instruction=""
+        ):
+            self.draft_calls += 1
+            return self.wrapped.draft_with_trace(
+                question,
+                retrieved_context,
+                self_check_instruction=self_check_instruction,
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            return self.wrapped.retry_with_trace(
+                question,
+                previous_result,
+                self_check_instruction,
+            )
+
+    retrieval_chain = CountingSplitRetrievalChain(active_state.retrieval_chain)
+    replace_retrieval_chain(qa, retrieval_chain)
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert retrieval_chain.draft_calls == 0
+    assert result.answer == "A loop guardrail blocked this query before it could complete."
+    assert result.trace.error_message == "post_retrieval_blocked"
+    assert result.loop_report.run.final_decision == LoopDecision.BLOCK
+    phases = [step.phase for step in result.loop_report.run.steps]
+    assert phases == [
+        LoopPhase.CONTEXT_SELECT,
+        LoopPhase.RETRIEVE,
+        LoopPhase.ERROR,
+        LoopPhase.FINAL,
+    ]
+    assert LoopPhase.DRAFT not in phases
+
+
+def test_loop_middleware_refusal_uses_guardrail_specific_answer(tmp_path):
+    class RefuseBeforeRunMiddleware:
+        def before_run(self, run):
+            return GuardrailDecision(
+                decision=LoopDecision.REFUSE,
+                reason="policy_refused",
+            )
+
+    qa, _document = create_processed_mock_qa(tmp_path)
+    qa.loop_middlewares = (RefuseBeforeRunMiddleware(),)
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "A loop guardrail refused this query before it could safely complete."
+    )
+    assert result.answer != (
+        "I could not find enough relevant information in the document to answer that."
+    )
+    assert result.trace.error_message == "policy_refused"
+    assert result.loop_report.run.final_decision == LoopDecision.REFUSE
+
+
+def test_loop_middleware_retry_request_is_reported_as_unavailable_block(tmp_path):
+    class RetryBeforeRunMiddleware:
+        def before_run(self, run):
+            return GuardrailDecision(
+                decision=LoopDecision.RETRY,
+                reason="policy_requested_retry",
+            )
+
+    qa, _document = create_processed_mock_qa(tmp_path)
+    qa.loop_middlewares = (RetryBeforeRunMiddleware(),)
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == (
+        "A loop guardrail requested a retry, but no safe retry path is available for this step."
+    )
+    assert result.trace.error_message == "guardrail_retry_unavailable"
+    assert result.loop_report.run.final_decision == LoopDecision.BLOCK
+    guardrail_step = next(
+        step for step in result.loop_report.run.steps if step.name == "Guardrail decision"
+    )
+    assert guardrail_step.decision == LoopDecision.RETRY
+    assert guardrail_step.metadata["guardrail_reason"] == "policy_requested_retry"
+
+
+def test_after_run_guardrail_overrides_answer_without_stale_self_check(tmp_path):
+    class RequireReviewAfterRunMiddleware:
+        def after_run(self, run):
+            if run.final_decision == LoopDecision.NOT_VERIFIED:
+                return GuardrailDecision(
+                    decision=LoopDecision.REQUIRES_REVIEW,
+                    reason="review_mock_answer",
+                )
+            return None
+
+    document = tmp_path / "phoenix.txt"
+    document.write_text(
+        "Project Phoenix launches in June 2026.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(
+        fast_mode=True,
+        hf_token="dummy",
+        llm_backend="mock",
+        loop_middlewares=(RequireReviewAfterRunMiddleware(),),
+    )
+    qa.embeddings = FakeEmbeddings()
+    qa.process_document(str(document))
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == "This query requires human review before the loop can continue."
+    assert result.trace.citations == []
+    assert result.trace.self_check is None
+    assert result.trace.error_message == "review_mock_answer"
+    assert result.loop_report.run.final_decision == LoopDecision.REQUIRES_REVIEW
+    assert result.loop_report.run.metadata["after_run_guardrail"] is True
+    assert qa.chat_history[-1]["answer"] == result.answer
+    assert qa.chat_history[-1]["self_check"] is None
+
+
 def replace_retrieval_chain(qa, retrieval_chain):
     active_state = qa._snapshot_active_document_state()
     qa._commit_active_document_state(
@@ -266,6 +509,18 @@ def test_self_check_retries_missing_inline_citation(tmp_path):
     ]
     assert result.trace.self_check.retry_attempted is True
     assert qa.chat_history[-1]["self_check"]["retry_attempted"] is True
+    assert result.loop_report.run.final_decision == LoopDecision.NOT_VERIFIED
+    retry_steps = [
+        step for step in result.loop_report.run.steps if step.phase == LoopPhase.RETRY
+    ]
+    assert len(retry_steps) == 1
+    assert retry_steps[0].metadata["reasons"] == ["missing_inline_citation"]
+    retry_draft_steps = [
+        step
+        for step in result.loop_report.run.steps
+        if step.phase == LoopPhase.DRAFT and step.retry_count == 1
+    ]
+    assert len(retry_draft_steps) == 1
 
 
 def test_self_check_refuses_when_retry_still_fails(tmp_path):
@@ -335,6 +590,15 @@ def test_self_check_rejects_cited_but_unsupported_answer(tmp_path):
     assert len(verifier.calls) == 1
     assert "Project Phoenix launches tomorrow [1]." in verifier.calls[0]
     assert "Project Phoenix launches in June 2026." in verifier.calls[0]
+    assert result.loop_report.run.final_decision == LoopDecision.REFUSE
+    phases = [step.phase for step in result.loop_report.run.steps]
+    assert LoopPhase.VERIFY in phases
+    assert LoopPhase.REFUSE in phases
+    verify_step = next(
+        step for step in result.loop_report.run.steps if step.phase == LoopPhase.VERIFY
+    )
+    assert verify_step.decision == LoopDecision.REFUSE
+    assert verify_step.verification.outcome.value == "unsupported"
 
 
 def test_llm_verifier_marks_real_backend_answer_supported(tmp_path):
@@ -364,6 +628,42 @@ def test_llm_verifier_marks_real_backend_answer_supported(tmp_path):
     assert len(verifier.calls) == 1
     assert "When does Project Phoenix launch?" in verifier.calls[0]
     assert "Project Phoenix launches in June 2026." in verifier.calls[0]
+
+
+def test_loop_middleware_can_block_before_verifier_call(tmp_path):
+    class BlockVerifyMiddleware:
+        def before_step(self, run, step):
+            if step.phase == LoopPhase.VERIFY:
+                return GuardrailDecision(
+                    decision=LoopDecision.BLOCK,
+                    reason="verifier_blocked",
+                )
+            return None
+
+    qa, document = create_processed_mock_qa(tmp_path)
+    qa.loop_middlewares = (BlockVerifyMiddleware(),)
+    verifier = enable_fake_verifier(qa, outcome="supported")
+
+    class SupportedCitationChain:
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            return SimpleNamespace(
+                answer="Project Phoenix launches in June 2026 [1].",
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+    replace_retrieval_chain(qa, SupportedCitationChain())
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert verifier.calls == []
+    assert result.answer == "A loop guardrail blocked this query before it could complete."
+    assert result.trace.error_message == "verifier_blocked"
+    assert result.loop_report.run.final_decision == LoopDecision.BLOCK
+    phases = [step.phase for step in result.loop_report.run.steps]
+    assert LoopPhase.MECHANICAL_CHECK in phases
+    assert LoopPhase.VERIFY not in phases
 
 
 def test_self_check_retries_hallucinated_inline_citation_id(tmp_path):

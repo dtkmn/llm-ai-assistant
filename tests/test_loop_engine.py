@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.loop_engine import (
+    GuardrailDecision,
     HumanReviewRequest,
     LoopDecision,
     LoopPhase,
@@ -110,6 +111,31 @@ def test_loop_policy_rejects_string_false_booleans(field_name):
 def test_loop_policy_constructor_rejects_non_boolean_guardrail_values():
     with pytest.raises(ValueError, match="allow_tool_calls must be a boolean"):
         LoopPolicy(allow_tool_calls="false")
+
+
+def test_guardrail_decision_round_trips_human_review_request():
+    review = HumanReviewRequest(
+        request_id="review_guardrail",
+        reason="tool output needs approval",
+        instructions="Inspect untrusted tool output before continuing.",
+        created_at=utc("2026-06-23T12:00:00"),
+    )
+    decision = GuardrailDecision(
+        decision=LoopDecision.REQUIRES_REVIEW,
+        reason="untrusted_tool_output",
+        human_review=review,
+        metadata={"source": "middleware"},
+    )
+
+    restored = GuardrailDecision.from_dict(decision.to_dict())
+
+    assert restored == decision
+    assert restored.can_continue is False
+
+
+def test_guardrail_decision_rejects_non_guardrail_outcome():
+    with pytest.raises(ValueError, match="supported is not a guardrail decision"):
+        GuardrailDecision(decision=LoopDecision.SUPPORTED)
 
 
 def test_loop_run_add_step_and_complete_are_immutable():
