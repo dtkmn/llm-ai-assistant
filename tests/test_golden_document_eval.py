@@ -1,0 +1,175 @@
+import json
+
+import pytest
+from langchain_core.embeddings import Embeddings
+from langchain_core.language_models.llms import LLM
+from pydantic import Field
+
+from src.DocumentQA import DocumentQA, SELF_CHECK_REFUSAL_ANSWER
+
+
+GOLDEN_DOCUMENT_TEXT = """# Project Phoenix Brief
+
+Project Phoenix launches in June 2026.
+The approved Project Phoenix budget is $42 million.
+Alex Rivera owns the Project Phoenix rollout.
+Unsupported claims must be refused instead of invented.
+"""
+
+
+class GoldenEvalEmbeddings(Embeddings):
+    def embed_documents(self, texts):
+        return [self._embed(text) for text in texts]
+
+    def embed_query(self, text):
+        return self._embed(text)
+
+    def _embed(self, text):
+        lower = text.lower()
+        return [
+            float(len(text)),
+            float(lower.count("phoenix")),
+            float(lower.count("launch")),
+            float(lower.count("budget")),
+            float(lower.count("owner") + lower.count("owns")),
+            float(lower.count("venue") + lower.count("location")),
+        ]
+
+
+class GoldenEvalLLM(LLM):
+    scenario: str
+    calls: list[str] = Field(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "golden-eval"
+
+    def _call(self, prompt: str, stop=None, **kwargs) -> str:
+        self.calls.append(prompt)
+        if "strict citation verifier" in prompt:
+            return self._verifier_response(prompt)
+        return self._answer_response(prompt)
+
+    def _answer_response(self, prompt: str) -> str:
+        question = self._question_from_prompt(prompt)
+        if self.scenario == "missing_citation_then_supported":
+            if "Self-check retry instruction" in prompt:
+                return "Project Phoenix launches in June 2026 [1]."
+            return "Project Phoenix launches in June 2026."
+        if self.scenario == "unsupported_answer":
+            return "Project Phoenix launches from Lunar Base Alpha [1]."
+        if "budget" in question:
+            return "The approved Project Phoenix budget is $42 million [1]."
+        if "owner" in question or "owns" in question:
+            return "Alex Rivera owns the Project Phoenix rollout [1]."
+        return "Project Phoenix launches in June 2026 [1]."
+
+    def _question_from_prompt(self, prompt: str) -> str:
+        if "Question:" not in prompt:
+            return ""
+        question_section = prompt.split("Question:", 1)[1]
+        question = question_section.split("Self-check retry instruction:", 1)[0]
+        question = question.split("Answer:", 1)[0]
+        return question.strip().lower()
+
+    def _verifier_response(self, prompt: str) -> str:
+        if "Lunar Base Alpha" in prompt:
+            return json.dumps(
+                {
+                    "outcome": "insufficient",
+                    "reason": "venue is not in the cited excerpts",
+                }
+            )
+        return json.dumps(
+            {
+                "outcome": "supported",
+                "reason": "answer is directly supported by cited excerpts",
+            }
+        )
+
+
+@pytest.fixture(autouse=True)
+def clear_provider_env(monkeypatch):
+    for env_var in (
+        "HUGGINGFACEHUB_API_TOKEN",
+        "HF_ENDPOINT_URL",
+        "LLM_BACKEND",
+        "LLM_MODEL_ID",
+        "OLLAMA_MODEL",
+        "OLLAMA_BASE_URL",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+
+
+def build_golden_qa(tmp_path, scenario="supported"):
+    document = tmp_path / "project_phoenix_brief.md"
+    document.write_text(GOLDEN_DOCUMENT_TEXT, encoding="utf-8")
+
+    qa = DocumentQA(fast_mode=True, llm_backend="ollama", hf_token=None)
+    qa.llm = GoldenEvalLLM(scenario=scenario)
+    qa.active_llm_backend = "ollama"
+    qa.loaded_model_id = "golden-eval"
+    qa.loaded_model_label = "Golden eval model"
+    qa.embeddings = GoldenEvalEmbeddings()
+    qa.process_document(str(document))
+    return qa, document
+
+
+def test_golden_document_supported_answer_is_cited_and_verified(tmp_path):
+    qa, document = build_golden_qa(tmp_path)
+    status = qa.status()
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert status.ready_for_queries is True
+    assert status.active_backend == "ollama"
+    assert status.active_model_label == "Golden eval model"
+    assert status.processing_report.success is True
+    assert status.processing_report.active_document_name == document.name
+    assert status.processing_report.phase == "complete"
+    assert status.processing_report.backend == "ollama"
+    assert result.answer == "Project Phoenix launches in June 2026 [1]."
+    assert result.trace.document_name == document.name
+    assert result.trace.backend == "ollama"
+    assert result.trace.model_label == "Golden eval model"
+    assert result.trace.retrieved_chunk_count == len(result.trace.citations) == 1
+    assert result.trace.self_check.outcome == "supported"
+    assert result.trace.self_check.reasons == [
+        "mechanical_checks_passed",
+        "llm_verifier_supported",
+    ]
+    assert result.trace.self_check.retry_attempted is False
+    assert result.trace.citations[0].citation_id == 1
+    assert result.trace.citations[0].source_name == document.name
+    assert "June 2026" in result.trace.citations[0].excerpt
+    assert qa.chat_history[-1]["self_check"]["outcome"] == "supported"
+
+
+def test_golden_document_unsupported_answer_fails_closed(tmp_path):
+    qa, _document = build_golden_qa(tmp_path, scenario="unsupported_answer")
+
+    result = qa.query_with_trace("Where is the Project Phoenix launch venue?")
+
+    assert result.answer == SELF_CHECK_REFUSAL_ANSWER
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert result.trace.self_check.reasons == ["llm_verifier_insufficient"]
+    assert result.trace.self_check.retry_attempted is False
+    assert result.trace.retrieved_chunk_count == len(result.trace.citations) == 1
+    assert qa.chat_history[-1]["answer"] == SELF_CHECK_REFUSAL_ANSWER
+
+
+def test_golden_document_missing_citation_retries_then_passes(tmp_path):
+    qa, _document = build_golden_qa(
+        tmp_path, scenario="missing_citation_then_supported"
+    )
+
+    result = qa.query_with_trace("When does Project Phoenix launch?")
+
+    assert result.answer == "Project Phoenix launches in June 2026 [1]."
+    assert result.trace.self_check.outcome == "supported"
+    assert result.trace.self_check.retry_attempted is True
+    assert any("missing_inline_citation" in call for call in qa.llm.calls)
+    answer_calls = [
+        call for call in qa.llm.calls if "You are a helpful AI assistant" in call
+    ]
+    assert len(answer_calls) == 2

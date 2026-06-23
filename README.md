@@ -14,7 +14,7 @@ This project uses LangChain, Hugging Face or Ollama LLM backends, FAISS, and Gra
 https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ## Features
-- **Configurable LLM Backend:** Uses hosted Hugging Face inference on CPU by default, local Hugging Face weights on GPU/MPS, explicit Ollama, or mock mode for demos/tests
+- **Local-first LLM Backend:** Recommended local path is Ollama; Hugging Face endpoint/local backends remain available for hosted deployments, gated models, and Hugging Face Spaces
 - **Document Processing:** Supports PDF, DOCX, and text documents with intelligent chunking
 - **Vector Search:** Uses FAISS for efficient similarity search with HuggingFace embeddings
 - **Gradio Interface:** Modern, user-friendly web interface for document upload and chat
@@ -27,6 +27,7 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ### Prerequisites
 - Python 3.11 or higher
+- Ollama installed for the recommended local-first setup
 - HuggingFace account and API token for hosted endpoint inference or gated models ([get one here](https://huggingface.co/settings/tokens)); not required for `LLM_BACKEND=ollama`
 - At least 8GB RAM if forcing local model execution on CPU; GPU/MPS is strongly preferred for local models
 
@@ -52,54 +53,57 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     pip install -r requirements.txt
     ```
 
-4. Set up your HuggingFace token if you use hosted endpoint inference, CPU `auto`, or gated Hugging Face `local` models:
+4. Run local-first with Ollama:
 
-    ```bash
-    export HUGGINGFACEHUB_API_TOKEN=your_token_here
-    ```
-
-5. (Optional) choose a different Hugging Face local model:
-
-    ```bash
-    export LLM_MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct
-    ```
-
-6. (Optional) choose an LLM backend:
-
-    ```bash
-    export LLM_BACKEND=auto
-    ```
-
-    Supported values:
-    - `auto` uses hosted Hugging Face inference on CPU and local weights on CUDA/MPS
-    - `endpoint` always uses hosted Hugging Face inference
-    - `local` always downloads and runs model weights in-process
-    - `ollama` uses a local Ollama server
-    - `mock` disables real inference for demos/tests
-
-    For Ollama:
+    Terminal 1, unless the Ollama desktop app/service is already running:
 
     ```bash
     ollama serve
+    ```
+
+    Terminal 2:
+
+    ```bash
     ollama pull nemotron-3-nano:4b
     export LLM_BACKEND=ollama
     export OLLAMA_MODEL=nemotron-3-nano:4b
     export OLLAMA_BASE_URL=http://localhost:11434
     ```
 
-7. (Optional) enable fast mode (lower latency, lower quality):
+5. (Optional) choose a different backend:
+
+    Supported values:
+    - `ollama` uses a local Ollama server. This is the recommended local path.
+    - `auto` uses hosted Hugging Face inference on CPU and local weights on CUDA/MPS.
+    - `endpoint` always uses hosted Hugging Face inference.
+    - `local` always downloads and runs Hugging Face model weights in-process.
+    - `mock` disables real inference for demos/tests.
+
+6. (Optional) set up Hugging Face for hosted endpoint inference, CPU `auto`, or gated Hugging Face `local` models:
+
+    ```bash
+    export HUGGINGFACEHUB_API_TOKEN=your_token_here
+    ```
+
+7. (Optional) choose a different Hugging Face local model:
+
+    ```bash
+    export LLM_MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct
+    ```
+
+8. (Optional) enable fast mode (lower latency, lower quality):
 
     ```bash
     export FAST_MODE=true
     ```
 
-8. (Optional) enable debug logs:
+9. (Optional) enable debug logs:
 
     ```bash
     export APP_DEBUG=false
     ```
 
-9. Run the application:
+10. Run the application:
 
     ```bash
     python src/app.py
@@ -137,10 +141,10 @@ The application is containerized for easy deployment.
 
 ### Model
 - **LLM backend:** Configurable via `LLM_BACKEND`
+  - `ollama`: local Ollama server via `OLLAMA_BASE_URL`; recommended for local use
   - `auto` (default): hosted endpoint on CPU, local model on CUDA/MPS
   - `endpoint`: hosted Hugging Face inference
   - `local`: in-process Transformers pipeline
-  - `ollama`: local Ollama server via `OLLAMA_BASE_URL`
   - `mock`: deterministic demo/test fallback
 - **LLM model:** Configurable via `LLM_MODEL_ID`
   - **Quality mode (default):** tries `Qwen/Qwen2.5-1.5B-Instruct`, then `Qwen/Qwen2.5-7B-Instruct`, then `meta-llama/Llama-3.2-3B-Instruct`
@@ -162,6 +166,40 @@ The application is containerized for easy deployment.
   - **Fast:** `k=3`, `fetch_k=10`
 - **Safety limits:** Max upload size 25 MB, chunk cap 2,000 chunks per document
 
+## Local-First Direction
+- The product direction is **download and run locally first**. Ollama is the
+  recommended path for Mac and workstation use because it keeps model setup
+  outside the Python dependency graph and avoids requiring cloud credentials.
+- Hugging Face support should stay, but as an optional provider path: it is still
+  useful for Hugging Face Spaces, hosted endpoint deployments, gated model
+  experiments, and environments where a local model server is not practical.
+- New features should not require Hugging Face tokens for the happy path. If a
+  feature works locally, document the Ollama path first and the hosted path
+  second.
+
+## Loop Engineering Pattern
+This repo is intentionally built around two loops:
+
+- **Runtime document loop:** upload -> validate/decode -> split -> embed/index ->
+  retrieve prompt chunks -> answer with inline citations -> run mechanical
+  checks -> verify cited claims with the active real backend -> retry once or
+  fail closed -> return trace/status.
+- **Engineering loop:** change one contract -> add focused regressions -> run
+  golden document evals -> run broad validation -> ask for review -> stage only
+  intentional files.
+
+Golden evals live in `tests/test_golden_document_eval.py`. They are provider-free
+CI checks that exercise the full document QA loop with a deterministic fake LLM:
+
+```bash
+python -m pytest tests/test_golden_document_eval.py -q
+python -m pytest
+```
+
+Use these before adding planner loops, tools, multi-document memory, or more
+agent-like behavior. Blunt rule: if the boring document loop is not measurably
+honest, agent features will only make the failure harder to see.
+
 ## Security and Dependency Maintenance
 - Dependencies are pinned in `requirements.txt` for reproducible installs.
 - Dependabot is enabled weekly (`.github/dependabot.yml`) for dependency updates.
@@ -172,9 +210,10 @@ The application is containerized for easy deployment.
 
   ```bash
   pip install -r requirements-dev.txt
-  pip-audit -r requirements.txt
-  pip check
+  pytest tests/test_golden_document_eval.py -q
   pytest
+  python -m pip_audit -r requirements.txt --strict
+  python -m pip check
   ```
 
 ## Agent-Assisted Development

@@ -20,7 +20,7 @@ Primary runtime files:
 - Install test/audit dependencies: `python -m pip install -r requirements-dev.txt`
 - Run the app locally: `python src/app.py`
 - Run tests: `python -m pytest`
-- Compile check: `python -m py_compile src/app.py src/DocumentQA.py tests/test_app.py tests/test_document_qa.py`
+- Compile check: `python -m py_compile src/app.py src/DocumentQA.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py`
 - Dependency checks: `python -m pip check` and `python -m pip_audit -r requirements.txt --strict`
 
 ## Non-Negotiable Contracts
@@ -42,6 +42,9 @@ Primary runtime files:
   deterministic refutation prefilters may reject bad answers, but only a real
   backend verifier may label an answer `supported`. Mock/demo mode must report
   mechanically valid answers as `not_verified`, not `supported`.
+- Golden document evals must remain provider-free and deterministic. They should
+  exercise upload, retrieval, citation trace, self-check, retry, and fail-closed
+  behavior without requiring a live Ollama or Hugging Face backend in CI.
 - Text upload default is `Auto`. Ambiguous legacy bytes must fail closed instead
   of mojibaking. `UTF-8 / Western` and explicit legacy encodings are opt-ins.
 - Docker image publication belongs to `main` only. `dev`, PR, and manual workflow
@@ -51,6 +54,9 @@ Primary runtime files:
 - Ollama support is explicit, not part of `auto`. Use `OLLAMA_MODEL`,
   `OLLAMA_BASE_URL`, and `OLLAMA_TIMEOUT`; do not route Ollama through
   Hugging Face model ids or tokens.
+- Product direction is local-first. Keep Hugging Face support as an optional
+  hosted/deployment path, but do not make new happy-path features require a
+  Hugging Face token when they can run through Ollama.
 
 ## Engineering Loop
 
@@ -78,6 +84,9 @@ Use this loop for every non-trivial change:
   evidence through structured result objects such as `query_with_trace()`.
 - Keep `DocumentQA` honest before making it clever. Reliability beats agentic
   theater.
+- Before adding planner/tool/agent loops, add or update golden document evals
+  that prove the base RAG loop still cites, verifies, retries, and refuses
+  honestly.
 - Add abstractions only when they reduce risk or remove repeated policy logic.
 - Keep docs and comments aligned with runtime behavior. Stale comments are bugs
   waiting to be reintroduced.
@@ -91,7 +100,8 @@ For narrow docs-only changes:
 For Python behavior changes:
 
 - `python -m pytest`
-- `python -m py_compile src/app.py src/DocumentQA.py tests/test_app.py tests/test_document_qa.py`
+- `python -m pytest tests/test_golden_document_eval.py -q`
+- `python -m py_compile src/app.py src/DocumentQA.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:
