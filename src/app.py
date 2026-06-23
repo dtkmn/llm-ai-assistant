@@ -42,6 +42,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 LOGGER = logging.getLogger(__name__)
+APP_TITLE = "AI Loop Engine"
 TEXT_ENCODING_OPTIONS = {
     "Auto": "auto",
     "UTF-8 / Western": "utf-8-or-western",
@@ -281,7 +282,7 @@ def clear_chat():
 
 # Create the Gradio interface
 with gr.Blocks() as demo:
-    gr.Markdown("# Local Loop Workbench")
+    gr.Markdown(f"# {APP_TITLE}")
 
     with gr.Row():
         with gr.Column():

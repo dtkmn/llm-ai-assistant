@@ -1,5 +1,5 @@
 ---
-title: Local Loop Workbench
+title: AI Loop Engine
 emoji: 🏳️‍🌈
 colorFrom: gray
 colorTo: green
@@ -8,13 +8,14 @@ app_port: 7860
 ---
 
 
-# Local Loop Workbench
-Local Loop Workbench is a local-first loop engineering workbench for inspecting
-how an agent retrieves context, drafts an answer, checks citations, verifies
-claims, retries failures, and refuses unsupported output. The current built-in
-capability is document context: upload PDF, DOCX, TXT, or MD files, index them
-with FAISS, and talk to an agent whose answer loop is visible and testable.
+# AI Loop Engine
+AI Loop Engine is a local-first engine for inspecting and hardening AI answer
+loops: context retrieval, drafting, citation checks, claim verification, retries,
+refusals, middleware guardrails, and evals. The current built-in capability is
+document context: upload PDF, DOCX, TXT, or MD files, index them with FAISS, and
+talk to an agent whose loop is visible and testable.
 
+Current Hugging Face Space deployment:
 https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ## Features
@@ -26,7 +27,7 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 - **GPU/MPS Support:** Automatically utilizes CUDA, Apple Silicon (MPS), or CPU
 
 
-![LLM-flow.png](https://github.com/dtkmn/llm-ai-assistant/blob/main/LLM-flow.png)
+![LLM-flow.png](https://github.com/dtkmn/ai-loop-engine/blob/main/LLM-flow.png)
 
 ## Installation
 
@@ -41,8 +42,8 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 1. Clone the repository:
     
     ```bash
-    git clone https://github.com/dtkmn/llm-ai-assistant.git
-    cd llm-ai-assistant
+    git clone https://github.com/dtkmn/ai-loop-engine.git
+    cd ai-loop-engine
     ``` 
 
 2. Create and activate a virtual environment:
@@ -121,7 +122,7 @@ The application is containerized for easy deployment.
 ### Build the Docker Image
 
    ```bash
-   docker build -t llm-ai-assistant .
+   docker build -t ai-loop-engine .
    ```
 
 ### Run the Container
@@ -129,7 +130,7 @@ The application is containerized for easy deployment.
    ```bash
    docker run -p 7860:7860 \
      -e HUGGINGFACEHUB_API_TOKEN=your_token_here \
-     llm-ai-assistant
+     ai-loop-engine
    ```
 
 **Note:** With `LLM_BACKEND=auto`, CPU deployments use hosted Hugging Face inference and avoid downloading LLM weights. The `local` backend downloads Hugging Face model weights in-process. The `ollama` backend expects an already-running Ollama server and a pulled model.
@@ -186,9 +187,9 @@ The application is containerized for easy deployment.
 - Hugging Face support should stay, but as an optional provider path: it is still
   useful for Hugging Face Spaces, hosted endpoint deployments, gated model
   experiments, and environments where a local model server is not practical.
-- New loop-workbench features should not require Hugging Face tokens for the happy path. If a
-  feature works locally, document the Ollama path first and the hosted path
-  second.
+- New AI Loop Engine features should not require Hugging Face tokens for the
+  happy path. If a feature works locally, document the Ollama path first and the
+  hosted path second.
 
 ## Loop Engineering Pattern
 This repo is intentionally built around two loops:

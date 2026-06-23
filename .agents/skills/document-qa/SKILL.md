@@ -1,6 +1,6 @@
 ---
 name: loop-engineering
-description: Use when changing loop contracts, document context, retrieval, LLM backend routing, Gradio upload/query behavior, evals, or CI release policy for this local-first Loop Engineering Workbench.
+description: Use when changing loop contracts, document context, retrieval, LLM backend routing, Gradio upload/query behavior, evals, or CI release policy for AI Loop Engine.
 ---
 
 # Loop Engineering
@@ -34,7 +34,7 @@ first context provider, not the product boundary.
   closed when the server or configured model is unavailable.
 - `hf_token="dummy"` is valid only for Hugging Face mock/demo paths. Ollama does
   not use Hugging Face tokens.
-- Product identity is Loop Engineering Workbench. Treat document answering as
+- Product identity is AI Loop Engine. Treat document answering as
   the first context provider capability, not the repo's strategic identity.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,

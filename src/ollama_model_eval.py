@@ -295,7 +295,8 @@ def results_to_json(results: Sequence[ModelEvalResult]) -> str:
 def parse_args(argv: Optional[Sequence[str]] = None):
     parser = argparse.ArgumentParser(
         description=(
-            "Run the golden document QA eval against one or more live Ollama models."
+            "Run the golden document-context loop eval against one or more "
+            "live Ollama models."
         )
     )
     parser.add_argument(

@@ -180,6 +180,7 @@ def test_text_encoding_dropdown_defaults_to_auto():
 
 
 def test_app_copy_frames_document_as_context():
+    assert app.APP_TITLE == "AI Loop Engine"
     assert app.file_upload.label == "Upload Document Context"
     assert app.upload_button.value == "Index Context"
     assert app.upload_status.label == "Context Status"
