@@ -1,5 +1,5 @@
 ---
-title: LLM Powered AI Assistant
+title: Local Loop Workbench
 emoji: 🏳️‍🌈
 colorFrom: gray
 colorTo: green
@@ -8,16 +8,21 @@ app_port: 7860
 ---
 
 
-# LLM AI Assistant
-This project uses LangChain, Hugging Face or Ollama LLM backends, FAISS, and Gradio to answer questions from uploaded document context. It is a compact retrieval-augmented generation (RAG) assistant designed to run locally, in Docker, or on Hugging Face Spaces.
+# Local Loop Workbench
+Local Loop Workbench is a local-first loop engineering workbench for inspecting
+how an agent retrieves context, drafts an answer, checks citations, verifies
+claims, retries failures, and refuses unsupported output. The current built-in
+capability is document context: upload PDF, DOCX, TXT, or MD files, index them
+with FAISS, and talk to an agent whose answer loop is visible and testable.
 
 https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
 ## Features
+- **Loop Engineering Core:** Treats retrieval, drafting, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
+- **Document Context Provider:** Supports PDF, DOCX, and text documents with safe decoding, chunking, and transactional replacement
 - **Local-first LLM Backend:** Recommended local path is Ollama; Hugging Face endpoint/local backends remain available for hosted deployments, gated models, and Hugging Face Spaces
-- **Document Processing:** Supports PDF, DOCX, and text documents with intelligent chunking
-- **Vector Search:** Uses FAISS for efficient similarity search with HuggingFace embeddings
-- **Gradio Interface:** Modern, user-friendly web interface for document upload and chat
+- **Vector Search:** Uses FAISS for efficient similarity search with Hugging Face embeddings
+- **Gradio Interface:** Web interface for document context upload, agent chat, runtime status, and answer traces
 - **GPU/MPS Support:** Automatically utilizes CUDA, Apple Silicon (MPS), or CPU
 
 
@@ -132,12 +137,20 @@ The application is containerized for easy deployment.
 
 ## Usage
 1. Open your browser and go to `http://localhost:7860`
-2. Upload a document (PDF, DOCX, TXT, or MD; max 25 MB)
-3. Click "Process Document" to analyze it
-4. Ask questions about your document in the chat interface
-5. Get detailed, AI-generated answers based on the document content
+2. Upload document context (PDF, DOCX, TXT, or MD; max 25 MB)
+3. Click "Index Context" to make it available to the loop
+4. Ask questions in the chat interface
+5. Inspect the answer trace to see citations, verifier outcome, retry/refusal state, and final answer
 
 ## Technical Details
+
+### Loop Contract
+- **Current context provider:** Document context
+- **Current loop shape:** validate/decode -> split -> embed/index -> retrieve -> draft answer -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
+- **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
+- **Runtime reports:** `DocumentQA.query_with_trace()` returns a `QueryResult` with both the legacy answer trace and a first-class `LoopReport`
+- **Middleware boundary:** loop middleware can observe runs/steps, block unsafe progress, request retry/refusal, or mark a human-review pending state without introducing autonomous tool use
+- **Framework posture:** OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter targets, not core dependencies
 
 ### Model
 - **LLM backend:** Configurable via `LLM_BACKEND`
@@ -159,7 +172,7 @@ The application is containerized for easy deployment.
 
 ### Configuration
 - **Response Length:** 384 new tokens (quality) / 160 new tokens (fast)
-- **Generation mode:** Deterministic (`do_sample=False`) for more reliable doc QA
+- **Generation mode:** Deterministic (`do_sample=False`) for more reliable context-grounded answers
 - **Chunk Size:** 1200/200 overlap (quality) / 900/120 overlap (fast)
 - **Retrieval:** MMR retrieval with source/page grounding
   - **Quality:** `k=6`, `fetch_k=24`
@@ -173,32 +186,33 @@ The application is containerized for easy deployment.
 - Hugging Face support should stay, but as an optional provider path: it is still
   useful for Hugging Face Spaces, hosted endpoint deployments, gated model
   experiments, and environments where a local model server is not practical.
-- New features should not require Hugging Face tokens for the happy path. If a
+- New loop-workbench features should not require Hugging Face tokens for the happy path. If a
   feature works locally, document the Ollama path first and the hosted path
   second.
 
 ## Loop Engineering Pattern
 This repo is intentionally built around two loops:
 
-- **Runtime document loop:** upload -> validate/decode -> split -> embed/index ->
-  retrieve prompt chunks -> answer with inline citations -> run mechanical
-  checks -> verify cited claims with the active real backend -> retry once or
-  fail closed -> return trace/status.
+- **Runtime agent loop:** select context -> retrieve prompt evidence -> draft an
+  answer with inline citations -> run mechanical checks -> verify cited claims
+  with the active real backend -> retry once or fail closed -> return trace/status.
+- **Guardrail loop:** middleware hooks can run before/after runs and steps, and
+  can return typed decisions: continue, retry, refuse, block, or requires_review.
 - **Engineering loop:** change one contract -> add focused regressions -> run
-  golden document evals -> run broad validation -> ask for review -> stage only
+  golden loop evals -> run broad validation -> ask for review -> stage only
   intentional files.
 
 Golden evals live in `tests/test_golden_document_eval.py`. They are provider-free
-CI checks that exercise the full document QA loop with a deterministic fake LLM:
+CI checks that exercise the current document-context loop with a deterministic fake LLM:
 
 ```bash
 python -m pytest tests/test_golden_document_eval.py -q
 python -m pytest
 ```
 
-Use these before adding planner loops, tools, multi-document memory, or more
-agent-like behavior. Blunt rule: if the boring document loop is not measurably
-honest, agent features will only make the failure harder to see.
+Use these before adding planner loops, tools, multi-context memory, or more
+agent-like behavior. Blunt rule: if the boring single-agent loop is not
+measurably honest, bigger agent features will only make the failure harder to see.
 
 ### Optional Live Ollama Model Eval
 
@@ -257,6 +271,7 @@ ollama stop qwen3:8b
 
   ```bash
   pip install -r requirements-dev.txt
+  pytest tests/test_loop_engine.py -q
   pytest tests/test_golden_document_eval.py -q
   pytest tests/test_ollama_model_eval.py -q
   pytest
@@ -268,9 +283,9 @@ ollama stop qwen3:8b
 - `AGENTS.md` contains repo-level instructions for coding agents: setup commands,
   validation expectations, backend honesty rules, encoding policy, and release
   guardrails.
-- `.agents/skills/document-qa/SKILL.md` defines the focused document-QA
-  engineering skill for changes to ingestion, retrieval, model routing, UI
-  status, and CI publishing.
+- `.agents/skills/document-qa/SKILL.md` defines the focused loop-engineering
+  skill for changes to loop contracts, document context, retrieval, model
+  routing, UI status, evals, and CI publishing.
 - Use the documented loop for non-trivial changes: explore, plan, act, observe,
   verify, review, and ship.
 

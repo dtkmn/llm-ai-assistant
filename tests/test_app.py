@@ -11,6 +11,7 @@ from src.DocumentQA import (
     DocumentQAStatus,
     QueryResult,
 )
+from src.loop_engine import LoopDecision, LoopPhase, LoopReport, LoopRun, LoopStep
 
 
 class FakeQA:
@@ -91,7 +92,7 @@ class FakeQA:
                         source_name=self.current_document_name or "demo.txt",
                         page=None,
                         chunk_index=0,
-                        excerpt="Project Phoenix is a document QA assistant.",
+                        excerpt="Project Phoenix is a loop workbench.",
                     )
                 ],
                 self_check=AnswerSelfCheck(
@@ -176,6 +177,13 @@ def test_process_document_reports_mock_mode_without_success_claim(monkeypatch, t
 
 def test_text_encoding_dropdown_defaults_to_auto():
     assert app.text_encoding.value == "Auto"
+
+
+def test_app_copy_frames_document_as_context():
+    assert app.file_upload.label == "Upload Document Context"
+    assert app.upload_button.value == "Index Context"
+    assert app.upload_status.label == "Context Status"
+    assert app.answer_trace.label == "Loop Trace"
 
 
 def test_process_document_passes_selected_text_encoding(monkeypatch, tmp_path):
@@ -306,7 +314,7 @@ def test_process_document_reports_failure_without_losing_active_status(
 
     status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
 
-    assert "failed during `load`" in status
+    assert "Document context `bad.txt` failed during `load`" in status
     assert "Active document remains `good.txt`" in status
     assert "Could not decode text document" in status
     runtime = json.loads(runtime_status)
@@ -346,7 +354,7 @@ def test_process_document_unexpected_error_uses_pre_upload_status(
     status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
 
     assert fake_qa.status_calls == 1
-    assert "failed during `unexpected`" in status
+    assert "Document context `bad.txt` failed during `unexpected`" in status
     assert "Active document remains `good.txt`" in status
     assert "unexpected boom" in status
     runtime = json.loads(runtime_status)
@@ -402,7 +410,120 @@ def test_format_answer_trace_includes_citations():
         "verifier_unavailable_mock_backend",
     ]
     assert trace["self_check"]["retry_attempted"] is True
+    assert trace["loop_report"] is None
     assert trace["error"] is None
+
+
+def test_format_answer_trace_includes_loop_report():
+    loop_report = LoopReport(
+        run=LoopRun(
+            run_id="run_ui",
+            user_input="When does it launch?",
+            context_provider="document",
+            backend="mock",
+            model_label="MockLLM (fallback)",
+            final_decision=LoopDecision.NOT_VERIFIED,
+            final_answer="Project Phoenix launches in June 2026 [1].",
+        )
+    )
+    result = QueryResult(
+        answer="Project Phoenix launches in June 2026 [1].",
+        trace=AnswerTrace(
+            question="When does it launch?",
+            document_name="phoenix.txt",
+            backend="mock",
+            model_label="MockLLM (fallback)",
+            retrieved_chunk_count=0,
+            citations=[],
+        ),
+        loop_report=loop_report,
+    )
+
+    trace = json.loads(app.format_answer_trace(result))
+
+    assert trace["loop_report"]["schema_version"] == "loop-report/v1"
+    assert trace["loop_report"]["run"]["run_id"] == "run_ui"
+    assert trace["loop_report"]["run"]["final_decision"] == "not_verified"
+
+
+def test_format_answer_trace_redacts_guardrail_blocked_draft():
+    blocked_draft = "Sensitive blocked draft should not be public."
+    loop_report = LoopReport(
+        run=LoopRun(
+            run_id="run_blocked",
+            user_input="Generate unsafe content",
+            context_provider="document",
+            backend="mock",
+            model_label="MockLLM (fallback)",
+            steps=(
+                LoopStep(
+                    phase=LoopPhase.DRAFT,
+                    decision=LoopDecision.CONTINUE,
+                    name="Draft answer",
+                    input_summary="Generate unsafe content",
+                    output_summary=blocked_draft,
+                    metadata={"draft_preview": blocked_draft},
+                ),
+                LoopStep(
+                    phase=LoopPhase.ERROR,
+                    decision=LoopDecision.BLOCK,
+                    name="Guardrail decision",
+                    output_summary=blocked_draft,
+                    error_message=blocked_draft,
+                    metadata={
+                        "guardrail_decision": "block",
+                        "guardrail_reason": blocked_draft,
+                    },
+                ),
+                LoopStep(
+                    phase=LoopPhase.FINAL,
+                    decision=LoopDecision.BLOCK,
+                    name="Final answer",
+                    output_summary="block",
+                ),
+            ),
+            final_decision=LoopDecision.BLOCK,
+            final_answer="A loop guardrail blocked this query before it could complete.",
+            error_message=blocked_draft,
+            metadata={"guardrail_detail": blocked_draft},
+        )
+    )
+    result = QueryResult(
+        answer="A loop guardrail blocked this query before it could complete.",
+        trace=AnswerTrace(
+            question="Generate unsafe content",
+            document_name="phoenix.txt",
+            backend="mock",
+            model_label="MockLLM (fallback)",
+            retrieved_chunk_count=0,
+            citations=[],
+            error_message=blocked_draft,
+        ),
+        loop_report=loop_report,
+    )
+
+    assert blocked_draft in json.dumps(loop_report.to_dict())
+
+    trace_json = app.format_answer_trace(result)
+    trace = json.loads(trace_json)
+    redacted_step = trace["loop_report"]["run"]["steps"][0]
+    guardrail_step = trace["loop_report"]["run"]["steps"][1]
+
+    assert blocked_draft not in trace_json
+    assert trace["error"] == "terminal_guardrail_decision"
+    assert trace["loop_report"]["run"]["error_message"] == (
+        "terminal_guardrail_decision"
+    )
+    assert trace["loop_report"]["public_redaction"]["applied"] is True
+    assert redacted_step["output_summary"] == (
+        "[redacted: terminal guardrail decision]"
+    )
+    assert redacted_step["metadata"]["redacted"] is True
+    assert guardrail_step["output_summary"] == (
+        "[redacted: terminal guardrail decision]"
+    )
+    assert guardrail_step["error_message"] == "terminal_guardrail_decision"
+    assert guardrail_step["metadata"]["redacted"] is True
 
 
 def test_chat_returns_answer_and_trace(monkeypatch):

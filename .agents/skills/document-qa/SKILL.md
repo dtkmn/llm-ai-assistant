@@ -1,21 +1,21 @@
 ---
-name: document-qa-engineering
-description: Use when changing document ingestion, text encoding, retrieval, LLM backend routing, Gradio upload/query behavior, or CI release policy for this RAG assistant.
+name: loop-engineering
+description: Use when changing loop contracts, document context, retrieval, LLM backend routing, Gradio upload/query behavior, evals, or CI release policy for this local-first Loop Engineering Workbench.
 ---
 
-# Document QA Engineering
+# Loop Engineering
 
 ## Purpose
 
-Use this skill to evolve the app without weakening its core promise: answer
-questions from uploaded documents honestly, with clear backend status, safe text
-decoding, and reproducible validation.
+Use this skill to evolve the workbench without weakening its core promise: make
+agent loops observable, testable, local-first, and honest. Document upload is the
+first context provider, not the product boundary.
 
 ## Operating Loop
 
 1. Perceive: identify which user-facing contract is affected: ingestion,
-   encoding, retrieval, LLM backend, UI status, dependency hygiene, or release
-   automation.
+   encoding, retrieval, loop trace, LLM backend, UI status, dependency hygiene,
+   or release automation.
 2. Plan: write down the smallest behavior change that improves that contract.
 3. Act: edit the owned files only. Keep unrelated refactors out of the patch.
 4. Observe: run focused tests for the changed behavior and inspect failure modes,
@@ -34,6 +34,18 @@ decoding, and reproducible validation.
   closed when the server or configured model is unavailable.
 - `hf_token="dummy"` is valid only for Hugging Face mock/demo paths. Ollama does
   not use Hugging Face tokens.
+- Product identity is Loop Engineering Workbench. Treat document answering as
+  the first context provider capability, not the repo's strategic identity.
+- Typed loop records are the contract surface for future agent work. Add or
+  update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,
+  `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
+  `HumanReviewRequest` before adding planner, multi-agent, tool, replay, or
+  framework-adapter behavior.
+- `DocumentQA.query_with_trace()` must expose a `LoopReport` that matches the
+  actual query path: prompt evidence, draft, mechanical check, verifier outcome,
+  retry/refusal state, and final answer.
+- Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
+  or request human review, but it must not introduce autonomous tools by itself.
 - Upload status must say `indexed` for real backends, because endpoint readiness
   is not proven until the first inference call.
 - Upload replacement must be transactional. Failed uploads must not replace the
@@ -53,6 +65,11 @@ decoding, and reproducible validation.
 - Live Ollama model comparison is optional and manual. Keep it unload-aware,
   keep multi-model runs behind an explicit override, and never make CI require
   resident local models. Keep the live eval base URL loopback-only.
+- OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter
+  targets, not core dependencies, until provider-neutral loop reports are real
+  and test-covered.
+- Do not add autonomous tool use or multi-agent behavior until middleware,
+  guardrail, telemetry, and human-review boundaries exist in the loop contract.
 - Text encoding default is `Auto`. Ambiguous non-UTF legacy files must not be
   silently decoded as Western text.
 - Explicit encoding selections are user intent. Preserve valid CP1250, CP1251,
@@ -62,12 +79,14 @@ decoding, and reproducible validation.
 ## Files To Inspect First
 
 - `src/DocumentQA.py`
+- `src/loop_engine.py`
 - `src/app.py`
 - `src/golden_eval.py`
 - `src/ollama_model_eval.py`
 - `tests/test_document_qa.py`
 - `tests/test_app.py`
 - `tests/test_golden_document_eval.py`
+- `tests/test_loop_engine.py`
 - `tests/test_ollama_model_eval.py`
 - `.github/workflows/tests.yml`
 - `.github/workflows/docker-publish.yml`
@@ -96,6 +115,7 @@ For backend routing changes:
 
 For answer-loop or agent-pattern changes:
 
+- `python -m pytest tests/test_loop_engine.py -q`
 - `python -m pytest tests/test_golden_document_eval.py -q`
 - `python -m pytest tests/test_ollama_model_eval.py -q`
 - Assert cited supported answers, unsupported-answer refusal, and retry behavior.

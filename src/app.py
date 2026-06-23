@@ -54,7 +54,7 @@ TEXT_ENCODING_OPTIONS = {
     "Baltic (Windows-1257)": "cp1257",
 }
 
-# Initialize the DocumentQA system
+# Initialize the document context loop system
 qa_system = DocumentQA(
     allow_interactive_token=False, fast_mode=env_flag("FAST_MODE", False)
 )
@@ -75,7 +75,7 @@ def format_upload_status(uploaded_name: str, qa_status: DocumentQAStatus) -> str
             else "No active document is loaded."
         )
         return (
-            f"Document `{document_name}` failed during `{report.phase}`. "
+            f"Document context `{document_name}` failed during `{report.phase}`. "
             f"{active_message} Error: {report.error_message}"
         )
 
@@ -89,14 +89,14 @@ def format_upload_status(uploaded_name: str, qa_status: DocumentQAStatus) -> str
 
     if qa_status.mock_mode:
         return (
-            f"Document `{document_name}` processed in mock mode. "
+            f"Document context `{document_name}` processed in mock mode. "
             f"Profile: `{qa_status.profile_label}`. "
             f"Active model: `{qa_status.active_model_label}`. "
             f"{chunk_message} "
             "Answers will be demonstration responses until a real LLM backend is configured."
         )
     return (
-        f"Document `{document_name}` indexed. "
+        f"Document context `{document_name}` indexed. "
         f"Profile: `{qa_status.profile_label}`. "
         f"Backend: `{qa_status.active_backend}`. "
         f"Active model: `{qa_status.active_model_label}`. "
@@ -157,6 +157,16 @@ def status_with_unexpected_upload_error(
     return replace(qa_status, processing_report=failure_report)
 
 
+def public_trace_error(
+    query_result: QueryResult,
+    public_loop_report: Optional[dict],
+) -> Optional[str]:
+    redaction = (public_loop_report or {}).get("public_redaction") or {}
+    if redaction.get("applied"):
+        return "terminal_guardrail_decision"
+    return query_result.trace.error_message
+
+
 def format_answer_trace(query_result: Optional[QueryResult]) -> str:
     if query_result is None:
         return json.dumps(
@@ -169,6 +179,7 @@ def format_answer_trace(query_result: Optional[QueryResult]) -> str:
                 "retrieved_chunk_count": 0,
                 "citations": [],
                 "self_check": None,
+                "loop_report": None,
                 "error": None,
             },
             indent=2,
@@ -176,6 +187,11 @@ def format_answer_trace(query_result: Optional[QueryResult]) -> str:
 
     trace = query_result.trace
     self_check = trace.self_check
+    public_loop_report = (
+        query_result.loop_report.to_public_dict()
+        if query_result.loop_report
+        else None
+    )
     return json.dumps(
         {
             "question": trace.question,
@@ -207,7 +223,8 @@ def format_answer_trace(query_result: Optional[QueryResult]) -> str:
                 if self_check
                 else None
             ),
-            "error": trace.error_message,
+            "loop_report": public_loop_report,
+            "error": public_trace_error(query_result, public_loop_report),
         },
         indent=2,
     )
@@ -245,7 +262,7 @@ def process_document(file, text_encoding="Auto"):
 
 
 def chat(message, history):
-    """Chat function to interact with the DocumentQA system."""
+    """Chat function to interact with the current document context loop."""
     history = history or []
     if message and message.strip():
         query_result = qa_system.query_with_trace(message)
@@ -264,18 +281,18 @@ def clear_chat():
 
 # Create the Gradio interface
 with gr.Blocks() as demo:
-    gr.Markdown("# LLM AI Assistant")
+    gr.Markdown("# Local Loop Workbench")
 
     with gr.Row():
         with gr.Column():
-            file_upload = gr.File(label="Upload Document")
+            file_upload = gr.File(label="Upload Document Context")
             text_encoding = gr.Dropdown(
                 choices=list(TEXT_ENCODING_OPTIONS),
                 value="Auto",
                 label="Text Encoding",
             )
-            upload_button = gr.Button("Process Document")
-            upload_status = gr.Textbox(label="Status")
+            upload_button = gr.Button("Index Context")
+            upload_status = gr.Textbox(label="Context Status")
             runtime_status = gr.Textbox(
                 label="Runtime Status",
                 value=format_runtime_status(qa_system.status()),
@@ -287,7 +304,7 @@ with gr.Blocks() as demo:
             chatbot = gr.Chatbot()
             msg = gr.Textbox(label="Ask a question")
             answer_trace = gr.Textbox(
-                label="Answer Trace",
+                label="Loop Trace",
                 value=format_answer_trace(None),
                 lines=12,
                 interactive=False,
