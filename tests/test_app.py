@@ -91,7 +91,7 @@ class FakeQA:
                         source_name=self.current_document_name or "demo.txt",
                         page=None,
                         chunk_index=0,
-                        excerpt="Project Phoenix is a document QA assistant.",
+                        excerpt="Project Phoenix is a loop workbench.",
                     )
                 ],
                 self_check=AnswerSelfCheck(
@@ -176,6 +176,13 @@ def test_process_document_reports_mock_mode_without_success_claim(monkeypatch, t
 
 def test_text_encoding_dropdown_defaults_to_auto():
     assert app.text_encoding.value == "Auto"
+
+
+def test_app_copy_frames_document_as_context():
+    assert app.file_upload.label == "Upload Document Context"
+    assert app.upload_button.value == "Index Context"
+    assert app.upload_status.label == "Context Status"
+    assert app.answer_trace.label == "Loop Trace"
 
 
 def test_process_document_passes_selected_text_encoding(monkeypatch, tmp_path):
@@ -306,7 +313,7 @@ def test_process_document_reports_failure_without_losing_active_status(
 
     status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
 
-    assert "failed during `load`" in status
+    assert "Document context `bad.txt` failed during `load`" in status
     assert "Active document remains `good.txt`" in status
     assert "Could not decode text document" in status
     runtime = json.loads(runtime_status)
@@ -346,7 +353,7 @@ def test_process_document_unexpected_error_uses_pre_upload_status(
     status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
 
     assert fake_qa.status_calls == 1
-    assert "failed during `unexpected`" in status
+    assert "Document context `bad.txt` failed during `unexpected`" in status
     assert "Active document remains `good.txt`" in status
     assert "unexpected boom" in status
     runtime = json.loads(runtime_status)
