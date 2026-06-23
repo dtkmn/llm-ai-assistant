@@ -37,6 +37,10 @@ Primary runtime files:
   status. UI code and tests should not inspect random internal attributes.
 - Answer traces and citations must come from the retrieved chunks used to build
   the LLM prompt. Do not bolt on citations from a separate post-answer lookup.
+- Answer self-checking must remain document-only. Cheap mechanical checks and
+  deterministic refutation prefilters may reject bad answers, but only a real
+  backend verifier may label an answer `supported`. Mock/demo mode must report
+  mechanically valid answers as `not_verified`, not `supported`.
 - Text upload default is `Auto`. Ambiguous legacy bytes must fail closed instead
   of mojibaking. `UTF-8 / Western` and explicit legacy encodings are opt-ins.
 - Docker image publication belongs to `main` only. `dev`, PR, and manual workflow

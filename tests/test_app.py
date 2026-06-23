@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from src import app
 from src.DocumentQA import (
     AnswerCitation,
+    AnswerSelfCheck,
     AnswerTrace,
     DocumentProcessingError,
     DocumentProcessingReport,
@@ -93,6 +94,14 @@ class FakeQA:
                         excerpt="Project Phoenix is a document QA assistant.",
                     )
                 ],
+                self_check=AnswerSelfCheck(
+                    outcome="not_verified",
+                    reasons=[
+                        "mechanical_checks_passed",
+                        "verifier_unavailable_mock_backend",
+                    ],
+                    retry_attempted=False,
+                ),
             ),
         )
 
@@ -342,6 +351,14 @@ def test_format_answer_trace_includes_citations():
                     excerpt="The launch date is June 2026.",
                 )
             ],
+            self_check=AnswerSelfCheck(
+                outcome="not_verified",
+                reasons=[
+                    "mechanical_checks_passed",
+                    "verifier_unavailable_mock_backend",
+                ],
+                retry_attempted=True,
+            ),
         ),
     )
 
@@ -355,6 +372,12 @@ def test_format_answer_trace_includes_citations():
     assert trace["citations"][0]["source"] == "phoenix.txt"
     assert trace["citations"][0]["chunk"] == 1
     assert "June 2026" in trace["citations"][0]["excerpt"]
+    assert trace["self_check"]["outcome"] == "not_verified"
+    assert trace["self_check"]["reasons"] == [
+        "mechanical_checks_passed",
+        "verifier_unavailable_mock_backend",
+    ]
+    assert trace["self_check"]["retry_attempted"] is True
     assert trace["error"] is None
 
 
@@ -373,6 +396,7 @@ def test_chat_returns_answer_and_trace(monkeypatch):
     assert trace["document"] == "demo.txt"
     assert trace["retrieved_chunk_count"] == 1
     assert trace["citations"][0]["source"] == "demo.txt"
+    assert trace["self_check"]["outcome"] == "not_verified"
 
 
 def test_clear_chat_resets_answer_trace(monkeypatch):

@@ -168,12 +168,14 @@ def format_answer_trace(query_result: Optional[QueryResult]) -> str:
                 "model": None,
                 "retrieved_chunk_count": 0,
                 "citations": [],
+                "self_check": None,
                 "error": None,
             },
             indent=2,
         )
 
     trace = query_result.trace
+    self_check = trace.self_check
     return json.dumps(
         {
             "question": trace.question,
@@ -196,6 +198,15 @@ def format_answer_trace(query_result: Optional[QueryResult]) -> str:
                 }
                 for citation in trace.citations
             ],
+            "self_check": (
+                {
+                    "outcome": self_check.outcome,
+                    "reasons": self_check.reasons,
+                    "retry_attempted": self_check.retry_attempted,
+                }
+                if self_check
+                else None
+            ),
             "error": trace.error_message,
         },
         indent=2,
