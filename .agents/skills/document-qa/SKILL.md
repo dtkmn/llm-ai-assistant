@@ -64,9 +64,14 @@ first context provider, not the product boundary.
 - Golden document evals must exercise the full provider-free QA loop: upload,
   retrieval, cited answer, self-check, retry, and fail-closed refusal. Do not
   require a live Ollama or Hugging Face backend for these CI checks.
+- `src.loop_eval --mode fake` is the provider-free CLI surface for JSON loop
+  eval artifacts. It should include scored `LoopReport` evidence so humans can
+  inspect phases, citations, verifier decisions, retries, refusals, and final
+  decisions without a live model.
 - Live Ollama model comparison is optional and manual. Keep it unload-aware,
   keep multi-model runs behind an explicit override, and never make CI require
-  resident local models. Keep the live eval base URL loopback-only.
+  resident local models. Keep the live eval base URL loopback-only and prefer
+  one-model, one-case smoke runs before full-model sweeps.
 - OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter
   targets, not core dependencies, until provider-neutral loop reports are real
   and test-covered.
@@ -84,11 +89,13 @@ first context provider, not the product boundary.
 - `src/loop_engine.py`
 - `src/app.py`
 - `src/golden_eval.py`
+- `src/loop_eval.py`
 - `src/ollama_model_eval.py`
 - `tests/test_document_qa.py`
 - `tests/test_app.py`
 - `tests/test_golden_document_eval.py`
 - `tests/test_loop_engine.py`
+- `tests/test_loop_eval.py`
 - `tests/test_ollama_model_eval.py`
 - `.github/workflows/tests.yml`
 - `.github/workflows/docker-publish.yml`
@@ -119,6 +126,7 @@ For answer-loop or agent-pattern changes:
 
 - `python -m pytest tests/test_loop_engine.py -q`
 - `python -m pytest tests/test_golden_document_eval.py -q`
+- `python -m pytest tests/test_loop_eval.py -q`
 - `python -m pytest tests/test_ollama_model_eval.py -q`
 - Assert cited supported answers, unsupported-answer refusal, and retry behavior.
 - Keep eval fixtures deterministic and provider-free.

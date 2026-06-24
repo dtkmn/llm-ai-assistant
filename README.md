@@ -199,7 +199,7 @@ The application is containerized for easy deployment.
   hosted path second.
 
 ## Loop Engineering Pattern
-This repo is intentionally built around two loops:
+This repo is intentionally built around three loops:
 
 - **Runtime agent loop:** select context -> retrieve prompt evidence -> draft an
   answer with inline citations -> run mechanical checks -> verify cited claims
@@ -210,11 +210,14 @@ This repo is intentionally built around two loops:
   golden loop evals -> run broad validation -> ask for review -> stage only
   intentional files.
 
-Golden evals live in `tests/test_golden_document_eval.py`. They are provider-free
-CI checks that exercise the current document-context loop with a deterministic fake LLM:
+Golden evals live in `tests/test_golden_document_eval.py` and the CLI lives in
+`src/loop_eval.py`. The test suite is provider-free; the CLI can also write a
+JSON artifact that includes the loop reports used to score each case:
 
 ```bash
+python -m src.loop_eval --mode fake --artifact artifacts/loop-eval.json
 python -m pytest tests/test_golden_document_eval.py -q
+python -m pytest tests/test_loop_eval.py -q
 python -m pytest
 ```
 
@@ -224,39 +227,52 @@ measurably honest, bigger agent features will only make the failure harder to se
 
 ### Optional Live Ollama Model Eval
 
-CI stays provider-free. When you want to compare pulled local Ollama models,
-run the live eval command manually. Each case performs answer and verifier
-calls, so start small on memory-constrained Macs. The live eval command only
-accepts loopback Ollama URLs such as `http://localhost:11434` or
-`http://127.0.0.1:11434`; it is not an arbitrary remote model benchmark tool.
+CI stays provider-free. When you want to compare a pulled local Ollama model,
+run the unified loop eval command manually. Each case performs answer and
+verifier calls, so start with one model and one case on memory-constrained Macs.
+The live eval command only accepts loopback Ollama URLs such as
+`http://localhost:11434` or `http://127.0.0.1:11434`; it is not an arbitrary
+remote model benchmark tool.
 
 ```bash
-python -m src.ollama_model_eval \
+python -m src.loop_eval \
+  --mode ollama \
   --models nemotron-3-nano:4b \
   --case launch_date \
   --timeout 30 \
+  --artifact artifacts/loop-eval-ollama-launch.json \
   --no-fail
 ```
 
 Then run the full golden set for one model:
 
 ```bash
-python -m src.ollama_model_eval \
+python -m src.loop_eval \
+  --mode ollama \
   --models nemotron-3-nano:4b \
+  --all-cases \
   --timeout 60 \
+  --artifact artifacts/loop-eval-ollama-full.json \
   --no-fail
 ```
 
-The command refuses multiple models by default so a comparison run does not
+Score the artifacts by loop evidence: phases, citations, verifier decisions,
+retry/refusal state, and final decision. Do not judge models by answer text
+alone.
+
+The command refuses multiple Ollama models by default so a comparison run does not
 accidentally overload a local Mac. Prefer one model per command. Only use the
 override when you have enough free unified memory and are comfortable watching
 resource pressure:
 
 ```bash
-python -m src.ollama_model_eval \
+python -m src.loop_eval \
+  --mode ollama \
   --models nemotron-3-nano:4b qwen3:8b \
   --allow-multi-model \
+  --all-cases \
   --timeout 60 \
+  --artifact artifacts/loop-eval-ollama-compare.json \
   --no-fail
 ```
 
@@ -281,6 +297,7 @@ ollama stop qwen3:8b
   pip install -r requirements-dev.txt
   pytest tests/test_loop_engine.py -q
   pytest tests/test_golden_document_eval.py -q
+  pytest tests/test_loop_eval.py -q
   pytest tests/test_ollama_model_eval.py -q
   pytest
   python -m pip_audit -r requirements.txt --strict
