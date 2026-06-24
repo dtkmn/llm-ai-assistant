@@ -27,7 +27,7 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 - **GPU/MPS Support:** Automatically utilizes CUDA, Apple Silicon (MPS), or CPU
 
 
-![LLM-flow.png](https://github.com/dtkmn/ai-loop-engine/blob/main/LLM-flow.png)
+![AI Loop Engine flow](docs/ai-loop-engine-flow.svg)
 
 ## Installation
 
