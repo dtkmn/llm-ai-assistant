@@ -34,6 +34,16 @@ first context provider, not the product boundary.
   closed when the server or configured model is unavailable.
 - `hf_token="dummy"` is valid only for Hugging Face mock/demo paths. Ollama does
   not use Hugging Face tokens.
+- Native runtime defaults must be installed before Gradio, NumPy, FAISS, torch,
+  or other native-heavy imports in app entrypoints. Use `src.native_runtime`
+  instead of duplicating env setup in modules that may be imported too late.
+- Embeddings and LLM generation have separate device choices. On Apple
+  Silicon/MPS, keep embeddings on CPU by default; MPS embeddings are an explicit
+  `EMBEDDINGS_DEVICE=mps` opt-in because native PyTorch crashes can kill the
+  Python process during upload.
+- `LLM_BACKEND=auto` should avoid in-process local Hugging Face models on Apple
+  MPS. The Mac happy path is explicit Ollama; explicit `local` remains available
+  for users who knowingly want Transformers in-process.
 - Product identity is AI Loop Engine. Treat document answering as
   the first context provider capability, not the repo's strategic identity.
 - Document context is the first `ContextProvider`; keep provider identity in
@@ -82,6 +92,9 @@ first context provider, not the product boundary.
   Export framework-shaped artifacts first; do not let any framework runtime own
   loop execution until the internal loop report contract remains stable under
   tests.
+- OpenAI trace-shaped export, LangGraph manifest export, and `src.loop_export`
+  must remain dependency-free. Public/redacted export is the default; raw
+  diagnostics require explicit opt-in.
 - Do not add autonomous tool use or multi-agent behavior until middleware,
   guardrail, telemetry, and human-review boundaries exist in the loop contract.
 - Text encoding default is `Auto`. Ambiguous non-UTF legacy files must not be
@@ -89,6 +102,9 @@ first context provider, not the product boundary.
 - Explicit encoding selections are user intent. Preserve valid CP1250, CP1251,
   CP1252, CP1254, CP1257, Latin-1, UTF-8, UTF-16, and UTF-32 behavior when
   touching text ingestion.
+- `pyproject.toml` is the local-development dependency contract. Keep
+  `requirements.txt` and `requirements-dev.txt` synchronized as pip-compatible
+  deployment exports.
 
 ## Files To Inspect First
 
@@ -98,7 +114,12 @@ first context provider, not the product boundary.
 - `src/golden_eval.py`
 - `src/loop_eval.py`
 - `src/ollama_model_eval.py`
+- `src/adapters/`
+- `src/loop_export.py`
 - `docs/framework-adapter-strategy.md`
+- `pyproject.toml`
+- `requirements.txt`
+- `requirements-dev.txt`
 - `tests/test_document_qa.py`
 - `tests/test_app.py`
 - `tests/test_golden_document_eval.py`
@@ -132,10 +153,17 @@ For backend routing changes:
 
 For answer-loop or agent-pattern changes:
 
+- `uv lock --check` when packaging metadata or dependency files changed.
 - `python -m pytest tests/test_loop_engine.py -q`
 - `python -m pytest tests/test_golden_document_eval.py -q`
 - `python -m pytest tests/test_loop_eval.py -q`
 - `python -m pytest tests/test_ollama_model_eval.py -q`
+- `python -m pytest tests/test_openai_trace_adapter.py -q` when adapter export
+  behavior changes.
+- `python -m pytest tests/test_langgraph_manifest_adapter.py -q` when LangGraph
+  manifest behavior changes.
+- `python -m pytest tests/test_loop_export.py -q` when JSONL adapter export CLI
+  behavior changes.
 - Assert cited supported answers, unsupported-answer refusal, and retry behavior.
 - Keep eval fixtures deterministic and provider-free.
 - Keep live Ollama comparison manual. Prefer one-model, one-case smoke runs on

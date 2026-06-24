@@ -15,13 +15,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
-RUN pip install --upgrade pip
+RUN python -m pip install --upgrade pip
 
 # Copy the requirements file into the image
 COPY requirements.txt .
 
 # Install the dependencies as root first
-RUN pip install -r requirements.txt
+RUN python -m pip install -r requirements.txt
 
 # Copy the rest of the application code into the image
 COPY . .
@@ -47,4 +47,4 @@ ENV LLM_BACKEND="auto"
 ENV APP_DEBUG="false"
 
 # Command to run the Gradio app
-CMD ["python", "src/app.py"]
+CMD ["python", "-m", "src.app"]

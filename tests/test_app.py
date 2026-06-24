@@ -1,4 +1,8 @@
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from src import app
@@ -20,6 +24,16 @@ from src.loop_engine import (
     VerificationOutcome,
     VerificationResult,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+NATIVE_THREAD_ENV_VARS = {
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "TOKENIZERS_PARALLELISM",
+}
 
 
 class FakeQA:
@@ -72,6 +86,7 @@ class FakeQA:
             loaded_model_id=self.loaded_model_id,
             loaded_model_label=self.loaded_model_label,
             embeddings_model="fake-embeddings",
+            embeddings_device="cpu",
             device="cpu",
             document_name=self.current_document_name,
             ready_for_queries=True,
@@ -175,6 +190,9 @@ def test_process_document_reports_mock_mode_without_success_claim(monkeypatch, t
     runtime = json.loads(runtime_status)
     assert runtime["active_document"] == "demo.txt"
     assert runtime["last_attempted_document"] == "demo.txt"
+    assert runtime["model_device"] == "cpu"
+    assert runtime["embeddings_model"] == "fake-embeddings"
+    assert runtime["embeddings_device"] == "cpu"
     assert runtime["ready_for_queries"] is True
     assert runtime["readiness_scope"] == "retrieval_pipeline"
     assert runtime["inference_validated"] is False
@@ -184,6 +202,52 @@ def test_process_document_reports_mock_mode_without_success_claim(monkeypatch, t
     assert runtime["max_chunk_limit"] == 2000
     assert runtime["last_error"] is None
     assert fake_qa.text_encoding == "auto"
+
+
+def test_app_bootstraps_native_defaults_before_gradio_import():
+    env = os.environ.copy()
+    for name in NATIVE_THREAD_ENV_VARS:
+        env.pop(name, None)
+
+    code = """
+import builtins
+import json
+import os
+
+real_import = builtins.__import__
+
+def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "gradio" or name.startswith("gradio."):
+        print(json.dumps({
+            "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+            "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
+            "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS"),
+            "VECLIB_MAXIMUM_THREADS": os.environ.get("VECLIB_MAXIMUM_THREADS"),
+            "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM"),
+        }, sort_keys=True))
+        raise SystemExit(0)
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = tracking_import
+import src.app
+raise SystemExit("src.app did not import gradio")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert json.loads(result.stdout) == {
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "VECLIB_MAXIMUM_THREADS": "1",
+        "TOKENIZERS_PARALLELISM": "false",
+    }
 
 
 def test_text_encoding_dropdown_defaults_to_auto():

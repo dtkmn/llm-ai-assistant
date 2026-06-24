@@ -22,9 +22,13 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 - **Loop Engineering Core:** Treats retrieval, drafting, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
 - **Document Context Provider:** Supports PDF, DOCX, and text documents with safe decoding, chunking, and transactional replacement
 - **Local-first LLM Backend:** Recommended local path is Ollama; Hugging Face endpoint/local backends remain available for hosted deployments, gated models, and Hugging Face Spaces
-- **Vector Search:** Uses FAISS for efficient similarity search with Hugging Face embeddings
+- **Vector Search:** Uses FAISS for efficient similarity search with Hugging
+  Face embeddings; embeddings run on CPU by default on Apple Silicon for upload
+  stability
 - **Gradio Interface:** Web interface for document context upload, agent chat, runtime status, compact loop summaries, and answer traces
 - **GPU/MPS Support:** Automatically utilizes CUDA, Apple Silicon (MPS), or CPU
+  for supported local generation paths. Document embeddings use a separate
+  device setting.
 
 
 ![AI Loop Engine flow](docs/ai-loop-engine-flow.svg)
@@ -32,7 +36,8 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 ## Installation
 
 ### Prerequisites
-- Python 3.11 or higher
+- Python 3.11 or 3.12; Python 3.12 is what CI and Docker use
+- `uv` for the recommended local workflow ([install guide](https://docs.astral.sh/uv/getting-started/installation/))
 - Ollama installed for the recommended local-first setup
 - HuggingFace account and API token for hosted endpoint inference or gated models ([get one here](https://huggingface.co/settings/tokens)); not required for `LLM_BACKEND=ollama`
 - At least 8GB RAM if forcing local model execution on CPU; GPU/MPS is strongly preferred for local models
@@ -46,20 +51,21 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     cd ai-loop-engine
     ``` 
 
-2. Create and activate a virtual environment:
+2. Install dependencies with `uv`:
+
+    ```bash
+    uv sync --dev
+    ```
+
+   Pip fallback:
 
     ```bash
     python -m venv venv
     source venv/bin/activate  # On Windows: venv\Scripts\activate
+    python -m pip install -r requirements-dev.txt
     ```
 
-3. Install the dependencies:
-
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-4. Run local-first with Ollama:
+3. Run local-first with Ollama:
 
     Terminal 1, unless the Ollama desktop app/service is already running:
 
@@ -74,45 +80,56 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     export LLM_BACKEND=ollama
     export OLLAMA_MODEL=nemotron-3-nano:4b
     export OLLAMA_BASE_URL=http://localhost:11434
+    export FAST_MODE=true
+    export EMBEDDINGS_DEVICE=cpu
     ```
 
-5. (Optional) choose a different backend:
+    `EMBEDDINGS_DEVICE=cpu` is the default on Apple Silicon. Keep it there
+    unless you are deliberately testing PyTorch MPS embedding stability.
+
+4. (Optional) choose a different backend:
 
     Supported values:
     - `ollama` uses a local Ollama server. This is the recommended local path.
-    - `auto` uses hosted Hugging Face inference on CPU and local weights on CUDA/MPS.
+    - `auto` uses hosted Hugging Face inference on CPU/MPS and local weights on CUDA.
     - `endpoint` always uses hosted Hugging Face inference.
     - `local` always downloads and runs Hugging Face model weights in-process.
     - `mock` disables real inference for demos/tests.
 
-6. (Optional) set up Hugging Face for hosted endpoint inference, CPU `auto`, or gated Hugging Face `local` models:
+5. (Optional) set up Hugging Face for hosted endpoint inference, CPU `auto`, or gated Hugging Face `local` models:
 
     ```bash
     export HUGGINGFACEHUB_API_TOKEN=your_token_here
     ```
 
-7. (Optional) choose a different Hugging Face local model:
+6. (Optional) choose a different Hugging Face local model:
 
     ```bash
     export LLM_MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct
     ```
 
-8. (Optional) enable fast mode (lower latency, lower quality):
+7. (Optional) switch back to quality mode:
 
     ```bash
-    export FAST_MODE=true
+    export FAST_MODE=false
     ```
 
-9. (Optional) enable debug logs:
+8. (Optional) enable debug logs:
 
     ```bash
     export APP_DEBUG=false
     ```
 
-10. Run the application:
+9. Run the application:
 
     ```bash
-    python src/app.py
+    uv run ai-loop-engine
+    ```
+
+    Pip fallback after activating `venv`:
+
+    ```bash
+    python -m src.app
     ```
    
 ## 🐳 Docker Setup
@@ -162,12 +179,15 @@ The application is containerized for easy deployment.
 - **Public trace surface:** the Gradio UI shows a compact loop summary plus a
   redacted public loop report; raw reports remain internal diagnostics
 - **Middleware boundary:** loop middleware can observe runs/steps, block unsafe progress, request retry/refusal, or mark a human-review pending state without introducing autonomous tool use
-- **Framework posture:** OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter targets, not core dependencies. The adapter strategy lives in [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md).
+- **Framework posture:** OpenAI Agents SDK and LangGraph are dependency-free
+  export targets today; Microsoft Agent Framework remains a future export
+  target. The adapter strategy lives in
+  [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md).
 
 ### Model
 - **LLM backend:** Configurable via `LLM_BACKEND`
   - `ollama`: local Ollama server via `OLLAMA_BASE_URL`; recommended for local use
-  - `auto` (default): hosted endpoint on CPU, local model on CUDA/MPS
+  - `auto` (default): hosted endpoint on CPU/MPS, local model on CUDA
   - `endpoint`: hosted Hugging Face inference
   - `local`: in-process Transformers pipeline
   - `mock`: deterministic demo/test fallback
@@ -179,6 +199,9 @@ The application is containerized for easy deployment.
 - **Embeddings:**
   - **Quality mode:** `Alibaba-NLP/gte-modernbert-base`
   - **Fast mode:** `sentence-transformers/all-MiniLM-L6-v2`
+  - **Device:** `EMBEDDINGS_DEVICE=auto|cpu|cuda|mps`. `auto` uses CPU on
+    Apple Silicon/MPS to avoid native PyTorch crashes during upload, and CUDA
+    when CUDA is available.
 - **Vector Store:** FAISS for efficient similarity search
 - **Framework:** LangChain for orchestration
 
@@ -190,6 +213,12 @@ The application is containerized for easy deployment.
   - **Quality:** `k=6`, `fetch_k=24`
   - **Fast:** `k=3`, `fetch_k=10`
 - **Safety limits:** Max upload size 25 MB, chunk cap 2,000 chunks per document
+- **Native runtime defaults:** unless you override them, app entrypoints
+  bootstrap `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
+  `VECLIB_MAXIMUM_THREADS`, and tokenizer parallelism before Gradio, NumPy,
+  FAISS, or torch load native libraries. Torch threads default to `1` after
+  torch import unless `TORCH_NUM_THREADS` is set. This is intentional: upload
+  stability beats parallel tensor-loading crashes on local Macs.
 
 ## Local-First Direction
 - The product direction is **download and run locally first**. Ollama is the
@@ -201,6 +230,9 @@ The application is containerized for easy deployment.
 - New AI Loop Engine features should not require Hugging Face tokens for the
   happy path. If a feature works locally, document the Ollama path first and the
   hosted path second.
+- On Apple Silicon, avoid in-process Hugging Face local weights for the default
+  path. Use Ollama for local generation and CPU embeddings for document upload
+  stability.
 
 ## Loop Engineering Pattern
 This repo is intentionally built around three loops:
@@ -219,10 +251,10 @@ Golden evals live in `tests/test_golden_document_eval.py` and the CLI lives in
 JSON artifact that includes the loop reports used to score each case:
 
 ```bash
-python -m src.loop_eval --mode fake --artifact artifacts/loop-eval.json
-python -m pytest tests/test_golden_document_eval.py -q
-python -m pytest tests/test_loop_eval.py -q
-python -m pytest
+uv run python -m src.loop_eval --mode fake --artifact artifacts/loop-eval.json
+uv run pytest tests/test_golden_document_eval.py -q
+uv run pytest tests/test_loop_eval.py -q
+uv run pytest
 ```
 
 Use these before adding planner loops, tools, multi-context memory, or more
@@ -235,12 +267,50 @@ Frameworks are interop surfaces, not the engine. The current plan is to export
 AI Loop Engine reports into framework-shaped artifacts before adding any live
 framework runtime integration:
 
-- OpenAI Agents SDK: trace-shaped export first
-- LangGraph: thread/checkpoint manifest export first
-- Microsoft Agent Framework: workflow event-stream export first
+- OpenAI Agents SDK: trace-shaped export, dependency-free in
+  `src.adapters.openai_trace`
+- LangGraph: thread/checkpoint manifest export, dependency-free in
+  `src.adapters.langgraph_manifest`
+- Microsoft Agent Framework: workflow event-stream export first, not yet
+  implemented
 
 See [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md)
 for mappings, non-goals, and the dependency boundary.
+
+Export a report or session locally when you need framework-shaped JSON for
+inspection or downstream tooling:
+
+```python
+from src.adapters.openai_trace import export_report, export_session
+from src.adapters.langgraph_manifest import export_session as export_langgraph_session
+
+trace_payload = export_report(query_result.loop_report)
+session_payload = export_session(qa_system.loop_session("default"))
+langgraph_payload = export_langgraph_session(qa_system.loop_session("default"))
+```
+
+These helpers do not import the OpenAI Agents SDK, call OpenAI APIs, or mutate
+the original loop reports. They also do not import or execute LangGraph.
+Public/redacted export is the default; use `public=False` only for local
+diagnostics you are willing to treat as sensitive.
+
+Use the local export CLI when starting from a JSONL replay artifact:
+
+```bash
+uv run python -m src.loop_export \
+  --adapter openai-trace \
+  --input artifacts/loop-session-default.jsonl \
+  --output artifacts/openai-trace.json
+
+uv run python -m src.loop_export \
+  --adapter langgraph-manifest \
+  --input artifacts/loop-session-default.jsonl \
+  --output artifacts/langgraph-manifest.json
+```
+
+The CLI defaults to public/redacted output. `--raw` is intentionally explicit
+because raw loop reports can contain prompts, retrieved excerpts, drafts,
+verifier payloads, and final answers.
 
 ### Local Replay Artifacts
 
@@ -256,8 +326,8 @@ developer diagnostics because they may include prompts, retrieved excerpts, draf
 outputs, and final answers. Planned replay/diff commands should look like:
 
 ```bash
-python -m src.loop_replay inspect artifacts/loop-session-default.jsonl
-python -m src.loop_replay diff before.jsonl after.jsonl
+uv run python -m src.loop_replay inspect artifacts/loop-session-default.jsonl
+uv run python -m src.loop_replay diff before.jsonl after.jsonl
 ```
 
 Those commands are intentionally not implemented yet. The report shape needs to
@@ -273,7 +343,7 @@ The live eval command only accepts loopback Ollama URLs such as
 remote model benchmark tool.
 
 ```bash
-python -m src.loop_eval \
+uv run python -m src.loop_eval \
   --mode ollama \
   --models nemotron-3-nano:4b \
   --case launch_date \
@@ -285,7 +355,7 @@ python -m src.loop_eval \
 Then run the full golden set for one model:
 
 ```bash
-python -m src.loop_eval \
+uv run python -m src.loop_eval \
   --mode ollama \
   --models nemotron-3-nano:4b \
   --all-cases \
@@ -304,7 +374,7 @@ override when you have enough free unified memory and are comfortable watching
 resource pressure:
 
 ```bash
-python -m src.loop_eval \
+uv run python -m src.loop_eval \
   --mode ollama \
   --models nemotron-3-nano:4b qwen3:8b \
   --allow-multi-model \
@@ -324,7 +394,11 @@ ollama stop qwen3:8b
 ```
 
 ## Security and Dependency Maintenance
-- Dependencies are pinned in `requirements.txt` for reproducible installs.
+- Dependencies are declared in `pyproject.toml` and locked in `uv.lock` for the
+  recommended local workflow.
+- `requirements.txt` and `requirements-dev.txt` remain pip-compatible exports
+  for Docker, Hugging Face Spaces, and conservative CI paths. Tests assert they
+  stay synchronized with `pyproject.toml`.
 - Dependabot is enabled weekly (`.github/dependabot.yml`) for dependency updates.
 - Current baseline includes Gradio `6.15.2`, LangChain `1.3.10`, LangChain-HuggingFace `1.2.1`, HuggingFace Hub `1.5.0`, Transformers `5.4.0`, and Torch `2.12.1`.
 - Note: `marshmallow` is intentionally pinned to `3.26.2` because `dataclasses-json` currently requires `<4.0.0`.
@@ -332,14 +406,15 @@ ollama stop qwen3:8b
 - Recommended recurring checks:
 
   ```bash
-  pip install -r requirements-dev.txt
-  pytest tests/test_loop_engine.py -q
-  pytest tests/test_golden_document_eval.py -q
-  pytest tests/test_loop_eval.py -q
-  pytest tests/test_ollama_model_eval.py -q
-  pytest
-  python -m pip_audit -r requirements.txt --strict
-  python -m pip check
+  uv sync --dev
+  uv lock --check
+  uv run pytest tests/test_loop_engine.py -q
+  uv run pytest tests/test_golden_document_eval.py -q
+  uv run pytest tests/test_loop_eval.py -q
+  uv run pytest tests/test_ollama_model_eval.py -q
+  uv run pytest
+  uv run python -m pip_audit -r requirements.txt --strict
+  uv run python -m pip check
   ```
 
 ## Agent-Assisted Development

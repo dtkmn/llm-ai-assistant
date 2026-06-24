@@ -18,6 +18,12 @@ Primary runtime files:
   policy, verifier, human-review, session, and report records.
 - `src/loop_eval.py`: unified provider-free and optional live Ollama loop eval
   CLI with JSON artifacts containing scored `LoopReport` evidence.
+- `src/adapters/`: dependency-free framework-shaped exports from loop reports.
+  Current adapters are OpenAI trace-shaped JSON and LangGraph
+  thread/checkpoint manifest JSON. They must not import framework SDKs or send
+  data over the network.
+- `src/loop_export.py`: local JSONL-to-adapter export CLI for OpenAI trace and
+  LangGraph manifest artifacts.
 - `src/app.py`: Gradio UI wiring and user-facing status messages.
 - `docs/framework-adapter-strategy.md`: dependency-free adapter strategy for
   OpenAI trace-shaped export, LangGraph manifest export, and Microsoft workflow
@@ -27,11 +33,11 @@ Primary runtime files:
 
 ## Setup Commands
 
-- Install runtime dependencies: `python -m pip install -r requirements.txt`
-- Install test/audit dependencies: `python -m pip install -r requirements-dev.txt`
-- Run the app locally: `python src/app.py`
-- Run tests: `python -m pytest`
-- Compile check: `python -m py_compile src/app.py src/DocumentQA.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py`
+- Install local dependencies: `uv sync --dev`
+- Pip fallback: `python -m pip install -r requirements-dev.txt`
+- Run the app locally: `uv run ai-loop-engine` or `python -m src.app`
+- Run tests: `uv run pytest` or `python -m pytest`
+- Compile check: `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
 - Dependency checks: `python -m pip check` and `python -m pip_audit -r requirements.txt --strict`
 
 ## Non-Negotiable Contracts
@@ -73,6 +79,15 @@ Primary runtime files:
 - Ollama support is explicit, not part of `auto`. Use `OLLAMA_MODEL`,
   `OLLAMA_BASE_URL`, and `OLLAMA_TIMEOUT`; do not route Ollama through
   Hugging Face model ids or tokens.
+- Native runtime defaults must be installed before Gradio, NumPy, FAISS, torch,
+  or other native-heavy imports in app entrypoints. Use `src.native_runtime`
+  instead of duplicating env setup in modules that may be imported too late.
+- Embedding runtime is separate from LLM runtime. On Apple Silicon/MPS,
+  embeddings default to CPU for upload stability; `EMBEDDINGS_DEVICE=mps` is an
+  explicit opt-in, not the default happy path.
+- `LLM_BACKEND=auto` must not silently select in-process Hugging Face local
+  models on Apple MPS. Use Ollama for the recommended local Mac path; keep
+  `LLM_BACKEND=local` explicit for users who knowingly accept that risk.
 - Product direction is local-first. Keep Hugging Face support as an optional
   hosted/deployment path, but do not make new happy-path features require a
   Hugging Face token when they can run through Ollama.
@@ -96,6 +111,15 @@ Primary runtime files:
   execute framework runtimes. Follow `docs/framework-adapter-strategy.md`, keep
   default exports redacted/public, and do not add OpenAI Agents SDK, LangGraph,
   or Microsoft Agent Framework as core dependencies.
+- Adapter public export is a safety boundary. Raw loop reports require explicit
+  opt-in, and public adapter exports must fail closed/redact terminal
+  guardrail-like decisions instead of leaking blocked draft content.
+- `src.loop_export` must default to public/redacted output. Raw export is a
+  local diagnostics path and must require an explicit `--raw` flag.
+- `pyproject.toml` is the project metadata and local-development dependency
+  contract. Keep `requirements.txt` and `requirements-dev.txt` as pip-compatible
+  exports for deployment compatibility, and keep them synchronized with
+  `pyproject.toml`.
 
 ## Engineering Loop
 
@@ -147,10 +171,14 @@ For narrow docs-only changes:
 
 For Python behavior changes:
 
-- `python -m pytest`
-- `python -m pytest tests/test_golden_document_eval.py -q`
-- `python -m pytest tests/test_loop_eval.py -q`
-- `python -m py_compile src/app.py src/DocumentQA.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py`
+- `uv run pytest` or `python -m pytest`
+- `uv run pytest tests/test_golden_document_eval.py -q`
+- `uv run pytest tests/test_loop_eval.py -q`
+- `uv run pytest tests/test_openai_trace_adapter.py -q`
+- `uv run pytest tests/test_langgraph_manifest_adapter.py -q`
+- `uv run pytest tests/test_loop_export.py -q`
+- `uv lock --check`
+- `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:

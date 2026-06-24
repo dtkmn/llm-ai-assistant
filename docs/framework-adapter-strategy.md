@@ -1,6 +1,7 @@
 # Framework Adapter Strategy
 
-Status: design note only.
+Status: implemented for dependency-free OpenAI trace-shaped export and
+LangGraph manifest export; Microsoft workflow event export remains planned.
 Date: 2026-06-24.
 
 ## Purpose
@@ -73,9 +74,10 @@ unless that capture is disabled.
 
 ### Recommended Adapter
 
-Start with an offline exporter from `LoopReport.to_dict()` to an
-OpenAI-trace-shaped JSON document. Only later add an optional live exporter that
-uses Agents SDK tracing processors.
+The offline exporter lives in `src.adapters.openai_trace`. It maps
+`LoopReport` and `LoopSession` objects to OpenAI-trace-shaped JSON without
+importing the OpenAI Agents SDK or sending data to a network exporter. Only later
+add an optional live exporter that uses Agents SDK tracing processors.
 
 The first live adapter should be opt-in and should:
 
@@ -116,7 +118,12 @@ data across threads.
 
 ### Recommended Adapter
 
-Start with a `LoopReport` to LangGraph manifest exporter:
+The first dependency-free exporter lives in `src.adapters.langgraph_manifest`.
+It maps `LoopReport` and `LoopSession` objects to a LangGraph-oriented
+thread/checkpoint manifest without importing LangGraph or pretending to be a
+checkpointer.
+
+The manifest includes:
 
 - `thread_id`: `session_id`
 - `run_id`
@@ -125,7 +132,7 @@ Start with a `LoopReport` to LangGraph manifest exporter:
 - checkpoint-like snapshots per step
 - references to source JSONL line numbers
 
-Only after the manifest is useful should we consider a real LangGraph adapter.
+Only after the manifest proves useful should we consider a real LangGraph adapter.
 The first real adapter should likely be a read-only replay/checkpoint inspector,
 not a new execution engine.
 
@@ -205,18 +212,32 @@ Rules:
 - Never call model providers, tool providers, or network exporters from the
   basic mapping function.
 - Keep adapter schema versions separate from `loop-report/v1`.
+- Provide CLI export from JSONL replay artifacts through `src.loop_export`
+  instead of making downstream tools import application internals.
 
-## Proposed File Layout
+## Current And Proposed File Layout
 
-Add only when an adapter is actually implemented:
+Current dependency-free adapter files:
 
 ```text
 src/adapters/
   __init__.py
-  openai_trace.py
+  base.py
+  redaction.py
   langgraph_manifest.py
+  openai_trace.py
+src/loop_export.py
+tests/test_langgraph_manifest_adapter.py
+tests/test_loop_export.py
+tests/test_openai_trace_adapter.py
+```
+
+Add later when the matching adapter is actually implemented:
+
+```text
+src/adapters/
   microsoft_workflow_events.py
-tests/test_adapters_*.py
+tests/test_microsoft_workflow_events_adapter.py
 ```
 
 Optional live integrations should be dependency-gated later:
@@ -236,11 +257,15 @@ not a framework runtime integration.
 Recommended order:
 
 1. Add a dependency-free `LoopReport` adapter protocol and one JSON manifest
-   exporter.
-2. Add tests proving redacted default export and raw explicit export.
+   exporter. Done for the OpenAI trace-shaped exporter.
+2. Add tests proving redacted default export and raw explicit export. Done for
+   OpenAI trace-shaped export, LangGraph manifest export, and the JSONL export
+   CLI.
 3. Add optional OpenAI trace-shaped export first, because its trace/span model is
-   closest to current `LoopReport`.
-4. Add LangGraph manifest/checkpoint-shape export second.
+   closest to current `LoopReport`. Done as an offline export, not a live SDK
+   integration.
+4. Add LangGraph manifest/checkpoint-shape export second. Done as an offline
+   manifest, not a LangGraph runtime integration.
 5. Add Microsoft event-stream export third.
 
 The product should remain AI Loop Engine. Frameworks are export targets and

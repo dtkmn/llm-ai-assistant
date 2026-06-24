@@ -6,6 +6,7 @@ import pytest
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 
+import src.DocumentQA as document_qa_module
 from src.DocumentQA import (
     DEFAULT_OLLAMA_MODEL,
     AnswerCitation,
@@ -86,6 +87,7 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     assert status.profile_label == "FAST"
     assert status.active_backend == "mock"
     assert status.active_model_label == "MockLLM (fallback)"
+    assert status.embeddings_device == "cpu"
     assert status.document_name == "phoenix.txt"
     assert status.ready_for_queries is True
     assert status.mock_mode is True
@@ -1381,9 +1383,62 @@ def test_status_reports_configured_backend_before_initialization():
     assert status.configured_backend == "endpoint"
     assert status.active_backend == "endpoint"
     assert status.active_model_label == "example/model"
+    assert status.embeddings_device == "cpu"
     assert status.ready_for_queries is False
     assert status.mock_mode is False
     assert status.processing_report is None
+
+
+def test_embeddings_default_to_cpu_on_mps_device():
+    qa = DocumentQA(
+        device="mps",
+        fast_mode=True,
+        hf_token="dummy",
+        llm_backend="mock",
+    )
+
+    assert qa.device == "mps"
+    assert qa.embeddings_device == "cpu"
+    assert qa.status().embeddings_device == "cpu"
+
+
+def test_embeddings_device_can_be_explicitly_cpu_on_accelerated_device():
+    qa = DocumentQA(
+        device="mps",
+        embeddings_device="cpu",
+        fast_mode=True,
+        hf_token="dummy",
+        llm_backend="mock",
+    )
+
+    assert qa.embeddings_device == "cpu"
+
+
+def test_initialize_embeddings_uses_safe_embeddings_device(monkeypatch):
+    captured = {}
+
+    class FakeHuggingFaceEmbeddings:
+        def __init__(self, *, model_name, model_kwargs):
+            captured["model_name"] = model_name
+            captured["model_kwargs"] = model_kwargs
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "HuggingFaceEmbeddings",
+        FakeHuggingFaceEmbeddings,
+    )
+    qa = DocumentQA(
+        device="mps",
+        fast_mode=True,
+        hf_token="dummy",
+        llm_backend="mock",
+    )
+
+    qa._initialize_embeddings()
+
+    assert captured["model_name"] == qa.embeddings_model
+    assert captured["model_kwargs"] == {"device": "cpu"}
+    assert qa.embeddings is not None
 
 
 def test_failed_unsupported_replacement_keeps_previous_document_queryable(tmp_path):
@@ -1928,17 +1983,41 @@ def test_custom_endpoint_records_endpoint_label_not_candidate_model(monkeypatch)
     assert qa.loaded_model_label == "Custom endpoint (https://example.invalid)"
 
 
-def test_auto_backend_uses_local_on_accelerated_device_with_token(monkeypatch):
+def test_auto_backend_uses_local_on_cuda_device_with_token(monkeypatch):
     def fake_local_loader(self, model_id):
         return MockLLM()
 
     monkeypatch.setattr(DocumentQA, "_load_local_model", fake_local_loader)
-    qa = DocumentQA(device="mps", hf_token="real-token", llm_backend="auto")
+    qa = DocumentQA(device="cuda", hf_token="real-token", llm_backend="auto")
 
     qa._initialize_llm()
 
     assert qa.active_llm_backend == "local"
     assert qa.loaded_model_id == "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_auto_backend_uses_endpoint_on_mps_with_token(monkeypatch):
+    def fake_endpoint_loader(self, model_id):
+        return MockLLM()
+
+    monkeypatch.delenv("HF_ENDPOINT_URL", raising=False)
+    monkeypatch.setattr(DocumentQA, "_load_endpoint_model", fake_endpoint_loader)
+    qa = DocumentQA(device="mps", hf_token="real-token", llm_backend="auto")
+
+    qa._initialize_llm()
+
+    assert qa.active_llm_backend == "endpoint"
+    assert qa.loaded_model_id == "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_auto_backend_on_mps_without_token_falls_back_to_mock(monkeypatch):
+    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
+    qa = DocumentQA(device="mps", llm_backend="auto", hf_token=None)
+
+    qa._initialize_llm()
+
+    assert qa.active_llm_backend == "mock"
+    assert isinstance(qa.llm, MockLLM)
 
 
 def test_auto_endpoint_without_token_falls_back_to_mock(monkeypatch):

@@ -1,14 +1,18 @@
 import json
 import logging
 import os
-import sys
 from dataclasses import replace
 from typing import Optional
 
-import gradio as gr
+try:
+    from .native_runtime import apply_native_runtime_defaults
+except ImportError:
+    from native_runtime import apply_native_runtime_defaults
 
-# Add parent directory to path to handle both local and Docker execution
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+apply_native_runtime_defaults()
+
+import gradio as gr
 
 try:
     from .DocumentQA import (
@@ -116,6 +120,9 @@ def format_runtime_status(qa_status: DocumentQAStatus) -> str:
         "backend": qa_status.active_backend,
         "model": qa_status.active_model_label,
         "profile": qa_status.profile_label,
+        "model_device": qa_status.device,
+        "embeddings_model": qa_status.embeddings_model,
+        "embeddings_device": qa_status.embeddings_device,
         "ready_for_queries": qa_status.ready_for_queries,
         "readiness_scope": "retrieval_pipeline",
         "inference_validated": False,
@@ -403,7 +410,7 @@ with gr.Blocks() as demo:
     clear.click(clear_chat, None, [chatbot, loop_summary, answer_trace], queue=False)
 
 
-if __name__ == "__main__":
+def main() -> None:
     server_name = os.getenv("GRADIO_SERVER_NAME", "0.0.0.0")
     server_port = int(os.getenv("PORT", os.getenv("GRADIO_SERVER_PORT", "7860")))
     demo.launch(
@@ -412,3 +419,7 @@ if __name__ == "__main__":
         server_port=server_port,
         share=False,
     )
+
+
+if __name__ == "__main__":
+    main()
