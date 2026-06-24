@@ -115,7 +115,7 @@ class ProviderFreeGoldenLLM(LLM):
 
 
 def build_provider_free_qa(model: str, base_url: str, timeout: int) -> DocumentQA:
-    qa = DocumentQA(fast_mode=True, llm_backend="ollama", hf_token=None)
+    qa = DocumentQA(fast_mode=True, llm_backend="ollama")
     # The fake eval injects its verifier before any query, so DocumentQA never
     # initializes a live Ollama client. Keep the active label honest in artifacts.
     qa.llm = ProviderFreeGoldenLLM()

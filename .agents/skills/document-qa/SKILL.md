@@ -29,26 +29,23 @@ first context provider, not the product boundary.
 ## Runtime Contracts
 
 - `auto` backend is local-first and real-backend-only: select Ollama and fail
-  closed when Ollama or the configured model is unavailable. It must not route
-  to Hugging Face or fall back to mock.
-- Explicit real backends must fail closed: `ollama`, `openai-compatible`,
-  `endpoint`, and `local`.
+  closed when Ollama or the configured model is unavailable. It must not fall
+  back to mock.
+- Explicit real backends must fail closed: `ollama` and
+  `openai-compatible`. Removed backend names such as `endpoint` and `local`
+  must fail closed as invalid configuration.
 - `openai-compatible` is the cloud/private-gateway deployment path. Use
   `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, optional
   `OPENAI_COMPAT_API_KEY`, and `OPENAI_COMPAT_TIMEOUT`. Plain HTTP is allowed
   only for loopback local development; remote gateways must use HTTPS.
-- `hf_token="dummy"` is valid only for Hugging Face mock/demo paths. Ollama and
-  OpenAI-compatible backends do not use Hugging Face tokens.
-- Native runtime defaults must be installed before Gradio, NumPy, FAISS, torch,
+- Native runtime defaults must be installed before Gradio, NumPy, FAISS,
   or other native-heavy imports in app entrypoints. Use `src.native_runtime`
   instead of duplicating env setup in modules that may be imported too late.
 - Embeddings and LLM generation have separate device choices. On Apple
-  Silicon/MPS, keep embeddings on CPU by default; MPS embeddings are an explicit
-  `EMBEDDINGS_DEVICE=mps` opt-in because native PyTorch crashes can kill the
-  Python process during upload.
-- `LLM_BACKEND=auto` must not select Hugging Face endpoint or in-process local
-  Hugging Face models on any device. Explicit `local` remains available for
-  users who knowingly want Transformers in-process.
+  Silicon/MPS, keep embeddings on the built-in CPU local hashing path for
+  upload stability.
+- `LLM_BACKEND=auto` must select Ollama only. It must not silently select mock,
+  provider-specific hosted backends, or in-process model loading.
 - Product identity is AI Loop Engine. Treat document answering as
   the first context provider capability, not the repo's strategic identity.
 - Document context is the first `ContextProvider`; keep provider identity in
@@ -81,7 +78,7 @@ first context provider, not the product boundary.
   Mock/demo mode must report mechanically valid answers as `not_verified`.
 - Golden document evals must exercise the full provider-free QA loop: upload,
   retrieval, cited answer, self-check, retry, and fail-closed refusal. Do not
-  require a live Ollama or Hugging Face backend for these CI checks.
+  require a live Ollama backend for these CI checks.
 - `src.loop_eval --mode fake` is the provider-free CLI surface for JSON loop
   eval artifacts. It should include scored `LoopReport` evidence so humans can
   inspect phases, citations, verifier decisions, retries, refusals, and final
@@ -152,11 +149,11 @@ For UI status changes:
 For backend routing changes:
 
 - Exercise `LLM_BACKEND=auto`, `mock`, `ollama`, `openai-compatible`,
-  `endpoint`, and `local` paths when the change touches backend selection.
-- Clear or set `HUGGINGFACEHUB_API_TOKEN`, `HF_ENDPOINT_URL`, `LLM_BACKEND`,
-  `OLLAMA_MODEL`, `OLLAMA_BASE_URL`, `OPENAI_COMPAT_BASE_URL`,
-  `OPENAI_COMPAT_MODEL`, and `OPENAI_COMPAT_API_KEY` inside tests so shell state
-  cannot poison CI.
+  and invalid removed backend names such as `endpoint` and `local` when the
+  change touches backend selection.
+- Clear or set `LLM_BACKEND`, `OLLAMA_MODEL`, `OLLAMA_BASE_URL`,
+  `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, and
+  `OPENAI_COMPAT_API_KEY` inside tests so shell state cannot poison CI.
 
 For answer-loop or agent-pattern changes:
 

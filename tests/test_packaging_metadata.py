@@ -53,6 +53,23 @@ def test_console_scripts_are_declared():
     assert scripts["ai-loop-ollama-eval"] == "src.ollama_model_eval:main"
 
 
+def test_removed_model_stack_is_not_direct_dependency():
+    removed_direct_dependencies = {
+        "accelerate",
+        "huggingface-hub",
+        "langchain-huggingface",
+        "sentence-transformers",
+        "torch",
+        "transformers",
+    }
+    direct_dependency_names = {
+        dependency.split("==", 1)[0]
+        for dependency in pyproject()["project"]["dependencies"]
+    }
+
+    assert direct_dependency_names.isdisjoint(removed_direct_dependencies)
+
+
 def test_uv_lock_matches_project_metadata():
     project = pyproject()
     locked_project = locked_project_package()

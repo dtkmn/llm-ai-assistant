@@ -1,25 +1,22 @@
+import hashlib
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
-import sys
 import threading
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from getpass import getpass
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 try:
-    from .native_runtime import (
-        apply_native_runtime_defaults,
-        apply_torch_thread_limit,
-    )
+    from .native_runtime import apply_native_runtime_defaults
 except ImportError:
-    from native_runtime import apply_native_runtime_defaults, apply_torch_thread_limit
+    from native_runtime import apply_native_runtime_defaults
 
 
 apply_native_runtime_defaults()
@@ -27,15 +24,14 @@ apply_native_runtime_defaults()
 import docx2txt
 import faiss
 import numpy as np
-import torch
 from charset_normalizer import from_bytes
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.llms import LLM
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.retrievers import BaseRetriever
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import ConfigDict, Field
 from pypdf import PdfReader
@@ -74,11 +70,8 @@ OLLAMA_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler
 OPENAI_COMPAT_NO_PROXY_OPENER = urllib.request.build_opener(
     urllib.request.ProxyHandler({})
 )
-HF_TOKEN_ENV_VAR = "HUGGINGFACEHUB_API_TOKEN"
 FAST_MODE_ENV_VAR = "FAST_MODE"
 LLM_BACKEND_ENV_VAR = "LLM_BACKEND"
-HF_ENDPOINT_URL_ENV_VAR = "HF_ENDPOINT_URL"
-HF_ENDPOINT_TIMEOUT_ENV_VAR = "HF_ENDPOINT_TIMEOUT"
 OLLAMA_BASE_URL_ENV_VAR = "OLLAMA_BASE_URL"
 OLLAMA_MODEL_ENV_VAR = "OLLAMA_MODEL"
 OLLAMA_TIMEOUT_ENV_VAR = "OLLAMA_TIMEOUT"
@@ -92,8 +85,6 @@ DEFAULT_OLLAMA_MODEL = "nemotron-3-nano:4b"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 SUPPORTED_LLM_BACKENDS = {
     "auto",
-    "endpoint",
-    "local",
     "mock",
     "ollama",
     "openai-compatible",
@@ -101,18 +92,22 @@ SUPPORTED_LLM_BACKENDS = {
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_DOCUMENT_CHUNKS = 2_000
 DEFAULT_MAX_SESSION_REPORTS = 200
-DEFAULT_QUALITY_EMBEDDINGS_MODEL = "Alibaba-NLP/gte-modernbert-base"
-DEFAULT_FAST_EMBEDDINGS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-DEFAULT_QUALITY_MODELS = (
-    "Qwen/Qwen2.5-1.5B-Instruct",
-    "Qwen/Qwen2.5-7B-Instruct",
-    "meta-llama/Llama-3.2-3B-Instruct",
-)
-DEFAULT_FAST_MODELS = (
-    "Qwen/Qwen2.5-1.5B-Instruct",
-    "meta-llama/Llama-3.2-3B-Instruct",
-    "Qwen/Qwen2.5-7B-Instruct",
-)
+DEFAULT_EMBEDDINGS_MODEL = "local-hashing-384"
+SUPPORTED_EMBEDDINGS_MODELS = {DEFAULT_EMBEDDINGS_MODEL}
+LOCAL_HASHING_EMBEDDINGS_DIMENSIONS = 384
+LOCAL_HASHING_ALIASES = {
+    "go_live": ("launch", "launch_date", "release", "release_date"),
+    "launch": ("go_live", "release", "start"),
+    "launched": ("launch", "go_live", "released"),
+    "launches": ("launch", "go_live", "releases"),
+    "launching": ("launch", "go_live", "releasing"),
+    "release": ("launch", "go_live"),
+    "released": ("release", "launch"),
+    "releases": ("release", "launch"),
+    "release_date": ("launch_date", "go_live"),
+    "launch_date": ("release_date", "go_live"),
+    "live": ("go_live",),
+}
 QUALITY_PROFILE = {
     "max_new_tokens": 384,
     "retrieval_k": 6,
@@ -225,9 +220,6 @@ SELF_CHECK_REFUSAL_ANSWER = (
 )
 SELF_CHECK_PASS_OUTCOMES = {"supported", "not_verified"}
 VERIFIER_OUTCOMES = {"supported", "unsupported", "insufficient"}
-
-apply_torch_thread_limit(torch, logger=LOGGER)
-
 
 def open_ollama_request_no_proxy(request, *, timeout: int):
     return OLLAMA_NO_PROXY_OPENER.open(request, timeout=timeout)
@@ -894,8 +886,45 @@ def nul_ratio(raw_content: bytes, offset: int, stride: int) -> float:
     return sampled_bytes.count(0) / len(sampled_bytes)
 
 
+class LocalHashingEmbeddings(Embeddings):
+    """Deterministic local lexical embeddings with no model download."""
+
+    def __init__(self, dimensions: int = LOCAL_HASHING_EMBEDDINGS_DIMENSIONS):
+        self.dimensions = max(32, int(dimensions))
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return [self._embed(text) for text in texts]
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed(text)
+
+    def _embed(self, text: str) -> List[float]:
+        vector = [0.0] * self.dimensions
+        tokens = re.findall(r"\w+", text.casefold(), flags=re.UNICODE)
+        phrase_tokens = [
+            f"{left}_{right}" for left, right in zip(tokens, tokens[1:])
+        ]
+        weighted_terms = [(token, 1.0) for token in tokens]
+        weighted_terms.extend((token, 0.8) for token in phrase_tokens)
+        for token in tokens + phrase_tokens:
+            weighted_terms.extend(
+                (alias, 0.65) for alias in LOCAL_HASHING_ALIASES.get(token, ())
+            )
+
+        for token, weight in weighted_terms:
+            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+            bucket = int.from_bytes(digest[:4], "big") % self.dimensions
+            sign = -1.0 if digest[4] & 1 else 1.0
+            vector[bucket] += sign * weight
+
+        norm = math.sqrt(sum(value * value for value in vector))
+        if not norm:
+            return vector
+        return [value / norm for value in vector]
+
+
 class MockLLM(LLM):
-    """Fallback LLM when no real backend is available."""
+    """Explicit deterministic demo/test LLM."""
 
     @property
     def _llm_type(self) -> str:
@@ -1101,29 +1130,20 @@ class DocumentQA:
         self,
         model_id: Optional[str] = None,
         embeddings_model: Optional[str] = None,
-        hf_token: Optional[str] = None,
         device: Optional[str] = None,
         embeddings_device: Optional[str] = None,
         fast_mode: Optional[bool] = None,
         llm_backend: Optional[str] = None,
-        allow_interactive_token: bool = False,
         max_document_bytes: int = MAX_DOCUMENT_BYTES,
         max_document_chunks: int = MAX_DOCUMENT_CHUNKS,
         max_session_reports: int = DEFAULT_MAX_SESSION_REPORTS,
         loop_middlewares: Optional[Tuple[LoopMiddleware, ...]] = None,
     ):
-        self.device = device or self._detect_device()
+        self.device = device or "cpu"
         self.fast_mode = env_flag(FAST_MODE_ENV_VAR, False) if fast_mode is None else fast_mode
-        default_models = DEFAULT_FAST_MODELS if self.fast_mode else DEFAULT_QUALITY_MODELS
-        default_embeddings_model = (
-            DEFAULT_FAST_EMBEDDINGS_MODEL
-            if self.fast_mode
-            else DEFAULT_QUALITY_EMBEDDINGS_MODEL
-        )
-        self.model_id = model_id or os.getenv("LLM_MODEL_ID", default_models[0])
-        self.embeddings_model = embeddings_model or default_embeddings_model
+        self.model_id = model_id
+        self.embeddings_model = self._normalize_embeddings_model(embeddings_model)
         self.embeddings_device = self._normalize_embeddings_device(embeddings_device)
-        self.hf_token = hf_token or self._get_hf_token(allow_interactive_token)
         self.llm_backend = self._normalize_llm_backend(llm_backend)
         self.max_document_bytes = max_document_bytes
         self.max_document_chunks = max_document_chunks
@@ -1178,17 +1198,18 @@ class DocumentQA:
         self.loop_sessions: Dict[str, LoopSession] = {}
         self.loop_middlewares = tuple(loop_middlewares or ())
 
-    def _detect_device(self) -> str:
-        if torch.cuda.is_available():
-            return "cuda"
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
+    def _default_embeddings_device(self) -> str:
         return "cpu"
 
-    def _default_embeddings_device(self) -> str:
-        if self.device == "cuda":
-            return "cuda"
-        return "cpu"
+    def _normalize_embeddings_model(self, embeddings_model: Optional[str]) -> str:
+        requested = (embeddings_model or DEFAULT_EMBEDDINGS_MODEL).strip()
+        if requested in SUPPORTED_EMBEDDINGS_MODELS:
+            return requested
+        raise RuntimeError(
+            "Unsupported embeddings_model="
+            f"{embeddings_model!r}. Built-in document embeddings support only "
+            f"{DEFAULT_EMBEDDINGS_MODEL!r}."
+        )
 
     def _normalize_embeddings_device(
         self, embeddings_device: Optional[str] = None
@@ -1199,31 +1220,21 @@ class DocumentQA:
         ).strip().lower()
         if not requested or requested == "auto":
             return self._default_embeddings_device()
-        if requested == "cuda":
-            if torch.cuda.is_available():
-                return "cuda"
+        if requested in {"cuda", "mps"}:
             LOGGER.warning(
-                "%s=cuda requested but CUDA is unavailable. Using CPU.",
+                "%s=%s requested, but built-in local hashing embeddings run on CPU.",
                 EMBEDDINGS_DEVICE_ENV_VAR,
-            )
-            return "cpu"
-        if requested == "mps":
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return "mps"
-            LOGGER.warning(
-                "%s=mps requested but MPS is unavailable. Using CPU.",
-                EMBEDDINGS_DEVICE_ENV_VAR,
+                requested,
             )
             return "cpu"
         if requested == "cpu":
             return "cpu"
         LOGGER.warning(
-            "Unsupported %s=%r. Supported values: auto, cpu, cuda, mps. Using %s.",
+            "Unsupported %s=%r. Supported values: auto, cpu. Using CPU.",
             EMBEDDINGS_DEVICE_ENV_VAR,
             requested,
-            self._default_embeddings_device(),
         )
-        return self._default_embeddings_device()
+        return "cpu"
 
     def _normalize_llm_backend(self, llm_backend: Optional[str]) -> str:
         raw_backend = (
@@ -1247,111 +1258,12 @@ class DocumentQA:
             return self.llm_backend
         return "ollama"
 
-    def _get_hf_token(self, allow_interactive_token: bool) -> Optional[str]:
-        token = os.getenv(HF_TOKEN_ENV_VAR, "").strip()
-        if token:
-            return token
-
-        if not allow_interactive_token:
-            return None
-
-        if not sys.stdin or not sys.stdin.isatty():
-            LOGGER.warning(
-                "Interactive token prompt requested, but no TTY is available. "
-                "Set %s in the environment instead.",
-                HF_TOKEN_ENV_VAR,
-            )
-            return None
-
-        try:
-            token = getpass("Enter HF token (or press Enter to skip): ").strip()
-        except (KeyboardInterrupt, EOFError):
-            LOGGER.warning("No HuggingFace token provided.")
-            return None
-
-        if token:
-            os.environ[HF_TOKEN_ENV_VAR] = token
-            return token
-        return None
-
-    def _model_dtype(self) -> torch.dtype:
-        if self.device in {"cuda", "mps"}:
-            return torch.float16
-        return torch.float32
-
-    def _endpoint_url(self) -> Optional[str]:
-        return os.getenv(HF_ENDPOINT_URL_ENV_VAR, "").strip() or None
-
     def _loaded_model_label(self, model_id: str, backend: str) -> str:
-        endpoint_url = self._endpoint_url()
-        if backend == "endpoint" and endpoint_url:
-            return f"Custom endpoint ({endpoint_url})"
         if backend == "ollama":
             return f"Ollama ({model_id})"
         if backend == "openai-compatible":
             return f"OpenAI-compatible ({model_id or 'unconfigured'})"
         return model_id
-
-    def _load_endpoint_model(self, model_id: str) -> LLM:
-        from langchain_huggingface import HuggingFaceEndpoint
-
-        endpoint_url = self._endpoint_url()
-        LOGGER.info(
-            "Configuring Hugging Face endpoint %s",
-            endpoint_url if endpoint_url else model_id,
-        )
-        endpoint_kwargs = {
-            "task": "text-generation",
-            "huggingfacehub_api_token": self.hf_token,
-            "max_new_tokens": self.profile["max_new_tokens"],
-            "do_sample": False,
-            "repetition_penalty": 1.05,
-            "return_full_text": False,
-            "temperature": 0.1,
-            "timeout": env_int(HF_ENDPOINT_TIMEOUT_ENV_VAR, 120),
-        }
-        if endpoint_url:
-            endpoint_kwargs["endpoint_url"] = endpoint_url
-        else:
-            endpoint_kwargs["repo_id"] = model_id
-        return HuggingFaceEndpoint(**endpoint_kwargs)
-
-    def _load_local_model(self, model_id: str) -> HuggingFacePipeline:
-        from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-
-        LOGGER.info("Loading model %s on %s", model_id, self.device)
-        tokenizer = AutoTokenizer.from_pretrained(model_id, token=self.hf_token)
-
-        model_kwargs = {
-            "dtype": self._model_dtype(),
-            "token": self.hf_token,
-            "low_cpu_mem_usage": True,
-        }
-        if self.device == "cuda":
-            model_kwargs["device_map"] = "auto"
-
-        model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
-
-        if self.device == "mps":
-            model = model.to("mps")
-
-        # Some model configs still carry a legacy max_length default, which
-        # causes transformers to warn when max_new_tokens is also provided.
-        model.generation_config.max_length = None
-
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        text_pipeline = pipeline(
-            task="text-generation",
-            model=model,
-            tokenizer=tokenizer,
-            max_new_tokens=self.profile["max_new_tokens"],
-            do_sample=False,
-            repetition_penalty=1.05,
-            return_full_text=False,
-        )
-        return HuggingFacePipeline(pipeline=text_pipeline)
 
     def _load_ollama_model(self, model_id: str) -> OllamaLLM:
         LOGGER.info("Configuring Ollama model %s at %s", model_id, self.ollama_base_url)
@@ -1389,14 +1301,6 @@ class DocumentQA:
         llm.validate_model_available()
         return llm
 
-    def _candidate_models(self) -> List[str]:
-        candidates = [self.model_id]
-        default_models = DEFAULT_FAST_MODELS if self.fast_mode else DEFAULT_QUALITY_MODELS
-        for fallback_model in default_models:
-            if fallback_model not in candidates:
-                candidates.append(fallback_model)
-        return candidates
-
     def _initialize_llm(self) -> None:
         requested_backend = self._select_llm_backend()
         if self.llm_backend == "mock":
@@ -1404,21 +1308,6 @@ class DocumentQA:
             self.active_llm_backend = "mock"
             self.llm = MockLLM()
             return
-
-        if self.hf_token == "dummy":
-            message = (
-                "Dummy HuggingFace token is only allowed with LLM_BACKEND=mock "
-                "or non-HuggingFace backends."
-            )
-            if requested_backend in {"endpoint", "local"}:
-                raise RuntimeError(message)
-
-        if requested_backend == "endpoint" and not self.hf_token:
-            message = (
-                "HuggingFace token is required for endpoint inference. "
-                f"Set {HF_TOKEN_ENV_VAR} or use LLM_BACKEND=mock for demo mode."
-            )
-            raise RuntimeError(message)
 
         if requested_backend == "ollama":
             try:
@@ -1473,43 +1362,8 @@ class DocumentQA:
                     f"{safe_base_url}. Last error: {exc}"
                 ) from exc
 
-        last_error = None
-        for candidate_model in self._candidate_models():
-            try:
-                if requested_backend == "endpoint":
-                    self.llm = self._load_endpoint_model(candidate_model)
-                else:
-                    self.llm = self._load_local_model(candidate_model)
-                self.active_llm_backend = requested_backend
-                self.loaded_model_label = self._loaded_model_label(
-                    candidate_model, requested_backend
-                )
-                self.loaded_model_id = (
-                    None
-                    if requested_backend == "endpoint" and self._endpoint_url()
-                    else candidate_model
-                )
-                self.model_id = candidate_model
-                LOGGER.info("Using %s model %s", requested_backend, candidate_model)
-                return
-            except Exception as exc:
-                last_error = exc
-                LOGGER.warning(
-                    "Failed to load model %s: %s. Trying next fallback.",
-                    candidate_model,
-                    exc,
-                )
-
-        candidate_list = ", ".join(self._candidate_models()) or "none"
-        if last_error:
-            raise RuntimeError(
-                f"Unable to initialize {requested_backend} LLM after trying "
-                f"{candidate_list}. Last error: {last_error}"
-            ) from last_error
-
         raise RuntimeError(
-            f"Unable to initialize {requested_backend} LLM; no model candidates "
-            "were available."
+            f"Unsupported initialized LLM backend: {requested_backend}."
         )
 
     def _ensure_llm_initialized(self) -> None:
@@ -1659,10 +1513,7 @@ class DocumentQA:
             return
 
         try:
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name=self.embeddings_model,
-                model_kwargs={"device": self.embeddings_device},
-            )
+            self.embeddings = LocalHashingEmbeddings()
         except Exception as exc:
             self.embeddings_error = str(exc)
             self.embeddings = None
@@ -1689,7 +1540,7 @@ class DocumentQA:
             return self._loaded_model_label(
                 self.openai_compat_model, "openai-compatible"
             )
-        return self.model_id
+        return self.model_id or "unconfigured"
 
     def _text_encoding_mode(self, text_encoding: Optional[str]) -> str:
         return (text_encoding or "auto").strip().lower() or "auto"
@@ -2058,7 +1909,7 @@ class DocumentQA:
                     self._initialize_embeddings()
                 if not self.embeddings:
                     raise RuntimeError(
-                        "Embedding model is unavailable. Check network access/model cache and retry."
+                        "Built-in local embeddings are unavailable. Check application logs and retry."
                     )
 
                 phase = "load"

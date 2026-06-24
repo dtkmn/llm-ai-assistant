@@ -92,7 +92,7 @@ def normalize_local_ollama_base_url(base_url: str) -> str:
 
 
 def build_ollama_qa(model: str, base_url: str, timeout: int) -> DocumentQA:
-    qa = DocumentQA(fast_mode=True, llm_backend="ollama", hf_token=None)
+    qa = DocumentQA(fast_mode=True, llm_backend="ollama")
     qa.ollama_model = model
     qa.ollama_base_url = normalize_local_ollama_base_url(base_url)
     qa.ollama_timeout = timeout

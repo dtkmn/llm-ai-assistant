@@ -1,13 +1,3 @@
----
-title: AI Loop Engine
-emoji: 🏳️‍🌈
-colorFrom: gray
-colorTo: green
-sdk: docker
-app_port: 7860
----
-
-
 # AI Loop Engine
 AI Loop Engine is a local-first engine for inspecting and hardening AI answer
 loops: context retrieval, drafting, citation checks, claim verification, retries,
@@ -20,13 +10,12 @@ talk to an agent whose loop is visible and testable.
 - **Document Context Provider:** Supports PDF, DOCX, and text documents with safe decoding, chunking, and transactional replacement
 - **Local-first LLM Backend:** Recommended local path is Ollama; cloud or
   gateway deployment uses a generic OpenAI-compatible chat-completions backend
-- **Vector Search:** Uses FAISS for efficient similarity search with Hugging
-  local sentence-transformer embeddings; embeddings run on CPU by default on
-  Apple Silicon for upload stability
+- **Vector Search:** Uses FAISS for efficient similarity search with
+  deterministic local hashing embeddings; embeddings run on CPU and require no
+  model downloads
 - **Gradio Interface:** Web interface for document context upload, agent chat, runtime status, compact loop summaries, and answer traces
-- **GPU/MPS Support:** Automatically utilizes CUDA, Apple Silicon (MPS), or CPU
-  for supported local generation paths. Document embeddings use a separate
-  device setting.
+- **External Model Runtime:** Uses Ollama or an OpenAI-compatible gateway for
+  generation so Python document indexing stays lightweight and stable
 
 
 ![AI Loop Engine flow](docs/ai-loop-engine-flow.svg)
@@ -39,9 +28,8 @@ talk to an agent whose loop is visible and testable.
 - Ollama installed for the recommended local-first setup
 - Optional: an OpenAI-compatible model gateway for cloud or remote deployment
   (`/v1/chat/completions` shape)
-- Optional legacy path: Hugging Face account/API token only if you deliberately
-  use `LLM_BACKEND=endpoint` or `LLM_BACKEND=local` with gated HF models
-- At least 8GB RAM if forcing local model execution on CPU; GPU/MPS is strongly preferred for local models
+- Enough memory for the Ollama model you choose; small models are strongly
+  recommended on memory-constrained Macs
 
 ### Local Setup
 
@@ -85,19 +73,17 @@ talk to an agent whose loop is visible and testable.
     export EMBEDDINGS_DEVICE=cpu
     ```
 
-    `EMBEDDINGS_DEVICE=cpu` is the default on Apple Silicon. Keep it there
-    unless you are deliberately testing PyTorch MPS embedding stability.
+    Document embeddings are local CPU hashing embeddings. Keep model execution
+    in Ollama or an OpenAI-compatible runtime, not inside this Python process.
 
 4. (Optional) choose a different backend:
 
     Supported values:
     - `ollama` uses a local Ollama server. This is the recommended local path.
     - `auto` selects Ollama and fails closed if Ollama or the configured model
-      is unavailable. It does not route to Hugging Face or mock.
+      is unavailable. It does not fall back to mock.
     - `openai-compatible` uses any server that implements OpenAI-style
       `/v1/chat/completions`.
-    - `endpoint` is the legacy hosted Hugging Face inference backend.
-    - `local` is the legacy in-process Transformers backend.
     - `mock` disables real inference for demos/tests.
 
 5. (Optional) set up a cloud or local OpenAI-compatible endpoint:
@@ -114,31 +100,19 @@ talk to an agent whose loop is visible and testable.
     that require bearer auth. Plain `http://` is accepted only for loopback
     local development; non-loopback endpoints must use `https://`.
 
-6. (Optional legacy) set up Hugging Face endpoint/local model support:
-
-    ```bash
-    export HUGGINGFACEHUB_API_TOKEN=your_token_here
-    ```
-
-7. (Optional legacy) choose a different Hugging Face local model:
-
-    ```bash
-    export LLM_MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct
-    ```
-
-8. (Optional) switch back to quality mode:
+6. (Optional) switch back to quality mode:
 
     ```bash
     export FAST_MODE=false
     ```
 
-9. (Optional) enable debug logs:
+7. (Optional) enable debug logs:
 
     ```bash
     export APP_DEBUG=false
     ```
 
-10. Run the application:
+8. Run the application:
 
     ```bash
     uv run ai-loop-engine
@@ -221,24 +195,15 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   - `auto` (default): local-first real path; selects Ollama and fails closed if unavailable
   - `openai-compatible`: OpenAI-style `/v1/chat/completions` endpoint for cloud,
     private gateway, vLLM, llama.cpp server, LM Studio, or similar runtimes
-  - `endpoint`: legacy hosted Hugging Face inference
-  - `local`: legacy in-process Transformers pipeline
   - `mock`: explicit deterministic demo/test backend; never used as fallback
 - **Ollama:** optionally configurable with `OLLAMA_MODEL` (default `nemotron-3-nano:4b`), `OLLAMA_BASE_URL` (default `http://localhost:11434`), and `OLLAMA_TIMEOUT`
 - **OpenAI-compatible endpoint:** requires `OPENAI_COMPAT_BASE_URL` and
   `OPENAI_COMPAT_MODEL`; optionally set `OPENAI_COMPAT_API_KEY` and
   `OPENAI_COMPAT_TIMEOUT`
-- **Legacy Hugging Face model:** configurable via `LLM_MODEL_ID`
-  - **Quality mode (default):** tries `Qwen/Qwen2.5-1.5B-Instruct`, then `Qwen/Qwen2.5-7B-Instruct`, then `meta-llama/Llama-3.2-3B-Instruct`
-  - **Fast mode (`FAST_MODE=true`):** tries `Qwen/Qwen2.5-1.5B-Instruct` first, then `meta-llama/Llama-3.2-3B-Instruct`
-- **Legacy Hugging Face endpoint:** optionally configurable with
-  `HF_ENDPOINT_URL`, `HF_ENDPOINT_TIMEOUT`, and `HUGGINGFACEHUB_API_TOKEN`
-- **Embeddings:**
-  - **Quality mode:** `Alibaba-NLP/gte-modernbert-base`
-  - **Fast mode:** `sentence-transformers/all-MiniLM-L6-v2`
-  - **Device:** `EMBEDDINGS_DEVICE=auto|cpu|cuda|mps`. `auto` uses CPU on
-    Apple Silicon/MPS to avoid native PyTorch crashes during upload, and CUDA
-    when CUDA is available.
+- **Embeddings:** deterministic local hashing embeddings
+  (`local-hashing-384`) with no model download and no provider token.
+  `EMBEDDINGS_DEVICE=auto|cpu` resolves to CPU; accelerated values are accepted
+  only as explicit no-op compatibility inputs and are normalized back to CPU.
 - **Vector Store:** FAISS for efficient similarity search
 - **Framework:** LangChain for orchestration
 
@@ -253,9 +218,8 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 - **Native runtime defaults:** unless you override them, app entrypoints
   bootstrap `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
   `VECLIB_MAXIMUM_THREADS`, and tokenizer parallelism before Gradio, NumPy,
-  FAISS, or torch load native libraries. Torch threads default to `1` after
-  torch import unless `TORCH_NUM_THREADS` is set. This is intentional: upload
-  stability beats parallel tensor-loading crashes on local Macs.
+  or FAISS load native libraries. This is intentional: upload stability beats
+  native thread-pool surprises on local Macs.
 
 ## Local-First Direction
 - The product direction is **download and run locally first**. Ollama is the
@@ -263,14 +227,13 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   outside the Python dependency graph and avoids requiring cloud credentials.
 - Cloud/deployed inference should go through the generic OpenAI-compatible
   backend, not a provider-specific happy path.
-- Hugging Face LLM support is now legacy explicit-only. Keep it available while
-  existing deployments need it, but do not build new product behavior that
-  requires Hugging Face tokens.
-- New AI Loop Engine features should not require Hugging Face tokens for the
-  happy path. If a feature works locally, document the Ollama path first and the
-  OpenAI-compatible deployment path second.
-- On Apple Silicon, avoid in-process Hugging Face local weights. Use Ollama for
-  local generation and CPU embeddings for document upload stability.
+- First-party model providers are intentionally limited to Ollama and generic
+  OpenAI-compatible gateways. Do not add provider-specific token paths unless a
+  new product decision makes that tradeoff explicit.
+- New AI Loop Engine features should work through the local Ollama path first
+  and the OpenAI-compatible deployment path second.
+- On Apple Silicon, keep generation outside this Python process and leave
+  embeddings on the built-in CPU hashing path for upload stability.
 
 ## Loop Engineering Pattern
 This repo is intentionally built around three loops:
@@ -435,12 +398,12 @@ ollama stop qwen3:8b
 - Dependencies are declared in `pyproject.toml` and locked in `uv.lock` for the
   recommended local workflow.
 - `requirements.txt` and `requirements-dev.txt` remain pip-compatible exports
-  for Docker, Hugging Face Spaces, and conservative CI paths. Tests assert they
-  stay synchronized with `pyproject.toml`.
+  for Docker and conservative CI/deployment paths. Tests assert they stay
+  synchronized with `pyproject.toml`.
 - Dependabot is enabled weekly (`.github/dependabot.yml`) for dependency updates.
-- Current baseline includes Gradio `6.15.2`, LangChain `1.3.10`,
-  LangChain-HuggingFace `1.2.1` for embeddings/legacy HF paths,
-  HuggingFace Hub `1.5.0`, Transformers `5.4.0`, and Torch `2.12.1`.
+- Current direct runtime baseline includes Gradio `6.15.2`, LangChain `1.3.10`,
+  FAISS CPU `1.13.2`, local text/document parsers, and the dependency-free
+  Ollama/OpenAI-compatible HTTP adapters.
 - Note: `marshmallow` is intentionally pinned to `3.26.2` because `dataclasses-json` currently requires `<4.0.0`.
 - Security-sensitive transitive dependencies are explicitly pinned (for example `aiohttp`, `urllib3`, `python-multipart`, and `orjson`) to keep audit results stable.
 - Recommended recurring checks:

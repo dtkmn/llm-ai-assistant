@@ -64,10 +64,7 @@ class GoldenEvalLLM(LLM):
 @pytest.fixture(autouse=True)
 def clear_provider_env(monkeypatch):
     for env_var in (
-        "HUGGINGFACEHUB_API_TOKEN",
-        "HF_ENDPOINT_URL",
         "LLM_BACKEND",
-        "LLM_MODEL_ID",
         "OLLAMA_MODEL",
         "OLLAMA_BASE_URL",
         "OPENAI_COMPAT_BASE_URL",
@@ -82,7 +79,7 @@ def build_golden_qa(tmp_path, scenario="supported"):
     document = tmp_path / "project_phoenix_brief.md"
     document.write_text(GOLDEN_DOCUMENT_TEXT, encoding="utf-8")
 
-    qa = DocumentQA(fast_mode=True, llm_backend="ollama", hf_token=None)
+    qa = DocumentQA(fast_mode=True, llm_backend="ollama")
     qa.llm = GoldenEvalLLM(scenario=scenario)
     qa.active_llm_backend = "ollama"
     qa.loaded_model_id = "golden-eval"

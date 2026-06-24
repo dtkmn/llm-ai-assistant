@@ -14,6 +14,7 @@ from src.DocumentQA import (
     DocumentContextProvider,
     DocumentQA,
     FaissVectorStore,
+    LocalHashingEmbeddings,
     MockLLM,
     OllamaLLM,
     OpenAICompatibleLLM,
@@ -47,14 +48,14 @@ def create_processed_mock_qa(tmp_path):
         "The launch date is June 2026.",
         encoding="utf-8",
     )
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.embeddings = FakeEmbeddings()
     qa.process_document(str(document))
     return qa, document
 
 
 def test_query_before_document_asks_for_upload_first():
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     assert qa.query("What is this?") == "Please upload and process a document first."
     result = qa.query_with_trace("What is this?")
@@ -73,7 +74,7 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
         "The launch date is June 2026.",
         encoding="utf-8",
     )
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.embeddings = FakeEmbeddings()
 
     qa.process_document(str(document))
@@ -148,7 +149,7 @@ def test_query_trace_counts_only_prompt_included_chunks(tmp_path):
         ),
         encoding="utf-8",
     )
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.embeddings = FakeEmbeddings()
     qa.process_document(str(document))
     assert len(qa.vector_store.documents) > 1
@@ -244,7 +245,7 @@ def test_loop_session_history_is_bounded(tmp_path):
 
 
 def test_blocked_query_is_recorded_for_replay(tmp_path):
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     result = qa.query_with_trace("What is this?", session_id="blocked")
 
@@ -287,7 +288,6 @@ def test_loop_middleware_can_block_before_retrieval(tmp_path):
     )
     qa = DocumentQA(
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
         loop_middlewares=(BlockRetrieveMiddleware(),),
     )
@@ -456,7 +456,6 @@ def test_after_run_guardrail_overrides_answer_without_stale_self_check(tmp_path)
     )
     qa = DocumentQA(
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
         loop_middlewares=(RequireReviewAfterRunMiddleware(),),
     )
@@ -517,9 +516,9 @@ def enable_fake_verifier(qa, outcome="supported", raw_response=None, error=None)
         raw_response=raw_response,
         error=error,
     )
-    qa.active_llm_backend = "endpoint"
+    qa.active_llm_backend = "openai-compatible"
     qa.llm = verifier
-    qa.loaded_model_label = "Fake verifier endpoint"
+    qa.loaded_model_label = "Fake verifier gateway"
     return verifier
 
 
@@ -699,7 +698,7 @@ def test_llm_verifier_marks_real_backend_answer_supported(tmp_path):
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == "Project Phoenix launches in June 2026 [1]."
-    assert result.trace.backend == "endpoint"
+    assert result.trace.backend == "openai-compatible"
     assert result.trace.self_check.outcome == "supported"
     assert result.trace.self_check.reasons == [
         "mechanical_checks_passed",
@@ -1376,17 +1375,15 @@ def test_status_reports_configured_backend_before_initialization():
     qa = DocumentQA(
         device="cpu",
         fast_mode=False,
-        hf_token="real-token",
-        llm_backend="endpoint",
-        model_id="example/model",
+        llm_backend="openai-compatible",
     )
 
     status = qa.status()
 
     assert status.profile_label == "QUALITY"
-    assert status.configured_backend == "endpoint"
-    assert status.active_backend == "endpoint"
-    assert status.active_model_label == "example/model"
+    assert status.configured_backend == "openai-compatible"
+    assert status.active_backend == "openai-compatible"
+    assert status.active_model_label == "OpenAI-compatible (unconfigured)"
     assert status.embeddings_device == "cpu"
     assert status.ready_for_queries is False
     assert status.mock_mode is False
@@ -1394,7 +1391,7 @@ def test_status_reports_configured_backend_before_initialization():
 
 
 def test_auto_status_before_initialization_reports_local_first_plan():
-    qa = DocumentQA(fast_mode=True, llm_backend="auto", hf_token=None)
+    qa = DocumentQA(fast_mode=True, llm_backend="auto")
 
     status = qa.status()
 
@@ -1408,7 +1405,6 @@ def test_embeddings_default_to_cpu_on_mps_device():
     qa = DocumentQA(
         device="mps",
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
     )
 
@@ -1422,38 +1418,58 @@ def test_embeddings_device_can_be_explicitly_cpu_on_accelerated_device():
         device="mps",
         embeddings_device="cpu",
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
     )
 
     assert qa.embeddings_device == "cpu"
 
 
-def test_initialize_embeddings_uses_safe_embeddings_device(monkeypatch):
-    captured = {}
-
-    class FakeHuggingFaceEmbeddings:
-        def __init__(self, *, model_name, model_kwargs):
-            captured["model_name"] = model_name
-            captured["model_kwargs"] = model_kwargs
-
-    monkeypatch.setattr(
-        document_qa_module,
-        "HuggingFaceEmbeddings",
-        FakeHuggingFaceEmbeddings,
-    )
+def test_initialize_embeddings_uses_local_cpu_embeddings():
     qa = DocumentQA(
         device="mps",
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
     )
 
     qa._initialize_embeddings()
 
-    assert captured["model_name"] == qa.embeddings_model
-    assert captured["model_kwargs"] == {"device": "cpu"}
-    assert qa.embeddings is not None
+    assert qa.embeddings_model == "local-hashing-384"
+    assert qa.embeddings_device == "cpu"
+    assert isinstance(qa.embeddings, LocalHashingEmbeddings)
+    assert len(qa.embeddings.embed_query("Project Phoenix")) == 384
+
+
+def test_rejects_removed_embedding_model_names():
+    with pytest.raises(RuntimeError, match="Unsupported embeddings_model"):
+        DocumentQA(
+            embeddings_model="sentence-transformers/all-MiniLM-L6-v2",
+            fast_mode=True,
+            llm_backend="mock",
+        )
+
+
+def test_default_local_hashing_embeddings_retrieve_common_launch_paraphrase(
+    tmp_path,
+):
+    document = tmp_path / "phoenix-plan.txt"
+    document.write_text(
+        "Budget approval notes say the finance review is complete.\n\n"
+        "Project Phoenix launch date is June 2026. The release goes to customers then.\n\n"
+        "Support staffing notes describe the help desk rotation.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.profile["splitter_chunk_size"] = 90
+    qa.profile["splitter_chunk_overlap"] = 0
+    qa.profile["retrieval_k"] = 1
+    qa.profile["retrieval_fetch_k"] = 3
+
+    qa.process_document(str(document))
+    result = qa.query_with_trace("When does it go live?")
+
+    assert len(result.trace.citations) == 1
+    assert "June 2026" in result.trace.citations[0].excerpt
+    assert "June 2026" in result.answer
 
 
 def test_failed_unsupported_replacement_keeps_previous_document_queryable(tmp_path):
@@ -1496,7 +1512,7 @@ def test_concurrent_replacement_uploads_are_serialized(monkeypatch, tmp_path):
     first.write_text("First document for Project Phoenix.", encoding="utf-8")
     second = tmp_path / "second.txt"
     second.write_text("Second document for Project Phoenix.", encoding="utf-8")
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.embeddings = FakeEmbeddings()
     original_process_document = DocumentQA.process_document
     original_load_documents = DocumentQA._load_documents
@@ -1593,7 +1609,7 @@ def test_failed_embedding_initialization_keeps_previous_document_queryable(
 
     monkeypatch.setattr(DocumentQA, "_initialize_embeddings", fail_initialize_embeddings)
 
-    with pytest.raises(RuntimeError, match="Embedding model is unavailable"):
+    with pytest.raises(RuntimeError, match="Built-in local embeddings are unavailable"):
         qa.process_document(str(replacement))
 
     assert qa.current_document_name == "phoenix.txt"
@@ -1605,7 +1621,7 @@ def test_failed_embedding_initialization_keeps_previous_document_queryable(
     assert report.phase == "initialize_embeddings"
     assert report.attempted_document_name == "replacement.txt"
     assert report.active_document_name == "phoenix.txt"
-    assert "Embedding model is unavailable" in report.error_message
+    assert "Built-in local embeddings are unavailable" in report.error_message
 
 
 def test_empty_replacement_keeps_previous_document_queryable(tmp_path):
@@ -1694,7 +1710,6 @@ def test_successful_upload_report_records_truncation(tmp_path):
     document.write_text(("Project Phoenix launch notes.\n" * 500), encoding="utf-8")
     qa = DocumentQA(
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
         max_document_chunks=1,
     )
@@ -1713,7 +1728,7 @@ def test_successful_upload_report_records_truncation(tmp_path):
 def test_text_loader_sets_source_metadata(tmp_path):
     document = tmp_path / "notes.md"
     document.write_text("# Notes\nProject Phoenix launch notes.", encoding="utf-8")
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(str(document), ".md")
 
@@ -1781,7 +1796,7 @@ def test_text_loader_sets_source_metadata(tmp_path):
 def test_text_loader_detects_common_non_utf8_encodings(tmp_path, encoding, text):
     document = tmp_path / "legacy.txt"
     document.write_bytes(text.encode(encoding))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(
         str(document), ".txt", text_encoding=encoding
@@ -1806,7 +1821,7 @@ def test_text_loader_detects_common_non_utf8_encodings(tmp_path, encoding, text)
 def test_text_loader_utf8_or_western_mode_preserves_text(tmp_path, encoding, text):
     document = tmp_path / "default_text.txt"
     document.write_bytes(text.encode(encoding))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(
         str(document), ".txt", text_encoding="utf-8-or-western"
@@ -1830,7 +1845,7 @@ def test_text_loader_utf8_or_western_mode_preserves_text(tmp_path, encoding, tex
 def test_text_loader_detects_utf_family_encodings(tmp_path, encoding, text):
     document = tmp_path / "unicode.txt"
     document.write_bytes(text.encode(encoding))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(str(document), ".txt")
 
@@ -1842,7 +1857,7 @@ def test_text_loader_uses_confident_detector_for_legacy_encoding(tmp_path):
     text = "Zażółć gęślą jaźń"
     document = tmp_path / "polish.txt"
     document.write_bytes(text.encode("cp1250"))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(str(document), ".txt")
 
@@ -1863,7 +1878,7 @@ def test_text_loader_uses_confident_detector_for_legacy_encoding(tmp_path):
 def test_text_loader_uses_explicit_legacy_encoding(tmp_path, encoding, text):
     document = tmp_path / "legacy.txt"
     document.write_bytes(text.encode(encoding))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(
         str(document), ".txt", text_encoding=encoding
@@ -1875,7 +1890,7 @@ def test_text_loader_uses_explicit_legacy_encoding(tmp_path, encoding, text):
 def test_text_loader_reports_invalid_explicit_encoding(tmp_path):
     document = tmp_path / "legacy.txt"
     document.write_bytes("Phoenix".encode("utf-8"))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     with pytest.raises(ValueError, match="Could not decode text document"):
         qa._load_documents(str(document), ".txt", text_encoding="not-a-codec")
@@ -1914,7 +1929,7 @@ def test_text_loader_rejects_ambiguous_legacy_text_instead_of_mojibake(
 ):
     document = tmp_path / "ambiguous.txt"
     document.write_bytes(text.encode(encoding))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     with pytest.raises(ValueError, match="Could not decode text document"):
         qa._load_documents(str(document), ".txt")
@@ -1939,7 +1954,7 @@ def test_faiss_vector_store_returns_relevant_documents():
 def test_rejects_unsupported_file_type_before_model_initialization(tmp_path):
     document = tmp_path / "data.csv"
     document.write_text("a,b\n1,2\n", encoding="utf-8")
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     with pytest.raises(RuntimeError, match="Unsupported file type: .csv"):
         qa.process_document(str(document))
@@ -1951,7 +1966,7 @@ def test_rejects_oversized_document_before_model_initialization(tmp_path):
     document = tmp_path / "too-large.txt"
     document.write_text("too large", encoding="utf-8")
     qa = DocumentQA(
-        fast_mode=True, hf_token="dummy", llm_backend="mock", max_document_bytes=1
+        fast_mode=True, llm_backend="mock", max_document_bytes=1
     )
 
     with pytest.raises(RuntimeError, match="File is too large"):
@@ -1960,14 +1975,13 @@ def test_rejects_oversized_document_before_model_initialization(tmp_path):
     assert qa.llm is None
 
 
-def test_auto_backend_uses_ollama_when_available_without_hf_token(monkeypatch):
+def test_auto_backend_uses_ollama_when_available(monkeypatch):
     def fake_ollama_loader(self, model_id):
         return MockLLM()
 
-    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
     monkeypatch.setenv("OLLAMA_MODEL", "nemotron-3-nano:4b")
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
-    qa = DocumentQA(device="cpu", hf_token=None, llm_backend="auto")
+    qa = DocumentQA(device="cpu", llm_backend="auto")
 
     qa._initialize_llm()
 
@@ -1988,33 +2002,28 @@ def test_invalid_llm_backend_env_fails_closed_before_loading_model(monkeypatch):
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", forbidden_ollama_loader)
 
     with pytest.raises(RuntimeError, match="Unsupported LLM_BACKEND='mockk'"):
-        DocumentQA(device="cpu", hf_token=None)
+        DocumentQA(device="cpu")
 
     assert load_attempted is False
 
 
-def test_endpoint_url_does_not_also_set_repo_id(monkeypatch):
-    monkeypatch.setenv("HF_ENDPOINT_URL", "https://example.invalid")
-    qa = DocumentQA(device="cpu", hf_token="real-token", llm_backend="endpoint")
+@pytest.mark.parametrize("backend", ["endpoint", "local"])
+def test_removed_hf_backend_names_fail_closed_before_loading_model(
+    monkeypatch, backend
+):
+    load_attempted = False
 
-    llm = qa._load_endpoint_model("Qwen/Qwen2.5-1.5B-Instruct")
+    def forbidden_ollama_loader(self, model_id):
+        nonlocal load_attempted
+        load_attempted = True
+        raise AssertionError("removed backend must not select Ollama")
 
-    assert llm.endpoint_url == "https://example.invalid"
-    assert llm.repo_id is None
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", forbidden_ollama_loader)
 
+    with pytest.raises(RuntimeError, match="Unsupported LLM_BACKEND"):
+        DocumentQA(device="cpu", llm_backend=backend)
 
-def test_custom_endpoint_records_endpoint_label_not_candidate_model(monkeypatch):
-    def fake_endpoint_loader(self, model_id):
-        return MockLLM()
-
-    monkeypatch.setenv("HF_ENDPOINT_URL", "https://example.invalid")
-    monkeypatch.setattr(DocumentQA, "_load_endpoint_model", fake_endpoint_loader)
-    qa = DocumentQA(device="cpu", hf_token="real-token", llm_backend="endpoint")
-
-    qa._initialize_llm()
-
-    assert qa.loaded_model_id is None
-    assert qa.loaded_model_label == "Custom endpoint (https://example.invalid)"
+    assert load_attempted is False
 
 
 def test_auto_backend_uses_ollama_on_cuda_when_available(monkeypatch):
@@ -2022,7 +2031,7 @@ def test_auto_backend_uses_ollama_on_cuda_when_available(monkeypatch):
         return MockLLM()
 
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
-    qa = DocumentQA(device="cuda", hf_token="real-token", llm_backend="auto")
+    qa = DocumentQA(device="cuda", llm_backend="auto")
 
     qa._initialize_llm()
 
@@ -2035,7 +2044,7 @@ def test_auto_backend_uses_ollama_on_mps_when_available(monkeypatch):
         return MockLLM()
 
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
-    qa = DocumentQA(device="mps", hf_token="real-token", llm_backend="auto")
+    qa = DocumentQA(device="mps", llm_backend="auto")
 
     qa._initialize_llm()
 
@@ -2047,9 +2056,8 @@ def test_auto_backend_fails_closed_when_ollama_unavailable(monkeypatch):
     def failing_ollama_loader(self, model_id):
         raise ValueError("ollama unavailable")
 
-    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", failing_ollama_loader)
-    qa = DocumentQA(device="mps", llm_backend="auto", hf_token=None)
+    qa = DocumentQA(device="mps", llm_backend="auto")
 
     with pytest.raises(RuntimeError, match="Unable to initialize auto-selected"):
         qa._initialize_llm()
@@ -2058,61 +2066,16 @@ def test_auto_backend_fails_closed_when_ollama_unavailable(monkeypatch):
     assert qa.llm is None
 
 
-def test_auto_backend_does_not_use_hf_when_hf_token_exists(monkeypatch):
-    def failing_ollama_loader(self, model_id):
-        raise ValueError("ollama unavailable")
-
-    def forbidden_endpoint_loader(self, model_id):
-        raise AssertionError("auto should not use Hugging Face endpoint")
-
-    def forbidden_local_loader(self, model_id):
-        raise AssertionError("auto should not use in-process Hugging Face local")
-
-    monkeypatch.setattr(DocumentQA, "_load_ollama_model", failing_ollama_loader)
-    monkeypatch.setattr(DocumentQA, "_load_endpoint_model", forbidden_endpoint_loader)
-    monkeypatch.setattr(DocumentQA, "_load_local_model", forbidden_local_loader)
-    qa = DocumentQA(device="cpu", llm_backend="auto", hf_token="real-token")
-
-    with pytest.raises(RuntimeError, match="Unable to initialize auto-selected"):
-        qa._initialize_llm()
-
-    assert qa.active_llm_backend is None
-    assert qa.llm is None
-
-
-def test_explicit_endpoint_without_token_fails_closed(monkeypatch):
-    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
-    qa = DocumentQA(device="cpu", llm_backend="endpoint", hf_token=None)
-
-    with pytest.raises(RuntimeError, match="token is required for endpoint inference"):
-        qa._initialize_llm()
-
-
-def test_explicit_local_backend_failure_fails_closed(monkeypatch):
-    def failing_local_loader(self, model_id):
-        raise ValueError("boom")
-
-    monkeypatch.setattr(DocumentQA, "_load_local_model", failing_local_loader)
-    qa = DocumentQA(device="cpu", llm_backend="local", hf_token="real-token")
-
-    with pytest.raises(RuntimeError, match="Unable to initialize local LLM"):
-        qa._initialize_llm()
-
-    assert qa.active_llm_backend is None
-    assert qa.llm is None
-
-
-def test_explicit_ollama_backend_uses_ollama_without_hf_token(monkeypatch):
+def test_explicit_ollama_backend_uses_ollama(monkeypatch):
     loaded_models = []
 
     def fake_ollama_loader(self, model_id):
         loaded_models.append(model_id)
         return MockLLM()
 
-    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
     monkeypatch.setenv("OLLAMA_MODEL", "nemotron-3-nano:4b")
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
-    qa = DocumentQA(device="cpu", llm_backend="ollama", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="ollama")
 
     qa._initialize_llm()
 
@@ -2123,12 +2086,12 @@ def test_explicit_ollama_backend_uses_ollama_without_hf_token(monkeypatch):
     assert qa.status().active_model_label == "Ollama (nemotron-3-nano:4b)"
 
 
-def test_explicit_ollama_backend_with_dummy_hf_token_does_not_mock(monkeypatch):
+def test_explicit_ollama_backend_does_not_mock(monkeypatch):
     def fake_ollama_loader(self, model_id):
         return MockLLM()
 
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
-    qa = DocumentQA(device="cpu", llm_backend="ollama", hf_token="dummy")
+    qa = DocumentQA(device="cpu", llm_backend="ollama")
 
     qa._initialize_llm()
 
@@ -2140,7 +2103,7 @@ def test_explicit_ollama_backend_failure_fails_closed(monkeypatch):
         raise ValueError("ollama down")
 
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", failing_ollama_loader)
-    qa = DocumentQA(device="cpu", llm_backend="ollama", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="ollama")
 
     with pytest.raises(RuntimeError, match="Unable to initialize ollama LLM"):
         qa._initialize_llm()
@@ -2186,7 +2149,7 @@ def test_explicit_openai_compatible_backend_uses_chat_completions(monkeypatch):
         "open_openai_compatible_request",
         fake_open_openai_compatible_request,
     )
-    qa = DocumentQA(device="cpu", llm_backend="openai-compatible", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     qa._initialize_llm()
     answer = qa.llm._call("Question?", stop=["END"])
@@ -2240,7 +2203,7 @@ def test_openai_compatible_does_not_use_generic_openai_api_key(monkeypatch):
         "open_openai_compatible_request",
         fake_open_openai_compatible_request,
     )
-    qa = DocumentQA(device="cpu", llm_backend="openai-compatible", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     qa._initialize_llm()
 
@@ -2271,7 +2234,7 @@ def test_openai_compatible_http_error_body_is_not_reflected(monkeypatch):
         "open_openai_compatible_request",
         fake_open_openai_compatible_request,
     )
-    qa = DocumentQA(device="cpu", llm_backend="openai-compatible", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     with pytest.raises(RuntimeError) as exc_info:
         qa._initialize_llm()
@@ -2302,7 +2265,7 @@ def test_openai_compatible_url_error_reason_is_not_reflected(monkeypatch):
         "open_openai_compatible_request",
         fake_open_openai_compatible_request,
     )
-    qa = DocumentQA(device="cpu", llm_backend="openai-compatible", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     with pytest.raises(RuntimeError) as exc_info:
         qa._initialize_llm()
@@ -2327,7 +2290,7 @@ def test_openai_compatible_backend_alias_is_supported(monkeypatch):
     monkeypatch.setattr(
         DocumentQA, "_load_openai_compatible_model", fake_openai_compatible_loader
     )
-    qa = DocumentQA(device="cpu", llm_backend="openai_compatible", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="openai_compatible")
 
     qa._initialize_llm()
 
@@ -2337,7 +2300,7 @@ def test_openai_compatible_backend_alias_is_supported(monkeypatch):
 
 def test_explicit_openai_compatible_without_base_url_fails_closed(monkeypatch):
     monkeypatch.delenv("OPENAI_COMPAT_BASE_URL", raising=False)
-    qa = DocumentQA(device="cpu", llm_backend="openai-compatible", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     with pytest.raises(RuntimeError, match="OPENAI_COMPAT_BASE_URL"):
         qa._initialize_llm()
@@ -2349,7 +2312,7 @@ def test_explicit_openai_compatible_without_base_url_fails_closed(monkeypatch):
 def test_explicit_openai_compatible_without_model_fails_closed(monkeypatch):
     monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
     monkeypatch.delenv("OPENAI_COMPAT_MODEL", raising=False)
-    qa = DocumentQA(device="cpu", llm_backend="openai-compatible", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     with pytest.raises(RuntimeError, match="OPENAI_COMPAT_MODEL"):
         qa._initialize_llm()
@@ -2445,7 +2408,7 @@ def test_openai_compatible_initialization_error_redacts_unsafe_url(
 ):
     monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", unsafe_base_url)
     monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
-    qa = DocumentQA(device="cpu", llm_backend="openai-compatible", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     with pytest.raises(RuntimeError) as exc_info:
         qa._initialize_llm()
@@ -2464,7 +2427,7 @@ def test_openai_compatible_invalid_port_error_drops_parser_cause(monkeypatch):
         "OPENAI_COMPAT_BASE_URL", "http://localhost:SECRET_PORT/v1"
     )
     monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
-    qa = DocumentQA(device="cpu", llm_backend="openai-compatible", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     with pytest.raises(RuntimeError) as exc_info:
         qa._initialize_llm()
@@ -2499,7 +2462,7 @@ def test_openai_compatible_rejects_remote_http_before_sending_api_key(
         "open_openai_compatible_request",
         fake_open_openai_compatible_request,
     )
-    qa = DocumentQA(device="cpu", llm_backend="openai-compatible", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     with pytest.raises(RuntimeError) as exc_info:
         qa._initialize_llm()
@@ -2573,45 +2536,19 @@ def test_openai_compatible_loopback_http_bypasses_proxy_urlopen(monkeypatch):
     ]
 
 
-def test_openai_compatible_ignores_dummy_hf_token(monkeypatch):
+def test_openai_compatible_initializes_with_explicit_backend(monkeypatch):
     def fake_openai_compatible_loader(self, model_id):
         return MockLLM()
 
     monkeypatch.setattr(
         DocumentQA, "_load_openai_compatible_model", fake_openai_compatible_loader
     )
-    qa = DocumentQA(device="cpu", llm_backend="openai-compatible", hf_token="dummy")
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     qa._initialize_llm()
 
     assert qa.active_llm_backend == "openai-compatible"
     assert isinstance(qa.llm, MockLLM)
-
-
-@pytest.mark.parametrize("backend", ["endpoint", "local"])
-def test_explicit_real_backend_with_dummy_token_fails_closed(backend):
-    qa = DocumentQA(device="cpu", llm_backend=backend, hf_token="dummy")
-
-    with pytest.raises(RuntimeError, match="Dummy HuggingFace token"):
-        qa._initialize_llm()
-
-    assert qa.active_llm_backend is None
-    assert qa.llm is None
-
-
-def test_local_backend_without_token_still_attempts_local_public_model(monkeypatch):
-    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
-
-    def fake_local_loader(self, model_id):
-        return MockLLM()
-
-    monkeypatch.setattr(DocumentQA, "_load_local_model", fake_local_loader)
-    qa = DocumentQA(device="cpu", llm_backend="local", hf_token=None)
-
-    qa._initialize_llm()
-
-    assert qa.active_llm_backend == "local"
-    assert qa.loaded_model_id == "Qwen/Qwen2.5-1.5B-Instruct"
 
 
 def test_ollama_llm_validates_model_and_generates(monkeypatch):

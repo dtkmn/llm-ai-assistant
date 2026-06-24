@@ -51,7 +51,7 @@ import json
 import os
 
 real_import = builtins.__import__
-native_modules = {"faiss", "numpy", "torch"}
+native_modules = {"faiss", "numpy"}
 
 def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):
     root_name = name.split(".", 1)[0]
@@ -81,5 +81,5 @@ raise SystemExit("src.DocumentQA did not import a tracked native module")
     )
     observed = json.loads(result.stdout)
 
-    assert observed.pop("module") in {"faiss", "numpy", "torch"}
+    assert observed.pop("module") in {"faiss", "numpy"}
     assert observed == EXPECTED_NATIVE_DEFAULTS

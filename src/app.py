@@ -60,9 +60,7 @@ TEXT_ENCODING_OPTIONS = {
 }
 
 # Initialize the document context loop system
-qa_system = DocumentQA(
-    allow_interactive_token=False, fast_mode=env_flag("FAST_MODE", False)
-)
+qa_system = DocumentQA(fast_mode=env_flag("FAST_MODE", False))
 
 
 def format_upload_status(uploaded_name: str, qa_status: DocumentQAStatus) -> str:
@@ -120,7 +118,7 @@ def format_runtime_status(qa_status: DocumentQAStatus) -> str:
         "backend": qa_status.active_backend,
         "model": qa_status.active_model_label,
         "profile": qa_status.profile_label,
-        "model_device": qa_status.device,
+        "app_device": qa_status.device,
         "embeddings_model": qa_status.embeddings_model,
         "embeddings_device": qa_status.embeddings_device,
         "ready_for_queries": qa_status.ready_for_queries,

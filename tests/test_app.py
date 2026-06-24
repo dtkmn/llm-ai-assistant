@@ -133,18 +133,6 @@ class FakeQA:
         self.cleared_loop_session_id = session_id
 
 
-class FakeEndpointQA(FakeQA):
-    loaded_model_id = "Qwen/Qwen2.5-1.5B-Instruct"
-    loaded_model_label = "Qwen/Qwen2.5-1.5B-Instruct"
-    active_llm_backend = "endpoint"
-    llm_backend = "endpoint"
-
-
-class FakeCustomEndpointQA(FakeEndpointQA):
-    loaded_model_id = None
-    loaded_model_label = "Custom endpoint (https://example.invalid)"
-
-
 class FakeOllamaQA(FakeQA):
     loaded_model_id = "nemotron-3-nano:4b"
     loaded_model_label = "Ollama (nemotron-3-nano:4b)"
@@ -197,7 +185,8 @@ def test_process_document_reports_mock_mode_without_success_claim(monkeypatch, t
     runtime = json.loads(runtime_status)
     assert runtime["active_document"] == "demo.txt"
     assert runtime["last_attempted_document"] == "demo.txt"
-    assert runtime["model_device"] == "cpu"
+    assert runtime["app_device"] == "cpu"
+    assert "model_device" not in runtime
     assert runtime["embeddings_model"] == "fake-embeddings"
     assert runtime["embeddings_device"] == "cpu"
     assert runtime["ready_for_queries"] is True
@@ -300,24 +289,6 @@ def test_process_document_passes_utf8_or_western_only_when_selected(
     assert fake_qa.text_encoding == "utf-8-or-western"
 
 
-def test_process_document_reports_endpoint_as_indexed_not_ready(monkeypatch, tmp_path):
-    document = tmp_path / "demo.txt"
-    document.write_text("demo", encoding="utf-8")
-    monkeypatch.setattr(app, "qa_system", FakeEndpointQA())
-
-    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
-
-    assert "indexed" in status
-    assert "processed successfully" not in status
-    assert "Inference will be validated on the first question" in status
-    runtime = json.loads(runtime_status)
-    assert runtime["backend"] == "endpoint"
-    assert runtime["model"] == "Qwen/Qwen2.5-1.5B-Instruct"
-    assert runtime["ready_for_queries"] is True
-    assert runtime["readiness_scope"] == "retrieval_pipeline"
-    assert runtime["inference_validated"] is False
-
-
 def test_process_document_reports_ollama_as_indexed_not_mock(monkeypatch, tmp_path):
     document = tmp_path / "demo.txt"
     document.write_text("demo", encoding="utf-8")
@@ -352,21 +323,6 @@ def test_process_document_reports_openai_compatible_as_indexed(
     assert runtime["model"] == "OpenAI-compatible (gpt-oss:20b)"
     assert runtime["ready_for_queries"] is True
     assert runtime["inference_validated"] is False
-
-
-def test_process_document_uses_custom_endpoint_label(monkeypatch, tmp_path):
-    document = tmp_path / "demo.txt"
-    document.write_text("demo", encoding="utf-8")
-    monkeypatch.setattr(app, "qa_system", FakeCustomEndpointQA())
-
-    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
-
-    assert "Custom endpoint (https://example.invalid)" in status
-    assert "Qwen" not in status
-    assert (
-        json.loads(runtime_status)["model"]
-        == "Custom endpoint (https://example.invalid)"
-    )
 
 
 def test_process_document_reports_failure_without_losing_active_status(
