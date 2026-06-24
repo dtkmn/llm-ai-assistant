@@ -9,6 +9,7 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 
 import src.DocumentQA as document_qa_module
+from src.ai_loop_engine import AILoopEngine, DocumentQA as PublicDocumentQA
 from src.DocumentQA import (
     DEFAULT_OLLAMA_EMBEDDINGS_MODEL,
     DEFAULT_OLLAMA_MODEL,
@@ -63,6 +64,14 @@ def clear_model_provider_env(monkeypatch):
         "OPENAI_COMPAT_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_ai_loop_engine_is_canonical_runtime_alias():
+    from src import AILoopEngine as RootAILoopEngine
+
+    assert RootAILoopEngine is AILoopEngine
+    assert DocumentQA is AILoopEngine
+    assert PublicDocumentQA is AILoopEngine
 
 
 def create_processed_mock_qa(tmp_path):

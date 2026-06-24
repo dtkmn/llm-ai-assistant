@@ -15,20 +15,20 @@ apply_native_runtime_defaults()
 import gradio as gr
 
 try:
-    from .DocumentQA import (
+    from .ai_loop_engine import (
+        AILoopEngine,
         MAX_DOCUMENT_CHUNKS,
         DocumentProcessingError,
         DocumentProcessingReport,
-        DocumentQA,
         DocumentQAStatus,
         QueryResult,
     )
 except ImportError:
-    from DocumentQA import (
+    from ai_loop_engine import (
+        AILoopEngine,
         MAX_DOCUMENT_CHUNKS,
         DocumentProcessingError,
         DocumentProcessingReport,
-        DocumentQA,
         DocumentQAStatus,
         QueryResult,
     )
@@ -59,8 +59,8 @@ TEXT_ENCODING_OPTIONS = {
     "Baltic (Windows-1257)": "cp1257",
 }
 
-# Initialize the document context loop system
-qa_system = DocumentQA(fast_mode=env_flag("FAST_MODE", False))
+# Initialize the AI loop runtime with the built-in document context provider.
+qa_system = AILoopEngine(fast_mode=env_flag("FAST_MODE", False))
 
 
 def format_upload_status(uploaded_name: str, qa_status: DocumentQAStatus) -> str:

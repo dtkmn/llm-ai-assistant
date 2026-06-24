@@ -61,7 +61,7 @@ first context provider, not the product boundary.
   `LoopSession`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
   `HumanReviewRequest` before adding planner, multi-agent, tool, replay, or
   framework-adapter behavior.
-- `DocumentQA.query_with_trace()` must expose a `LoopReport` that matches the
+- `AILoopEngine.query_with_trace()` must expose a `LoopReport` that matches the
   actual query path: prompt evidence, draft, mechanical check, verifier outcome,
   retry/refusal state, and final answer.
 - Completed query reports should be retained in bounded in-memory `LoopSession`
@@ -73,7 +73,7 @@ first context provider, not the product boundary.
   is not proven until the first inference call.
 - Upload replacement must be transactional. Failed uploads must not replace the
   previous successful document, vector store, retrieval chain, or query behavior.
-- UI upload/runtime status must come from `DocumentQA.status()` and the latest
+- UI upload/runtime status must come from `AILoopEngine.status()` and the latest
   `DocumentProcessingReport`, not ad hoc reads of internal attributes.
 - Answer traces and citations must come from the same retrieved chunks used in
   the prompt. Keep `query()` string-compatible and expose richer evidence
@@ -116,6 +116,7 @@ first context provider, not the product boundary.
 
 ## Files To Inspect First
 
+- `src/ai_loop_engine.py`
 - `src/DocumentQA.py`
 - `src/loop_engine.py`
 - `src/app.py`

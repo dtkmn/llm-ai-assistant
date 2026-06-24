@@ -11,9 +11,13 @@ document-grounded agent loop.
 
 Primary runtime files:
 
-- `src/DocumentQA.py`: ingestion, encoding detection, embeddings, vector search,
-  document context provider wrapper, LLM backend selection, retrieval chain,
-  Ollama adapter, and query handling.
+- `src/ai_loop_engine.py`: canonical public runtime API. New code should import
+  `AILoopEngine` from this module.
+- `src/DocumentQA.py`: legacy implementation module during the refactor. It
+  still owns ingestion, encoding detection, embeddings, vector search, document
+  context provider wrapper, LLM backend selection, retrieval chain, Ollama
+  adapter, and query handling while exposing `DocumentQA` as a compatibility
+  alias.
 - `src/loop_engine.py`: provider-neutral loop primitives for typed run, step,
   policy, verifier, human-review, session, and report records.
 - `src/loop_eval.py`: unified provider-free and optional live Ollama loop eval
@@ -37,7 +41,7 @@ Primary runtime files:
 - Pip fallback: `python -m pip install -r requirements-dev.txt`
 - Run the app locally: `uv run ai-loop-engine` or `python -m src.app`
 - Run tests: `uv run pytest` or `python -m pytest`
-- Compile check: `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
+- Compile check: `python -m py_compile src/__init__.py src/app.py src/ai_loop_engine.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
 - Dependency checks: `python -m pip check` and `python -m pip_audit -r requirements.txt --strict`
 
 ## Non-Negotiable Contracts
@@ -53,8 +57,8 @@ Primary runtime files:
 - Document upload replacement must be transactional. Failed uploads must preserve
   the previous successful document, vector store, retrieval chain, and query
   behavior while recording the failed attempt in the processing report.
-- `DocumentQA.status()` and its processing report are the source of truth for UI
-  status. UI code and tests should not inspect random internal attributes.
+- `AILoopEngine.status()` and its processing report are the source of truth for
+  UI status. UI code and tests should not inspect random internal attributes.
 - Answer traces and citations must come from the retrieved chunks used to build
   the LLM prompt. Do not bolt on citations from a separate post-answer lookup.
 - Answer self-checking must remain document-only. Cheap mechanical checks and
@@ -110,7 +114,7 @@ Primary runtime files:
   `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
   `HumanReviewRequest` before adding planner, multi-agent, tool, replay, or
   framework-adapter behavior.
-- `DocumentQA.query_with_trace()` must expose a `LoopReport` that matches the
+- `AILoopEngine.query_with_trace()` must expose a `LoopReport` that matches the
   actual query path: prompt evidence, draft, mechanical check, verifier outcome,
   retry/refusal state, and final answer.
 - Completed query loop reports must be retained in bounded in-memory
@@ -155,11 +159,11 @@ Use this loop for every non-trivial change:
   internal attributes.
 - Treat failed replacement uploads as hostile state-integrity cases. Assert the
   old document is still active and queryable after every failed upload path.
-- Preserve `DocumentQA.query()` as the simple string API; add richer answer
+- Preserve `AILoopEngine.query()` as the simple string API; add richer answer
   evidence through structured result objects such as `query_with_trace()`.
 - Keep replay/export behavior local and explicit. Do not add SQLite, server
   persistence, or background replay jobs until tests prove the product need.
-- Keep `DocumentQA` honest before making it clever. Reliability beats agentic
+- Keep `AILoopEngine` honest before making it clever. Reliability beats agentic
   theater.
 - Do not add OpenAI Agents SDK, LangGraph, or Microsoft Agent Framework as a core
   dependency until provider-neutral loop reports are real and test-covered.
@@ -190,7 +194,7 @@ For Python behavior changes:
 - `uv run pytest tests/test_langgraph_manifest_adapter.py -q`
 - `uv run pytest tests/test_loop_export.py -q`
 - `uv lock --check`
-- `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
+- `python -m py_compile src/__init__.py src/app.py src/ai_loop_engine.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:

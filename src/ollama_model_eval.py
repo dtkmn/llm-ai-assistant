@@ -12,14 +12,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
-from src.DocumentQA import (
+from src.ai_loop_engine import (
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
     LLM_MODEL_ENV_VAR,
     OLLAMA_BASE_URL_ENV_VAR,
     OLLAMA_MODEL_ENV_VAR,
     SELF_CHECK_REFUSAL_ANSWER,
-    DocumentQA,
+    AILoopEngine,
     QueryResult,
 )
 from src.golden_eval import (
@@ -53,7 +53,7 @@ class ModelEvalResult:
     initialization_error: Optional[str] = None
 
 
-QaFactory = Callable[[str, str, int], DocumentQA]
+QaFactory = Callable[[str, str, int], AILoopEngine]
 NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -92,8 +92,8 @@ def normalize_local_ollama_base_url(base_url: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, netloc, "", "", ""))
 
 
-def build_ollama_qa(model: str, base_url: str, timeout: int) -> DocumentQA:
-    qa = DocumentQA(fast_mode=True, llm_backend="ollama")
+def build_ollama_qa(model: str, base_url: str, timeout: int) -> AILoopEngine:
+    qa = AILoopEngine(fast_mode=True, llm_backend="ollama")
     qa.ollama_model = model
     qa.ollama_base_url = normalize_local_ollama_base_url(base_url)
     qa.ollama_timeout = timeout

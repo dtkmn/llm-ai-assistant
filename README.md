@@ -178,7 +178,7 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   document vector store and retrieval chain so later providers can plug into the
   loop without changing the product identity again
 - **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopSession`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
-- **Runtime reports:** `DocumentQA.query_with_trace()` returns a `QueryResult` with both the legacy answer trace and a first-class `LoopReport`
+- **Runtime reports:** `AILoopEngine.query_with_trace()` returns a `QueryResult` with both the legacy answer trace and a first-class `LoopReport`
 - **Session state:** completed loop reports are retained in bounded in-memory
   `LoopSession` objects keyed by `session_id`
 - **Replay artifacts:** local JSONL export writes one raw `LoopReport` per line,
@@ -323,7 +323,7 @@ verifier payloads, and final answers.
 
 ### Local Replay Artifacts
 
-`DocumentQA` keeps recent loop reports in memory per `session_id`. Export a
+`AILoopEngine` keeps recent loop reports in memory per `session_id`. Export a
 session locally when you need a replay/debug artifact:
 
 ```python

@@ -11,14 +11,14 @@ from typing import Callable, Dict, List, Optional, Sequence
 from langchain_core.language_models.llms import LLM
 from pydantic import Field
 
-from src.DocumentQA import (
+from src.ai_loop_engine import (
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
     LLM_MODEL_ENV_VAR,
     OLLAMA_BASE_URL_ENV_VAR,
     OLLAMA_MODEL_ENV_VAR,
     SELF_CHECK_REFUSAL_ANSWER,
-    DocumentQA,
+    AILoopEngine,
     QueryResult,
 )
 from src.golden_eval import (
@@ -66,7 +66,7 @@ class LoopEvalRunResult:
     initialization_error: Optional[str] = None
 
 
-QaFactory = Callable[[str, str, int], DocumentQA]
+QaFactory = Callable[[str, str, int], AILoopEngine]
 
 
 class ProviderFreeGoldenLLM(LLM):
@@ -116,9 +116,9 @@ class ProviderFreeGoldenLLM(LLM):
         )
 
 
-def build_provider_free_qa(model: str, base_url: str, timeout: int) -> DocumentQA:
-    qa = DocumentQA(fast_mode=True, llm_backend="ollama")
-    # The fake eval injects its verifier before any query, so DocumentQA never
+def build_provider_free_qa(model: str, base_url: str, timeout: int) -> AILoopEngine:
+    qa = AILoopEngine(fast_mode=True, llm_backend="ollama")
+    # The fake eval injects its verifier before any query, so AILoopEngine never
     # initializes a live Ollama client. Keep the active label honest in artifacts.
     qa.llm = ProviderFreeGoldenLLM()
     qa.active_llm_backend = "provider-free"

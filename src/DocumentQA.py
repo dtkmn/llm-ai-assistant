@@ -1450,7 +1450,7 @@ class OpenAICompatibleEmbeddings(Embeddings):
         )
 
 
-class DocumentQA:
+class AILoopEngine:
     def __init__(
         self,
         model_id: Optional[str] = None,
@@ -4037,3 +4037,8 @@ class DocumentQA:
     def query(self, prompt: str, session_id: str = "default") -> str:
         """Answer a user query using retrieved document context."""
         return self.query_with_trace(prompt, session_id=session_id).answer
+
+
+# Backward-compatible public name. New code should import AILoopEngine from
+# src.ai_loop_engine, but existing callers and tests may still use DocumentQA.
+DocumentQA = AILoopEngine
