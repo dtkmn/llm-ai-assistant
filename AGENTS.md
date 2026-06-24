@@ -19,8 +19,11 @@ Primary runtime files:
 - `src/loop_eval.py`: unified provider-free and optional live Ollama loop eval
   CLI with JSON artifacts containing scored `LoopReport` evidence.
 - `src/adapters/`: dependency-free framework-shaped exports from loop reports.
-  The current adapter is OpenAI trace-shaped JSON and must not import the
-  OpenAI Agents SDK or send data over the network.
+  Current adapters are OpenAI trace-shaped JSON and LangGraph
+  thread/checkpoint manifest JSON. They must not import framework SDKs or send
+  data over the network.
+- `src/loop_export.py`: local JSONL-to-adapter export CLI for OpenAI trace and
+  LangGraph manifest artifacts.
 - `src/app.py`: Gradio UI wiring and user-facing status messages.
 - `docs/framework-adapter-strategy.md`: dependency-free adapter strategy for
   OpenAI trace-shaped export, LangGraph manifest export, and Microsoft workflow
@@ -102,6 +105,8 @@ Primary runtime files:
 - Adapter public export is a safety boundary. Raw loop reports require explicit
   opt-in, and public adapter exports must fail closed/redact terminal
   guardrail-like decisions instead of leaking blocked draft content.
+- `src.loop_export` must default to public/redacted output. Raw export is a
+  local diagnostics path and must require an explicit `--raw` flag.
 - `pyproject.toml` is the project metadata and local-development dependency
   contract. Keep `requirements.txt` and `requirements-dev.txt` as pip-compatible
   exports for deployment compatibility, and keep them synchronized with
@@ -161,8 +166,10 @@ For Python behavior changes:
 - `uv run pytest tests/test_golden_document_eval.py -q`
 - `uv run pytest tests/test_loop_eval.py -q`
 - `uv run pytest tests/test_openai_trace_adapter.py -q`
+- `uv run pytest tests/test_langgraph_manifest_adapter.py -q`
+- `uv run pytest tests/test_loop_export.py -q`
 - `uv lock --check`
-- `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
+- `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:

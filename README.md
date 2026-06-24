@@ -170,7 +170,10 @@ The application is containerized for easy deployment.
 - **Public trace surface:** the Gradio UI shows a compact loop summary plus a
   redacted public loop report; raw reports remain internal diagnostics
 - **Middleware boundary:** loop middleware can observe runs/steps, block unsafe progress, request retry/refusal, or mark a human-review pending state without introducing autonomous tool use
-- **Framework posture:** OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter targets, not core dependencies. The adapter strategy lives in [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md).
+- **Framework posture:** OpenAI Agents SDK and LangGraph are dependency-free
+  export targets today; Microsoft Agent Framework remains a future export
+  target. The adapter strategy lives in
+  [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md).
 
 ### Model
 - **LLM backend:** Configurable via `LLM_BACKEND`
@@ -243,27 +246,50 @@ Frameworks are interop surfaces, not the engine. The current plan is to export
 AI Loop Engine reports into framework-shaped artifacts before adding any live
 framework runtime integration:
 
-- OpenAI Agents SDK: trace-shaped export first, dependency-free in
+- OpenAI Agents SDK: trace-shaped export, dependency-free in
   `src.adapters.openai_trace`
-- LangGraph: thread/checkpoint manifest export first
-- Microsoft Agent Framework: workflow event-stream export first
+- LangGraph: thread/checkpoint manifest export, dependency-free in
+  `src.adapters.langgraph_manifest`
+- Microsoft Agent Framework: workflow event-stream export first, not yet
+  implemented
 
 See [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md)
 for mappings, non-goals, and the dependency boundary.
 
-Export a report or session locally when you need OpenAI-trace-shaped JSON for
+Export a report or session locally when you need framework-shaped JSON for
 inspection or downstream tooling:
 
 ```python
 from src.adapters.openai_trace import export_report, export_session
+from src.adapters.langgraph_manifest import export_session as export_langgraph_session
 
 trace_payload = export_report(query_result.loop_report)
 session_payload = export_session(qa_system.loop_session("default"))
+langgraph_payload = export_langgraph_session(qa_system.loop_session("default"))
 ```
 
 These helpers do not import the OpenAI Agents SDK, call OpenAI APIs, or mutate
-the original loop reports. Public/redacted export is the default; use
-`public=False` only for local diagnostics you are willing to treat as sensitive.
+the original loop reports. They also do not import or execute LangGraph.
+Public/redacted export is the default; use `public=False` only for local
+diagnostics you are willing to treat as sensitive.
+
+Use the local export CLI when starting from a JSONL replay artifact:
+
+```bash
+uv run python -m src.loop_export \
+  --adapter openai-trace \
+  --input artifacts/loop-session-default.jsonl \
+  --output artifacts/openai-trace.json
+
+uv run python -m src.loop_export \
+  --adapter langgraph-manifest \
+  --input artifacts/loop-session-default.jsonl \
+  --output artifacts/langgraph-manifest.json
+```
+
+The CLI defaults to public/redacted output. `--raw` is intentionally explicit
+because raw loop reports can contain prompts, retrieved excerpts, drafts,
+verifier payloads, and final answers.
 
 ### Local Replay Artifacts
 

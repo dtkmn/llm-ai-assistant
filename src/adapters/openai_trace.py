@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional
 
-from src.loop_engine import (
-    PUBLIC_REDACTION_TEXT,
-    TERMINAL_GUARDRAIL_DECISION_VALUES,
-    LoopReport,
-    LoopSession,
+from src.adapters.redaction import (
+    report_payload,
+    require_public_bool,
+    run_with_session_fallback,
 )
+from src.loop_engine import LoopReport, LoopSession
 
 
 ADAPTER_NAME = "openai_trace"
@@ -21,28 +21,37 @@ class OpenAITraceAdapter:
     adapter_name = ADAPTER_NAME
     adapter_schema_version = ADAPTER_SCHEMA_VERSION
 
-    def export_report(self, report: LoopReport, *, public: bool = True) -> Dict[str, Any]:
-        _require_public_bool(public)
-        report_payload = (
-            _public_report_payload(report) if public else report.to_dict()
-        )
-        run = report_payload["run"]
+    def export_report(
+        self,
+        report: LoopReport,
+        *,
+        public: bool = True,
+        session_id: Optional[str] = None,
+        source_jsonl_line: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        payload = report_payload(report, public=public)
+        run = run_with_session_fallback(payload["run"], session_id)
         trace_id = _trace_id(run["run_id"])
         return {
             "adapter_name": self.adapter_name,
             "adapter_schema_version": self.adapter_schema_version,
-            "source_schema_version": report_payload["schema_version"],
+            "source_schema_version": payload["schema_version"],
             "public": public,
             "trace": _trace_from_run(run, trace_id=trace_id, public=public),
-            "source_report": report_payload,
+            "source_report": payload,
         }
 
     def export_session(
         self, session: LoopSession, *, public: bool = True
     ) -> Dict[str, Any]:
-        _require_public_bool(public)
+        require_public_bool(public)
         report_exports = [
-            self.export_report(report, public=public) for report in session.reports
+            self.export_report(
+                report,
+                public=public,
+                session_id=session.session_id,
+            )
+            for report in session.reports
         ]
         return {
             "adapter_name": self.adapter_name,
@@ -55,93 +64,23 @@ class OpenAITraceAdapter:
         }
 
 
-def export_report(report: LoopReport, *, public: bool = True) -> Dict[str, Any]:
-    return OpenAITraceAdapter().export_report(report, public=public)
+def export_report(
+    report: LoopReport,
+    *,
+    public: bool = True,
+    session_id: Optional[str] = None,
+    source_jsonl_line: Optional[int] = None,
+) -> Dict[str, Any]:
+    return OpenAITraceAdapter().export_report(
+        report,
+        public=public,
+        session_id=session_id,
+        source_jsonl_line=source_jsonl_line,
+    )
 
 
 def export_session(session: LoopSession, *, public: bool = True) -> Dict[str, Any]:
     return OpenAITraceAdapter().export_session(session, public=public)
-
-
-def _require_public_bool(public: bool) -> None:
-    if type(public) is not bool:
-        raise ValueError("public must be a boolean")
-
-
-def _public_report_payload(report: LoopReport) -> Dict[str, Any]:
-    payload = report.to_public_dict()
-    if _is_terminal_guardrail_payload(payload):
-        return _redact_terminal_payload(payload)
-    return payload
-
-
-def _is_terminal_guardrail_payload(payload: Mapping[str, Any]) -> bool:
-    final_decision = payload.get("run", {}).get("final_decision")
-    return final_decision in TERMINAL_GUARDRAIL_DECISION_VALUES
-
-
-def _redact_terminal_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    redacted = {
-        "schema_version": payload["schema_version"],
-        "run": dict(payload["run"]),
-        "public_redaction": {
-            "applied": True,
-            "reason": "terminal_guardrail_decision",
-        },
-    }
-    run = redacted["run"]
-    run["user_input"] = PUBLIC_REDACTION_TEXT
-    run["final_answer"] = PUBLIC_REDACTION_TEXT
-    run["error_message"] = "terminal_guardrail_decision"
-    run["metadata"] = {
-        "redacted": True,
-        "redaction_reason": "terminal_guardrail_decision",
-    }
-    if run.get("policy"):
-        policy = dict(run["policy"])
-        policy["metadata"] = {
-            "redacted": True,
-            "redaction_reason": "terminal_guardrail_decision",
-        }
-        run["policy"] = policy
-    run["steps"] = [_redact_terminal_step(step) for step in run.get("steps", ())]
-    return redacted
-
-
-def _redact_terminal_step(step: Mapping[str, Any]) -> Dict[str, Any]:
-    redacted = dict(step)
-    redacted["input_summary"] = (
-        PUBLIC_REDACTION_TEXT
-        if redacted.get("input_summary") is not None
-        else None
-    )
-    redacted["output_summary"] = (
-        PUBLIC_REDACTION_TEXT
-        if redacted.get("output_summary") is not None
-        else None
-    )
-    redacted["error_message"] = (
-        "terminal_guardrail_decision"
-        if redacted.get("error_message") is not None
-        else None
-    )
-    redacted["metadata"] = {
-        "redacted": True,
-        "redaction_reason": "terminal_guardrail_decision",
-    }
-    if redacted.get("verification") is not None:
-        verification = dict(redacted["verification"])
-        verification["reasons"] = [PUBLIC_REDACTION_TEXT]
-        verification["verifier"] = None
-        verification["raw_response"] = None
-        verification["metadata"] = {
-            "redacted": True,
-            "redaction_reason": "terminal_guardrail_decision",
-        }
-        redacted["verification"] = verification
-    if redacted.get("human_review") is not None:
-        redacted["human_review"] = None
-    return redacted
 
 
 def _trace_from_run(

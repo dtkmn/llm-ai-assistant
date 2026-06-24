@@ -82,6 +82,9 @@ first context provider, not the product boundary.
   Export framework-shaped artifacts first; do not let any framework runtime own
   loop execution until the internal loop report contract remains stable under
   tests.
+- OpenAI trace-shaped export, LangGraph manifest export, and `src.loop_export`
+  must remain dependency-free. Public/redacted export is the default; raw
+  diagnostics require explicit opt-in.
 - Do not add autonomous tool use or multi-agent behavior until middleware,
   guardrail, telemetry, and human-review boundaries exist in the loop contract.
 - Text encoding default is `Auto`. Ambiguous non-UTF legacy files must not be
@@ -102,6 +105,7 @@ first context provider, not the product boundary.
 - `src/loop_eval.py`
 - `src/ollama_model_eval.py`
 - `src/adapters/`
+- `src/loop_export.py`
 - `docs/framework-adapter-strategy.md`
 - `pyproject.toml`
 - `requirements.txt`
@@ -145,6 +149,10 @@ For answer-loop or agent-pattern changes:
 - `python -m pytest tests/test_loop_eval.py -q`
 - `python -m pytest tests/test_ollama_model_eval.py -q`
 - `python -m pytest tests/test_openai_trace_adapter.py -q` when adapter export
+  behavior changes.
+- `python -m pytest tests/test_langgraph_manifest_adapter.py -q` when LangGraph
+  manifest behavior changes.
+- `python -m pytest tests/test_loop_export.py -q` when JSONL adapter export CLI
   behavior changes.
 - Assert cited supported answers, unsupported-answer refusal, and retry behavior.
 - Keep eval fixtures deterministic and provider-free.
