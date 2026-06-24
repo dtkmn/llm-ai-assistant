@@ -42,10 +42,11 @@ Primary runtime files:
 
 ## Non-Negotiable Contracts
 
-- Do not silently fall back from explicit real LLM backends. `LLM_BACKEND=endpoint`,
-  `LLM_BACKEND=local`, and `LLM_BACKEND=ollama` must fail closed when credentials,
-  model loading, server reachability, or model availability are invalid. Mock mode
-  must be explicit or an `auto` demo fallback.
+- Do not silently fall back from explicit real LLM backends.
+  `LLM_BACKEND=ollama`, `LLM_BACKEND=openai-compatible`,
+  `LLM_BACKEND=endpoint`, and `LLM_BACKEND=local` must fail closed when
+  credentials, model loading, server reachability, or model availability are
+  invalid. Mock mode must be explicit or an `auto` demo fallback.
 - Do not let UI status imply inference readiness before inference has actually
   happened. Document upload means indexed, not proven ready.
 - Document upload replacement must be transactional. Failed uploads must preserve
@@ -76,21 +77,24 @@ Primary runtime files:
   runs may validate builds, but must not publish release images.
 - Preserve deterministic generation for context-grounded answers unless a
   test-backed product reason requires changing it.
-- Ollama support is explicit, not part of `auto`. Use `OLLAMA_MODEL`,
-  `OLLAMA_BASE_URL`, and `OLLAMA_TIMEOUT`; do not route Ollama through
-  Hugging Face model ids or tokens.
+- `LLM_BACKEND=auto` is local-first and demo-safe: try Ollama, then fall back
+  to `MockLLM` if Ollama is unavailable. Explicit `LLM_BACKEND=ollama` remains
+  fail-closed.
+- Cloud or gateway deployment should use `LLM_BACKEND=openai-compatible` with
+  `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, optional
+  `OPENAI_COMPAT_API_KEY`, and `OPENAI_COMPAT_TIMEOUT`. Plain HTTP is allowed
+  only for loopback local development; remote gateways must use HTTPS.
 - Native runtime defaults must be installed before Gradio, NumPy, FAISS, torch,
   or other native-heavy imports in app entrypoints. Use `src.native_runtime`
   instead of duplicating env setup in modules that may be imported too late.
 - Embedding runtime is separate from LLM runtime. On Apple Silicon/MPS,
   embeddings default to CPU for upload stability; `EMBEDDINGS_DEVICE=mps` is an
   explicit opt-in, not the default happy path.
-- `LLM_BACKEND=auto` must not silently select in-process Hugging Face local
-  models on Apple MPS. Use Ollama for the recommended local Mac path; keep
-  `LLM_BACKEND=local` explicit for users who knowingly accept that risk.
-- Product direction is local-first. Keep Hugging Face support as an optional
-  hosted/deployment path, but do not make new happy-path features require a
-  Hugging Face token when they can run through Ollama.
+- `LLM_BACKEND=auto` must not silently select Hugging Face endpoint or
+  in-process Hugging Face local models on any device.
+- Product direction is local-first. Keep Hugging Face LLM support as legacy
+  explicit-only while existing deployments need it, but do not make new
+  happy-path or deployment features require a Hugging Face token.
 - Product identity is AI Loop Engine. Document answering is now a
   document context provider capability, not the repo's strategic identity.
 - Typed loop records are the contract surface for future agent work. Add or

@@ -70,6 +70,10 @@ def clear_provider_env(monkeypatch):
         "LLM_MODEL_ID",
         "OLLAMA_MODEL",
         "OLLAMA_BASE_URL",
+        "OPENAI_COMPAT_BASE_URL",
+        "OPENAI_COMPAT_MODEL",
+        "OPENAI_COMPAT_API_KEY",
+        "OPENAI_COMPAT_TIMEOUT",
     ):
         monkeypatch.delenv(env_var, raising=False)
 

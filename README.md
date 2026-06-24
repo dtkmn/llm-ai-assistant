@@ -15,16 +15,14 @@ refusals, middleware guardrails, and evals. The current built-in capability is
 document context: upload PDF, DOCX, TXT, or MD files, index them with FAISS, and
 talk to an agent whose loop is visible and testable.
 
-Current Hugging Face Space deployment:
-https://huggingface.co/spaces/0xdant/llm-ai-assistant
-
 ## Features
 - **Loop Engineering Core:** Treats retrieval, drafting, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
 - **Document Context Provider:** Supports PDF, DOCX, and text documents with safe decoding, chunking, and transactional replacement
-- **Local-first LLM Backend:** Recommended local path is Ollama; Hugging Face endpoint/local backends remain available for hosted deployments, gated models, and Hugging Face Spaces
+- **Local-first LLM Backend:** Recommended local path is Ollama; cloud or
+  gateway deployment uses a generic OpenAI-compatible chat-completions backend
 - **Vector Search:** Uses FAISS for efficient similarity search with Hugging
-  Face embeddings; embeddings run on CPU by default on Apple Silicon for upload
-  stability
+  local sentence-transformer embeddings; embeddings run on CPU by default on
+  Apple Silicon for upload stability
 - **Gradio Interface:** Web interface for document context upload, agent chat, runtime status, compact loop summaries, and answer traces
 - **GPU/MPS Support:** Automatically utilizes CUDA, Apple Silicon (MPS), or CPU
   for supported local generation paths. Document embeddings use a separate
@@ -39,7 +37,10 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 - Python 3.11 or 3.12; Python 3.12 is what CI and Docker use
 - `uv` for the recommended local workflow ([install guide](https://docs.astral.sh/uv/getting-started/installation/))
 - Ollama installed for the recommended local-first setup
-- HuggingFace account and API token for hosted endpoint inference or gated models ([get one here](https://huggingface.co/settings/tokens)); not required for `LLM_BACKEND=ollama`
+- Optional: an OpenAI-compatible model gateway for cloud or remote deployment
+  (`/v1/chat/completions` shape)
+- Optional legacy path: Hugging Face account/API token only if you deliberately
+  use `LLM_BACKEND=endpoint` or `LLM_BACKEND=local` with gated HF models
 - At least 8GB RAM if forcing local model execution on CPU; GPU/MPS is strongly preferred for local models
 
 ### Local Setup
@@ -91,36 +92,53 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 
     Supported values:
     - `ollama` uses a local Ollama server. This is the recommended local path.
-    - `auto` uses hosted Hugging Face inference on CPU/MPS and local weights on CUDA.
-    - `endpoint` always uses hosted Hugging Face inference.
-    - `local` always downloads and runs Hugging Face model weights in-process.
+    - `auto` tries Ollama and falls back to mock/demo mode if Ollama is not
+      available. It does not route to Hugging Face.
+    - `openai-compatible` uses any server that implements OpenAI-style
+      `/v1/chat/completions`.
+    - `endpoint` is the legacy hosted Hugging Face inference backend.
+    - `local` is the legacy in-process Transformers backend.
     - `mock` disables real inference for demos/tests.
 
-5. (Optional) set up Hugging Face for hosted endpoint inference, CPU `auto`, or gated Hugging Face `local` models:
+5. (Optional) set up a cloud or local OpenAI-compatible endpoint:
+
+    ```bash
+    export LLM_BACKEND=openai-compatible
+    export OPENAI_COMPAT_BASE_URL=http://localhost:8000/v1
+    export OPENAI_COMPAT_MODEL=gpt-oss:20b
+    export OPENAI_COMPAT_API_KEY=optional_token_here
+    ```
+
+    `OPENAI_COMPAT_API_KEY` is optional for local gateways such as vLLM,
+    llama.cpp server, LM Studio, or a private proxy. Set it for hosted services
+    that require bearer auth. Plain `http://` is accepted only for loopback
+    local development; non-loopback endpoints must use `https://`.
+
+6. (Optional legacy) set up Hugging Face endpoint/local model support:
 
     ```bash
     export HUGGINGFACEHUB_API_TOKEN=your_token_here
     ```
 
-6. (Optional) choose a different Hugging Face local model:
+7. (Optional legacy) choose a different Hugging Face local model:
 
     ```bash
     export LLM_MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct
     ```
 
-7. (Optional) switch back to quality mode:
+8. (Optional) switch back to quality mode:
 
     ```bash
     export FAST_MODE=false
     ```
 
-8. (Optional) enable debug logs:
+9. (Optional) enable debug logs:
 
     ```bash
     export APP_DEBUG=false
     ```
 
-9. Run the application:
+10. Run the application:
 
     ```bash
     uv run ai-loop-engine
@@ -146,11 +164,24 @@ The application is containerized for easy deployment.
 
    ```bash
    docker run -p 7860:7860 \
-     -e HUGGINGFACEHUB_API_TOKEN=your_token_here \
+     -e LLM_BACKEND=mock \
      ai-loop-engine
    ```
 
-**Note:** With `LLM_BACKEND=auto`, CPU deployments use hosted Hugging Face inference and avoid downloading LLM weights. The `local` backend downloads Hugging Face model weights in-process. The `ollama` backend expects an already-running Ollama server and a pulled model.
+For a deployed model gateway:
+
+   ```bash
+   docker run -p 7860:7860 \
+     -e LLM_BACKEND=openai-compatible \
+     -e OPENAI_COMPAT_BASE_URL=https://your-gateway.example/v1 \
+     -e OPENAI_COMPAT_MODEL=your-model \
+     -e OPENAI_COMPAT_API_KEY=optional_token_here \
+     ai-loop-engine
+   ```
+
+**Note:** `LLM_BACKEND=auto` is local-first and demo-safe: it tries Ollama, then
+falls back to mock mode if Ollama is not reachable. Use explicit `ollama` or
+`openai-compatible` when you want a real backend to fail closed.
 
 
 ## Usage
@@ -187,15 +218,21 @@ The application is containerized for easy deployment.
 ### Model
 - **LLM backend:** Configurable via `LLM_BACKEND`
   - `ollama`: local Ollama server via `OLLAMA_BASE_URL`; recommended for local use
-  - `auto` (default): hosted endpoint on CPU/MPS, local model on CUDA
-  - `endpoint`: hosted Hugging Face inference
-  - `local`: in-process Transformers pipeline
+  - `auto` (default): local-first demo path; tries Ollama, then mock fallback
+  - `openai-compatible`: OpenAI-style `/v1/chat/completions` endpoint for cloud,
+    private gateway, vLLM, llama.cpp server, LM Studio, or similar runtimes
+  - `endpoint`: legacy hosted Hugging Face inference
+  - `local`: legacy in-process Transformers pipeline
   - `mock`: deterministic demo/test fallback
-- **LLM model:** Configurable via `LLM_MODEL_ID`
+- **Ollama:** optionally configurable with `OLLAMA_MODEL` (default `nemotron-3-nano:4b`), `OLLAMA_BASE_URL` (default `http://localhost:11434`), and `OLLAMA_TIMEOUT`
+- **OpenAI-compatible endpoint:** requires `OPENAI_COMPAT_BASE_URL` and
+  `OPENAI_COMPAT_MODEL`; optionally set `OPENAI_COMPAT_API_KEY` and
+  `OPENAI_COMPAT_TIMEOUT`
+- **Legacy Hugging Face model:** configurable via `LLM_MODEL_ID`
   - **Quality mode (default):** tries `Qwen/Qwen2.5-1.5B-Instruct`, then `Qwen/Qwen2.5-7B-Instruct`, then `meta-llama/Llama-3.2-3B-Instruct`
   - **Fast mode (`FAST_MODE=true`):** tries `Qwen/Qwen2.5-1.5B-Instruct` first, then `meta-llama/Llama-3.2-3B-Instruct`
-- **Hosted endpoint:** optionally configurable with `HF_ENDPOINT_URL` and `HF_ENDPOINT_TIMEOUT`
-- **Ollama:** optionally configurable with `OLLAMA_MODEL` (default `nemotron-3-nano:4b`), `OLLAMA_BASE_URL` (default `http://localhost:11434`), and `OLLAMA_TIMEOUT`
+- **Legacy Hugging Face endpoint:** optionally configurable with
+  `HF_ENDPOINT_URL`, `HF_ENDPOINT_TIMEOUT`, and `HUGGINGFACEHUB_API_TOKEN`
 - **Embeddings:**
   - **Quality mode:** `Alibaba-NLP/gte-modernbert-base`
   - **Fast mode:** `sentence-transformers/all-MiniLM-L6-v2`
@@ -224,15 +261,16 @@ The application is containerized for easy deployment.
 - The product direction is **download and run locally first**. Ollama is the
   recommended path for Mac and workstation use because it keeps model setup
   outside the Python dependency graph and avoids requiring cloud credentials.
-- Hugging Face support should stay, but as an optional provider path: it is still
-  useful for Hugging Face Spaces, hosted endpoint deployments, gated model
-  experiments, and environments where a local model server is not practical.
+- Cloud/deployed inference should go through the generic OpenAI-compatible
+  backend, not a provider-specific happy path.
+- Hugging Face LLM support is now legacy explicit-only. Keep it available while
+  existing deployments need it, but do not build new product behavior that
+  requires Hugging Face tokens.
 - New AI Loop Engine features should not require Hugging Face tokens for the
   happy path. If a feature works locally, document the Ollama path first and the
-  hosted path second.
-- On Apple Silicon, avoid in-process Hugging Face local weights for the default
-  path. Use Ollama for local generation and CPU embeddings for document upload
-  stability.
+  OpenAI-compatible deployment path second.
+- On Apple Silicon, avoid in-process Hugging Face local weights. Use Ollama for
+  local generation and CPU embeddings for document upload stability.
 
 ## Loop Engineering Pattern
 This repo is intentionally built around three loops:
@@ -400,7 +438,9 @@ ollama stop qwen3:8b
   for Docker, Hugging Face Spaces, and conservative CI paths. Tests assert they
   stay synchronized with `pyproject.toml`.
 - Dependabot is enabled weekly (`.github/dependabot.yml`) for dependency updates.
-- Current baseline includes Gradio `6.15.2`, LangChain `1.3.10`, LangChain-HuggingFace `1.2.1`, HuggingFace Hub `1.5.0`, Transformers `5.4.0`, and Torch `2.12.1`.
+- Current baseline includes Gradio `6.15.2`, LangChain `1.3.10`,
+  LangChain-HuggingFace `1.2.1` for embeddings/legacy HF paths,
+  HuggingFace Hub `1.5.0`, Transformers `5.4.0`, and Torch `2.12.1`.
 - Note: `marshmallow` is intentionally pinned to `3.26.2` because `dataclasses-json` currently requires `<4.0.0`.
 - Security-sensitive transitive dependencies are explicitly pinned (for example `aiohttp`, `urllib3`, `python-multipart`, and `orjson`) to keep audit results stable.
 - Recommended recurring checks:

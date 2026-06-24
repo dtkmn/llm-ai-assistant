@@ -152,6 +152,13 @@ class FakeOllamaQA(FakeQA):
     llm_backend = "ollama"
 
 
+class FakeOpenAICompatibleQA(FakeQA):
+    loaded_model_id = "gpt-oss:20b"
+    loaded_model_label = "OpenAI-compatible (gpt-oss:20b)"
+    active_llm_backend = "openai-compatible"
+    llm_backend = "openai-compatible"
+
+
 def processed_report(
     *,
     document_name="good.txt",
@@ -324,6 +331,25 @@ def test_process_document_reports_ollama_as_indexed_not_mock(monkeypatch, tmp_pa
     runtime = json.loads(runtime_status)
     assert runtime["backend"] == "ollama"
     assert runtime["model"] == "Ollama (nemotron-3-nano:4b)"
+    assert runtime["ready_for_queries"] is True
+    assert runtime["inference_validated"] is False
+
+
+def test_process_document_reports_openai_compatible_as_indexed(
+    monkeypatch, tmp_path
+):
+    document = tmp_path / "demo.txt"
+    document.write_text("demo", encoding="utf-8")
+    monkeypatch.setattr(app, "qa_system", FakeOpenAICompatibleQA())
+
+    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
+
+    assert "indexed" in status
+    assert "processed in mock mode" not in status
+    assert "OpenAI-compatible (gpt-oss:20b)" in status
+    runtime = json.loads(runtime_status)
+    assert runtime["backend"] == "openai-compatible"
+    assert runtime["model"] == "OpenAI-compatible (gpt-oss:20b)"
     assert runtime["ready_for_queries"] is True
     assert runtime["inference_validated"] is False
 

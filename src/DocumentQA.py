@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import logging
 import os
@@ -6,6 +7,7 @@ import sys
 import threading
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from getpass import getpass
@@ -69,6 +71,9 @@ except ImportError:
 
 LOGGER = logging.getLogger(__name__)
 OLLAMA_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+OPENAI_COMPAT_NO_PROXY_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({})
+)
 HF_TOKEN_ENV_VAR = "HUGGINGFACEHUB_API_TOKEN"
 FAST_MODE_ENV_VAR = "FAST_MODE"
 LLM_BACKEND_ENV_VAR = "LLM_BACKEND"
@@ -77,11 +82,22 @@ HF_ENDPOINT_TIMEOUT_ENV_VAR = "HF_ENDPOINT_TIMEOUT"
 OLLAMA_BASE_URL_ENV_VAR = "OLLAMA_BASE_URL"
 OLLAMA_MODEL_ENV_VAR = "OLLAMA_MODEL"
 OLLAMA_TIMEOUT_ENV_VAR = "OLLAMA_TIMEOUT"
+OPENAI_COMPAT_BASE_URL_ENV_VAR = "OPENAI_COMPAT_BASE_URL"
+OPENAI_COMPAT_API_KEY_ENV_VAR = "OPENAI_COMPAT_API_KEY"
+OPENAI_COMPAT_MODEL_ENV_VAR = "OPENAI_COMPAT_MODEL"
+OPENAI_COMPAT_TIMEOUT_ENV_VAR = "OPENAI_COMPAT_TIMEOUT"
 EMBEDDINGS_DEVICE_ENV_VAR = "EMBEDDINGS_DEVICE"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "nemotron-3-nano:4b"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
-SUPPORTED_LLM_BACKENDS = {"auto", "endpoint", "local", "mock", "ollama"}
+SUPPORTED_LLM_BACKENDS = {
+    "auto",
+    "endpoint",
+    "local",
+    "mock",
+    "ollama",
+    "openai-compatible",
+}
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_DOCUMENT_CHUNKS = 2_000
 DEFAULT_MAX_SESSION_REPORTS = 200
@@ -215,6 +231,92 @@ apply_torch_thread_limit(torch, logger=LOGGER)
 
 def open_ollama_request_no_proxy(request, *, timeout: int):
     return OLLAMA_NO_PROXY_OPENER.open(request, timeout=timeout)
+
+
+def open_openai_compatible_request(request, *, timeout: int):
+    try:
+        parsed = urllib.parse.urlsplit(request.full_url)
+    except ValueError:
+        parsed = None
+    if (
+        parsed is not None
+        and parsed.hostname
+        and is_loopback_openai_compatible_host(parsed.hostname)
+    ):
+        return OPENAI_COMPAT_NO_PROXY_OPENER.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def is_loopback_openai_compatible_host(hostname: str) -> bool:
+    host = hostname.rstrip(".").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def normalize_openai_compatible_base_url(base_url: str) -> str:
+    raw_base_url = base_url.strip().rstrip("/")
+    if not raw_base_url:
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} is required for "
+            "LLM_BACKEND=openai-compatible."
+        )
+    parse_failed = False
+    try:
+        parsed = urllib.parse.urlsplit(raw_base_url)
+        _port = parsed.port
+    except ValueError:
+        parse_failed = True
+    if parse_failed:
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must be a valid HTTP(S) URL."
+        )
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must be an HTTP(S) URL."
+        )
+    if parsed.scheme == "http" and not is_loopback_openai_compatible_host(
+        parsed.hostname
+    ):
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must use HTTPS for non-loopback "
+            "hosts."
+        )
+    if parsed.username or parsed.password:
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must not include credentials."
+        )
+    if parsed.query or parsed.fragment:
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must not include query strings "
+            "or fragments."
+        )
+    return raw_base_url
+
+
+def safe_openai_compatible_base_url_for_error(base_url: str) -> str:
+    raw_base_url = base_url.strip()
+    if not raw_base_url:
+        return "<unset>"
+    try:
+        parsed = urllib.parse.urlsplit(raw_base_url)
+    except ValueError:
+        return "<invalid>"
+
+    if parsed.hostname:
+        netloc = parsed.hostname
+        try:
+            if parsed.port is not None:
+                netloc = f"{netloc}:{parsed.port}"
+        except ValueError:
+            pass
+        path = parsed.path.rstrip("/")
+        if parsed.scheme in {"http", "https"}:
+            return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
+    return "<invalid>"
 
 
 ANSWER_SUPPORT_STOPWORDS = {
@@ -793,7 +895,7 @@ def nul_ratio(raw_content: bytes, offset: int, stride: int) -> float:
 
 
 class MockLLM(LLM):
-    """Fallback LLM when no HuggingFace token/model is available."""
+    """Fallback LLM when no real backend is available."""
 
     @property
     def _llm_type(self) -> str:
@@ -815,8 +917,8 @@ class MockLLM(LLM):
                     sentence = re.split(r"(?<=[.!?])\s+", stripped_line, maxsplit=1)[0]
                     return f"{sentence} [{citation_id}]"
         return (
-            "This is a mock response. Configure a valid HuggingFace token to enable real "
-            "AI-powered answers."
+            "This is a mock response. Configure Ollama or an OpenAI-compatible "
+            "backend to enable real AI-powered answers."
         )
 
 
@@ -903,6 +1005,97 @@ class OllamaLLM(LLM):
         return self._strip_thinking_text(generated_text)
 
 
+class OpenAICompatibleLLM(LLM):
+    """Minimal OpenAI-compatible chat-completions adapter."""
+
+    model: str
+    base_url: str
+    api_key: Optional[str] = None
+    timeout: int = 120
+    max_tokens: int = 384
+
+    @property
+    def _llm_type(self) -> str:
+        return "openai-compatible"
+
+    @property
+    def _api_base_url(self) -> str:
+        return self.base_url.rstrip("/")
+
+    @property
+    def _chat_completions_url(self) -> str:
+        return f"{self._api_base_url}/chat/completions"
+
+    def _post_chat(
+        self,
+        prompt: str,
+        *,
+        max_tokens: Optional[int] = None,
+        stop: Optional[List[str]] = None,
+    ) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": max_tokens or self.max_tokens,
+            "stream": False,
+        }
+        if stop:
+            payload["stop"] = stop
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        request = urllib.request.Request(
+            self._chat_completions_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with open_openai_compatible_request(
+                request, timeout=self.timeout
+            ) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            status_code = exc.code
+            raise RuntimeError(
+                "OpenAI-compatible API returned HTTP "
+                f"{status_code} for /chat/completions."
+            ) from None
+        except urllib.error.URLError:
+            safe_base_url = safe_openai_compatible_base_url_for_error(self.base_url)
+            raise RuntimeError(
+                "Could not connect to OpenAI-compatible endpoint at "
+                f"{safe_base_url}/chat/completions."
+            ) from None
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("OpenAI-compatible endpoint returned invalid JSON") from exc
+
+        if not isinstance(parsed, dict):
+            raise RuntimeError("OpenAI-compatible endpoint returned unexpected JSON")
+        choices = parsed.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("OpenAI-compatible response did not include choices")
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            raise RuntimeError("OpenAI-compatible response choice was invalid")
+        message = first_choice.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            return message["content"].strip()
+        if isinstance(first_choice.get("text"), str):
+            return first_choice["text"].strip()
+        raise RuntimeError("OpenAI-compatible response did not include generated text")
+
+    def validate_model_available(self) -> None:
+        self._post_chat("Respond with ok.", max_tokens=1)
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
+        return self._post_chat(prompt, stop=stop)
+
+
 class DocumentQA:
     def __init__(
         self,
@@ -945,9 +1138,19 @@ class DocumentQA:
             or DEFAULT_OLLAMA_MODEL
         )
         self.ollama_timeout = env_int(OLLAMA_TIMEOUT_ENV_VAR, 120)
+        self.openai_compat_base_url = os.getenv(
+            OPENAI_COMPAT_BASE_URL_ENV_VAR, ""
+        ).strip()
+        self.openai_compat_api_key = (
+            os.getenv(OPENAI_COMPAT_API_KEY_ENV_VAR, "").strip()
+            or None
+        )
+        self.openai_compat_model = os.getenv(
+            OPENAI_COMPAT_MODEL_ENV_VAR, ""
+        ).strip()
+        self.openai_compat_timeout = env_int(OPENAI_COMPAT_TIMEOUT_ENV_VAR, 120)
 
-        # Lazy initialization keeps web startup fast on constrained environments
-        # (for example Hugging Face Spaces CPU instances).
+        # Lazy initialization keeps web startup fast on constrained environments.
         self.llm = None
         self.loaded_model_id: Optional[str] = None
         self.loaded_model_label: Optional[str] = None
@@ -1023,7 +1226,11 @@ class DocumentQA:
         return self._default_embeddings_device()
 
     def _normalize_llm_backend(self, llm_backend: Optional[str]) -> str:
-        backend = (llm_backend or os.getenv(LLM_BACKEND_ENV_VAR, "auto")).strip().lower()
+        backend = (
+            llm_backend or os.getenv(LLM_BACKEND_ENV_VAR, "auto")
+        ).strip().lower().replace("_", "-")
+        if backend in {"openai", "openai-compatible-chat"}:
+            backend = "openai-compatible"
         if backend not in SUPPORTED_LLM_BACKENDS:
             LOGGER.warning(
                 "Unsupported %s=%r. Supported values: %s. Using auto.",
@@ -1037,16 +1244,7 @@ class DocumentQA:
     def _select_llm_backend(self) -> str:
         if self.llm_backend != "auto":
             return self.llm_backend
-        if self.device == "cuda":
-            return "local"
-        if self.device == "mps":
-            LOGGER.warning(
-                "LLM_BACKEND=auto no longer selects in-process local Hugging Face "
-                "models on Apple MPS. Use LLM_BACKEND=ollama for the recommended "
-                "local Mac path, or LLM_BACKEND=local to opt into in-process "
-                "Transformers explicitly."
-            )
-        return "endpoint"
+        return "ollama"
 
     def _get_hf_token(self, allow_interactive_token: bool) -> Optional[str]:
         token = os.getenv(HF_TOKEN_ENV_VAR, "").strip()
@@ -1089,6 +1287,8 @@ class DocumentQA:
             return f"Custom endpoint ({endpoint_url})"
         if backend == "ollama":
             return f"Ollama ({model_id})"
+        if backend == "openai-compatible":
+            return f"OpenAI-compatible ({model_id or 'unconfigured'})"
         return model_id
 
     def _load_endpoint_model(self, model_id: str) -> LLM:
@@ -1166,6 +1366,28 @@ class DocumentQA:
         llm.validate_model_available()
         return llm
 
+    def _load_openai_compatible_model(self, model_id: str) -> OpenAICompatibleLLM:
+        base_url = normalize_openai_compatible_base_url(self.openai_compat_base_url)
+        if not model_id:
+            raise RuntimeError(
+                f"{OPENAI_COMPAT_MODEL_ENV_VAR} is required for "
+                "LLM_BACKEND=openai-compatible."
+            )
+        LOGGER.info(
+            "Configuring OpenAI-compatible model %s at %s",
+            model_id,
+            base_url,
+        )
+        llm = OpenAICompatibleLLM(
+            model=model_id,
+            base_url=base_url,
+            api_key=self.openai_compat_api_key,
+            timeout=self.openai_compat_timeout,
+            max_tokens=self.profile["max_new_tokens"],
+        )
+        llm.validate_model_available()
+        return llm
+
     def _candidate_models(self) -> List[str]:
         candidates = [self.model_id]
         default_models = DEFAULT_FAST_MODELS if self.fast_mode else DEFAULT_QUALITY_MODELS
@@ -1189,7 +1411,7 @@ class DocumentQA:
             )
             if self.llm_backend in {"endpoint", "local"}:
                 raise RuntimeError(message)
-            if requested_backend != "ollama":
+            if requested_backend in {"endpoint", "local"}:
                 LOGGER.warning("%s Falling back to MockLLM.", message)
                 self.active_llm_backend = "mock"
                 self.llm = MockLLM()
@@ -1220,9 +1442,47 @@ class DocumentQA:
             except Exception as exc:
                 self.llm = None
                 self.active_llm_backend = None
+                if self.llm_backend == "auto":
+                    LOGGER.warning(
+                        "LLM_BACKEND=auto could not initialize Ollama model `%s` "
+                        "at %s. Falling back to MockLLM. Use LLM_BACKEND=ollama "
+                        "to fail closed instead. Last error: %s",
+                        self.ollama_model,
+                        self.ollama_base_url,
+                        exc,
+                    )
+                    self.active_llm_backend = "mock"
+                    self.llm = MockLLM()
+                    return
                 raise RuntimeError(
                     f"Unable to initialize ollama LLM `{self.ollama_model}` at "
                     f"{self.ollama_base_url}. Last error: {exc}"
+                ) from exc
+
+        if requested_backend == "openai-compatible":
+            try:
+                self.llm = self._load_openai_compatible_model(
+                    self.openai_compat_model
+                )
+                self.active_llm_backend = "openai-compatible"
+                self.loaded_model_id = self.openai_compat_model
+                self.loaded_model_label = self._loaded_model_label(
+                    self.openai_compat_model, "openai-compatible"
+                )
+                LOGGER.info(
+                    "Using OpenAI-compatible model %s", self.openai_compat_model
+                )
+                return
+            except Exception as exc:
+                self.llm = None
+                self.active_llm_backend = None
+                safe_base_url = safe_openai_compatible_base_url_for_error(
+                    self.openai_compat_base_url
+                )
+                raise RuntimeError(
+                    "Unable to initialize openai-compatible LLM "
+                    f"`{self.openai_compat_model}` at "
+                    f"{safe_base_url}. Last error: {exc}"
                 ) from exc
 
         last_error = None
@@ -1435,8 +1695,14 @@ class DocumentQA:
         active_backend = self._active_backend()
         if active_backend == "mock":
             return "MockLLM (fallback)"
+        if active_backend == "auto":
+            return f"Auto (Ollama {self.ollama_model} -> MockLLM fallback)"
         if active_backend == "ollama":
             return self._loaded_model_label(self.ollama_model, "ollama")
+        if active_backend == "openai-compatible":
+            return self._loaded_model_label(
+                self.openai_compat_model, "openai-compatible"
+            )
         return self.model_id
 
     def _text_encoding_mode(self, text_encoding: Optional[str]) -> str:
@@ -3070,7 +3336,10 @@ class DocumentQA:
                     run=run,
                 )
             return self._finish_query_result(
-                answer="Language model is not initialized. Please check your HuggingFace token setup.",
+                answer=(
+                    "Language model is not initialized. Please check your LLM "
+                    "backend setup."
+                ),
                 question=clean_prompt,
                 active_state=active_state,
                 run=run,
