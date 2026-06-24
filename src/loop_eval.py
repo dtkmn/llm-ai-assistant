@@ -11,12 +11,14 @@ from typing import Callable, Dict, List, Optional, Sequence
 from langchain_core.language_models.llms import LLM
 from pydantic import Field
 
-from src.DocumentQA import (
+from src.ai_loop_engine import (
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
+    LLM_MODEL_ENV_VAR,
     OLLAMA_BASE_URL_ENV_VAR,
+    OLLAMA_MODEL_ENV_VAR,
     SELF_CHECK_REFUSAL_ANSWER,
-    DocumentQA,
+    AILoopEngine,
     QueryResult,
 )
 from src.golden_eval import (
@@ -64,7 +66,7 @@ class LoopEvalRunResult:
     initialization_error: Optional[str] = None
 
 
-QaFactory = Callable[[str, str, int], DocumentQA]
+QaFactory = Callable[[str, str, int], AILoopEngine]
 
 
 class ProviderFreeGoldenLLM(LLM):
@@ -114,9 +116,9 @@ class ProviderFreeGoldenLLM(LLM):
         )
 
 
-def build_provider_free_qa(model: str, base_url: str, timeout: int) -> DocumentQA:
-    qa = DocumentQA(fast_mode=True, llm_backend="ollama", hf_token=None)
-    # The fake eval injects its verifier before any query, so DocumentQA never
+def build_provider_free_qa(model: str, base_url: str, timeout: int) -> AILoopEngine:
+    qa = AILoopEngine(fast_mode=True, llm_backend="ollama")
+    # The fake eval injects its verifier before any query, so AILoopEngine never
     # initializes a live Ollama client. Keep the active label honest in artifacts.
     qa.llm = ProviderFreeGoldenLLM()
     qa.active_llm_backend = "provider-free"
@@ -155,7 +157,10 @@ def models_from_args(args) -> List[str]:
         parsed_env_models = _non_empty_model_tags(env_models.split(","))
         if parsed_env_models:
             return parsed_env_models
-    env_model = os.getenv("OLLAMA_MODEL", "").strip()
+    env_model = (
+        os.getenv(LLM_MODEL_ENV_VAR, "").strip()
+        or os.getenv(OLLAMA_MODEL_ENV_VAR, "").strip()
+    )
     if env_model:
         return [env_model]
     return [DEFAULT_OLLAMA_MODEL]
@@ -401,7 +406,8 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         nargs="+",
         help=(
             "Model labels/tags. Fake mode defaults to provider-free-golden. "
-            "Ollama mode defaults to OLLAMA_EVAL_MODELS, OLLAMA_MODEL, or the app default."
+            "Ollama mode defaults to OLLAMA_EVAL_MODELS, LLM_MODEL, "
+            "OLLAMA_MODEL, or the app default."
         ),
     )
     parser.add_argument(

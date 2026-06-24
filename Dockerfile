@@ -29,7 +29,7 @@ COPY . .
 # Create a non-root user and set permissions
 RUN addgroup --gid 1000 appuser && \
     adduser --uid 1000 --gid 1000 --disabled-password appuser && \
-    mkdir -p /app/uploads /home/appuser/.cache/huggingface && \
+    mkdir -p /app/uploads /home/appuser/.cache && \
     chown -R appuser:appuser /app /home/appuser/.cache
 
 # Switch to the non-root user
@@ -41,7 +41,6 @@ EXPOSE 7860
 # Set environment variables for the application
 ENV GRADIO_SERVER_NAME="0.0.0.0"
 ENV GRADIO_SERVER_PORT="7860"
-ENV HF_HOME="/home/appuser/.cache/huggingface"
 ENV FAST_MODE="true"
 ENV LLM_BACKEND="auto"
 ENV APP_DEBUG="false"

@@ -53,7 +53,7 @@ class FakeQA:
         active_model_label = (
             self.loaded_model_label
             or self.loaded_model_id
-            or ("MockLLM (fallback)" if active_backend == "mock" else "unknown")
+            or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
         self.latest_processing_report = DocumentProcessingReport(
             attempted_document_name=self.current_document_name,
@@ -76,7 +76,7 @@ class FakeQA:
         active_model_label = (
             self.loaded_model_label
             or self.loaded_model_id
-            or ("MockLLM (fallback)" if active_backend == "mock" else "unknown")
+            or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
         return DocumentQAStatus(
             profile_label="FAST" if self.fast_mode else "QUALITY",
@@ -98,7 +98,7 @@ class FakeQA:
         active_model_label = (
             self.loaded_model_label
             or self.loaded_model_id
-            or ("MockLLM (fallback)" if active_backend == "mock" else "unknown")
+            or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
         answer = "Project Phoenix is described in the uploaded document."
         return QueryResult(
@@ -133,23 +133,18 @@ class FakeQA:
         self.cleared_loop_session_id = session_id
 
 
-class FakeEndpointQA(FakeQA):
-    loaded_model_id = "Qwen/Qwen2.5-1.5B-Instruct"
-    loaded_model_label = "Qwen/Qwen2.5-1.5B-Instruct"
-    active_llm_backend = "endpoint"
-    llm_backend = "endpoint"
-
-
-class FakeCustomEndpointQA(FakeEndpointQA):
-    loaded_model_id = None
-    loaded_model_label = "Custom endpoint (https://example.invalid)"
-
-
 class FakeOllamaQA(FakeQA):
     loaded_model_id = "nemotron-3-nano:4b"
     loaded_model_label = "Ollama (nemotron-3-nano:4b)"
     active_llm_backend = "ollama"
     llm_backend = "ollama"
+
+
+class FakeOpenAICompatibleQA(FakeQA):
+    loaded_model_id = "gpt-oss:20b"
+    loaded_model_label = "OpenAI-compatible (gpt-oss:20b)"
+    active_llm_backend = "openai-compatible"
+    llm_backend = "openai-compatible"
 
 
 def processed_report(
@@ -170,7 +165,7 @@ def processed_report(
         max_chunk_limit=2000,
         text_encoding_mode="auto",
         backend="mock",
-        model_label="MockLLM (fallback)",
+        model_label="MockLLM (explicit demo)",
         error_message=error_message,
     )
 
@@ -190,7 +185,8 @@ def test_process_document_reports_mock_mode_without_success_claim(monkeypatch, t
     runtime = json.loads(runtime_status)
     assert runtime["active_document"] == "demo.txt"
     assert runtime["last_attempted_document"] == "demo.txt"
-    assert runtime["model_device"] == "cpu"
+    assert runtime["app_device"] == "cpu"
+    assert "model_device" not in runtime
     assert runtime["embeddings_model"] == "fake-embeddings"
     assert runtime["embeddings_device"] == "cpu"
     assert runtime["ready_for_queries"] is True
@@ -293,24 +289,6 @@ def test_process_document_passes_utf8_or_western_only_when_selected(
     assert fake_qa.text_encoding == "utf-8-or-western"
 
 
-def test_process_document_reports_endpoint_as_indexed_not_ready(monkeypatch, tmp_path):
-    document = tmp_path / "demo.txt"
-    document.write_text("demo", encoding="utf-8")
-    monkeypatch.setattr(app, "qa_system", FakeEndpointQA())
-
-    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
-
-    assert "indexed" in status
-    assert "processed successfully" not in status
-    assert "Inference will be validated on the first question" in status
-    runtime = json.loads(runtime_status)
-    assert runtime["backend"] == "endpoint"
-    assert runtime["model"] == "Qwen/Qwen2.5-1.5B-Instruct"
-    assert runtime["ready_for_queries"] is True
-    assert runtime["readiness_scope"] == "retrieval_pipeline"
-    assert runtime["inference_validated"] is False
-
-
 def test_process_document_reports_ollama_as_indexed_not_mock(monkeypatch, tmp_path):
     document = tmp_path / "demo.txt"
     document.write_text("demo", encoding="utf-8")
@@ -328,19 +306,23 @@ def test_process_document_reports_ollama_as_indexed_not_mock(monkeypatch, tmp_pa
     assert runtime["inference_validated"] is False
 
 
-def test_process_document_uses_custom_endpoint_label(monkeypatch, tmp_path):
+def test_process_document_reports_openai_compatible_as_indexed(
+    monkeypatch, tmp_path
+):
     document = tmp_path / "demo.txt"
     document.write_text("demo", encoding="utf-8")
-    monkeypatch.setattr(app, "qa_system", FakeCustomEndpointQA())
+    monkeypatch.setattr(app, "qa_system", FakeOpenAICompatibleQA())
 
     status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
 
-    assert "Custom endpoint (https://example.invalid)" in status
-    assert "Qwen" not in status
-    assert (
-        json.loads(runtime_status)["model"]
-        == "Custom endpoint (https://example.invalid)"
-    )
+    assert "indexed" in status
+    assert "processed in mock mode" not in status
+    assert "OpenAI-compatible (gpt-oss:20b)" in status
+    runtime = json.loads(runtime_status)
+    assert runtime["backend"] == "openai-compatible"
+    assert runtime["model"] == "OpenAI-compatible (gpt-oss:20b)"
+    assert runtime["ready_for_queries"] is True
+    assert runtime["inference_validated"] is False
 
 
 def test_process_document_reports_failure_without_losing_active_status(
@@ -361,7 +343,7 @@ def test_process_document_reports_failure_without_losing_active_status(
         max_chunk_limit=2000,
         text_encoding_mode="auto",
         backend="mock",
-        model_label="MockLLM (fallback)",
+        model_label="MockLLM (explicit demo)",
         error_message=None,
     )
 
@@ -378,7 +360,7 @@ def test_process_document_reports_failure_without_losing_active_status(
             max_chunk_limit=2000,
             text_encoding_mode=text_encoding or "auto",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             error_message="Could not decode text document",
         )
         raise DocumentProcessingError(
@@ -449,7 +431,7 @@ def test_format_answer_trace_includes_citations():
             question="When does it launch?",
             document_name="phoenix.txt",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             retrieved_chunk_count=1,
             citations=[
                 AnswerCitation(
@@ -498,7 +480,7 @@ def test_format_answer_trace_includes_loop_report():
             user_input="When does it launch?",
             context_provider="document",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             final_decision=LoopDecision.NOT_VERIFIED,
             final_answer="Project Phoenix launches in June 2026 [1].",
         )
@@ -509,7 +491,7 @@ def test_format_answer_trace_includes_loop_report():
             question="When does it launch?",
             document_name="phoenix.txt",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             retrieved_chunk_count=0,
             citations=[],
         ),
@@ -644,7 +626,7 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
             user_input="Generate unsafe content",
             context_provider="document",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             steps=(
                 LoopStep(
                     phase=LoopPhase.DRAFT,
@@ -684,7 +666,7 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
             question="Generate unsafe content",
             document_name="phoenix.txt",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             retrieved_chunk_count=0,
             citations=[],
             error_message=blocked_draft,

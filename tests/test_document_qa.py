@@ -1,5 +1,7 @@
 import json
+import logging
 import threading
+import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -7,14 +9,24 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 
 import src.DocumentQA as document_qa_module
+from src.ai_loop_engine import AILoopEngine, DocumentQA as PublicDocumentQA
 from src.DocumentQA import (
+    DEFAULT_OLLAMA_EMBEDDINGS_MODEL,
     DEFAULT_OLLAMA_MODEL,
     AnswerCitation,
     DocumentContextProvider,
     DocumentQA,
     FaissVectorStore,
+    LocalHashingEmbeddings,
     MockLLM,
+    OllamaEmbeddings,
     OllamaLLM,
+    OpenAICompatibleEmbeddings,
+    OpenAICompatibleLLM,
+    normalize_ollama_base_url,
+    normalize_openai_compatible_base_url,
+    safe_ollama_base_url_for_error,
+    safe_openai_compatible_base_url_for_error,
 )
 from src.loop_engine import GuardrailDecision, LoopDecision, LoopPhase, LoopReport
 
@@ -36,6 +48,32 @@ class FakeEmbeddings(Embeddings):
         ]
 
 
+@pytest.fixture(autouse=True)
+def clear_model_provider_env(monkeypatch):
+    for name in (
+        "LLM_BACKEND",
+        "LLM_MODEL",
+        "EMBEDDINGS_MODEL",
+        "EMBEDDINGS_DEVICE",
+        "OLLAMA_BASE_URL",
+        "OLLAMA_MODEL",
+        "OLLAMA_EMBED_MODEL",
+        "OPENAI_COMPAT_BASE_URL",
+        "OPENAI_COMPAT_MODEL",
+        "OPENAI_COMPAT_EMBED_MODEL",
+        "OPENAI_COMPAT_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_ai_loop_engine_is_canonical_runtime_alias():
+    from src import AILoopEngine as RootAILoopEngine
+
+    assert RootAILoopEngine is AILoopEngine
+    assert DocumentQA is AILoopEngine
+    assert PublicDocumentQA is AILoopEngine
+
+
 def create_processed_mock_qa(tmp_path):
     document = tmp_path / "phoenix.txt"
     document.write_text(
@@ -43,14 +81,14 @@ def create_processed_mock_qa(tmp_path):
         "The launch date is June 2026.",
         encoding="utf-8",
     )
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.embeddings = FakeEmbeddings()
     qa.process_document(str(document))
     return qa, document
 
 
 def test_query_before_document_asks_for_upload_first():
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     assert qa.query("What is this?") == "Please upload and process a document first."
     result = qa.query_with_trace("What is this?")
@@ -69,7 +107,7 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
         "The launch date is June 2026.",
         encoding="utf-8",
     )
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.embeddings = FakeEmbeddings()
 
     qa.process_document(str(document))
@@ -86,7 +124,7 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     status = qa.status()
     assert status.profile_label == "FAST"
     assert status.active_backend == "mock"
-    assert status.active_model_label == "MockLLM (fallback)"
+    assert status.active_model_label == "MockLLM (explicit demo)"
     assert status.embeddings_device == "cpu"
     assert status.document_name == "phoenix.txt"
     assert status.ready_for_queries is True
@@ -102,7 +140,7 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     assert status.processing_report.max_chunk_limit == qa.max_document_chunks
     assert status.processing_report.text_encoding_mode == "auto"
     assert status.processing_report.backend == "mock"
-    assert status.processing_report.model_label == "MockLLM (fallback)"
+    assert status.processing_report.model_label == "MockLLM (explicit demo)"
     assert status.processing_report.error_message is None
 
 
@@ -116,7 +154,7 @@ def test_query_with_trace_returns_retrieved_citations(tmp_path):
     assert result.trace.question == "What is Project Phoenix?"
     assert result.trace.document_name == "phoenix.txt"
     assert result.trace.backend == "mock"
-    assert result.trace.model_label == "MockLLM (fallback)"
+    assert result.trace.model_label == "MockLLM (explicit demo)"
     assert result.trace.retrieved_chunk_count > 0
     assert result.trace.error_message is None
     assert result.trace.self_check.outcome == "not_verified"
@@ -144,7 +182,7 @@ def test_query_trace_counts_only_prompt_included_chunks(tmp_path):
         ),
         encoding="utf-8",
     )
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.embeddings = FakeEmbeddings()
     qa.process_document(str(document))
     assert len(qa.vector_store.documents) > 1
@@ -170,7 +208,7 @@ def test_query_with_trace_includes_loop_report_for_prompt_evidence(tmp_path):
     assert run.metadata["context_provider"] == "document"
     assert run.metadata["context_provider_name"] == "phoenix.txt"
     assert run.backend == "mock"
-    assert run.model_label == "MockLLM (fallback)"
+    assert run.model_label == "MockLLM (explicit demo)"
     assert run.policy.allow_tool_calls is False
     assert "document_text" in run.metadata["untrusted_inputs"]
     assert run.final_decision == LoopDecision.NOT_VERIFIED
@@ -240,7 +278,7 @@ def test_loop_session_history_is_bounded(tmp_path):
 
 
 def test_blocked_query_is_recorded_for_replay(tmp_path):
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     result = qa.query_with_trace("What is this?", session_id="blocked")
 
@@ -283,7 +321,6 @@ def test_loop_middleware_can_block_before_retrieval(tmp_path):
     )
     qa = DocumentQA(
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
         loop_middlewares=(BlockRetrieveMiddleware(),),
     )
@@ -452,7 +489,6 @@ def test_after_run_guardrail_overrides_answer_without_stale_self_check(tmp_path)
     )
     qa = DocumentQA(
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
         loop_middlewares=(RequireReviewAfterRunMiddleware(),),
     )
@@ -513,9 +549,9 @@ def enable_fake_verifier(qa, outcome="supported", raw_response=None, error=None)
         raw_response=raw_response,
         error=error,
     )
-    qa.active_llm_backend = "endpoint"
+    qa.active_llm_backend = "openai-compatible"
     qa.llm = verifier
-    qa.loaded_model_label = "Fake verifier endpoint"
+    qa.loaded_model_label = "Fake verifier gateway"
     return verifier
 
 
@@ -695,7 +731,7 @@ def test_llm_verifier_marks_real_backend_answer_supported(tmp_path):
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == "Project Phoenix launches in June 2026 [1]."
-    assert result.trace.backend == "endpoint"
+    assert result.trace.backend == "openai-compatible"
     assert result.trace.self_check.outcome == "supported"
     assert result.trace.self_check.reasons == [
         "mechanical_checks_passed",
@@ -1368,32 +1404,51 @@ def test_document_chunks_record_citation_metadata(tmp_path):
     assert qa.vector_store.documents[0].metadata["chunk_index"] == 0
 
 
-def test_status_reports_configured_backend_before_initialization():
+def test_status_reports_configured_backend_before_initialization(monkeypatch):
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPAT_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDINGS_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPAT_EMBED_MODEL", raising=False)
     qa = DocumentQA(
         device="cpu",
         fast_mode=False,
-        hf_token="real-token",
-        llm_backend="endpoint",
-        model_id="example/model",
+        llm_backend="openai-compatible",
     )
 
     status = qa.status()
 
     assert status.profile_label == "QUALITY"
-    assert status.configured_backend == "endpoint"
-    assert status.active_backend == "endpoint"
-    assert status.active_model_label == "example/model"
-    assert status.embeddings_device == "cpu"
+    assert status.configured_backend == "openai-compatible"
+    assert status.active_backend == "openai-compatible"
+    assert status.active_model_label == "OpenAI-compatible (unconfigured)"
+    assert status.embeddings_model == ""
+    assert status.embeddings_device == "external"
     assert status.ready_for_queries is False
     assert status.mock_mode is False
     assert status.processing_report is None
+
+
+def test_auto_status_before_initialization_reports_local_first_plan(monkeypatch):
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    monkeypatch.delenv("EMBEDDINGS_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_EMBED_MODEL", raising=False)
+    qa = DocumentQA(fast_mode=True, llm_backend="auto")
+
+    status = qa.status()
+
+    assert status.configured_backend == "auto"
+    assert status.active_backend == "auto"
+    assert status.active_model_label == "Auto (Ollama nemotron-3-nano:4b)"
+    assert status.embeddings_model == DEFAULT_OLLAMA_EMBEDDINGS_MODEL
+    assert status.embeddings_device == "external"
+    assert "Qwen" not in status.active_model_label
 
 
 def test_embeddings_default_to_cpu_on_mps_device():
     qa = DocumentQA(
         device="mps",
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
     )
 
@@ -1407,38 +1462,659 @@ def test_embeddings_device_can_be_explicitly_cpu_on_accelerated_device():
         device="mps",
         embeddings_device="cpu",
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
     )
 
     assert qa.embeddings_device == "cpu"
 
 
-def test_initialize_embeddings_uses_safe_embeddings_device(monkeypatch):
-    captured = {}
-
-    class FakeHuggingFaceEmbeddings:
-        def __init__(self, *, model_name, model_kwargs):
-            captured["model_name"] = model_name
-            captured["model_kwargs"] = model_kwargs
-
-    monkeypatch.setattr(
-        document_qa_module,
-        "HuggingFaceEmbeddings",
-        FakeHuggingFaceEmbeddings,
-    )
+def test_initialize_embeddings_uses_local_cpu_embeddings():
     qa = DocumentQA(
         device="mps",
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
     )
 
     qa._initialize_embeddings()
 
-    assert captured["model_name"] == qa.embeddings_model
-    assert captured["model_kwargs"] == {"device": "cpu"}
-    assert qa.embeddings is not None
+    assert qa.embeddings_model == "local-hashing-384"
+    assert qa.embeddings_device == "cpu"
+    assert isinstance(qa.embeddings, LocalHashingEmbeddings)
+    assert len(qa.embeddings.embed_query("Project Phoenix")) == 384
+
+
+def test_generic_model_env_configures_ollama_chat_and_embeddings(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "custom-chat:4b")
+    monkeypatch.setenv("OLLAMA_MODEL", "ignored-chat:4b")
+    monkeypatch.setenv("EMBEDDINGS_MODEL", "custom-embed")
+    monkeypatch.setenv("OLLAMA_EMBED_MODEL", "ignored-embed")
+
+    qa = DocumentQA(fast_mode=True, llm_backend="ollama")
+
+    assert qa.ollama_model == "custom-chat:4b"
+    assert qa.embeddings_model == "custom-embed"
+    assert qa.embeddings_device == "external"
+    assert qa.status().active_model_label == "Ollama (custom-chat:4b)"
+
+
+@pytest.mark.parametrize(
+    "base_url, expected",
+    [
+        ("http://localhost:11434/", "http://localhost:11434"),
+        ("http://127.0.0.1:11434", "http://127.0.0.1:11434"),
+        ("http://[::1]:11434", "http://[::1]:11434"),
+    ],
+)
+def test_normalize_ollama_base_url_accepts_loopback_forms(base_url, expected):
+    assert normalize_ollama_base_url(base_url) == expected
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "not-a-url",
+        "file:///tmp/ollama",
+        "http://user:pass@localhost:11434",
+        "http://localhost:bad",
+        "http://gateway.example:11434",
+        "http://localhost:11434/api",
+        "http://localhost:11434?token=x",
+        "http://localhost:11434#fragment",
+    ],
+)
+def test_normalize_ollama_base_url_rejects_unsafe_forms(base_url):
+    with pytest.raises(RuntimeError, match="OLLAMA_BASE_URL"):
+        normalize_ollama_base_url(base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url, expected",
+    [
+        ("http://user:SECRET_PASSWORD@localhost:11434", "http://localhost:11434"),
+        (
+            "http://localhost:11434?api_key=SECRET_QUERY_TOKEN",
+            "http://localhost:11434",
+        ),
+        ("http://localhost:11434#SECRET_FRAGMENT", "http://localhost:11434"),
+        ("http://localhost:11434/SECRET_PATH", "http://localhost:11434"),
+        ("not-a-url", "<invalid>"),
+        ("", "<unset>"),
+    ],
+)
+def test_safe_ollama_base_url_for_error_redacts_secrets(base_url, expected):
+    assert safe_ollama_base_url_for_error(base_url) == expected
+
+
+@pytest.mark.parametrize(
+    "unsafe_base_url, secret",
+    [
+        ("http://user:SECRET_PASSWORD@localhost:11434", "SECRET_PASSWORD"),
+        (
+            "http://localhost:11434?api_key=SECRET_QUERY_TOKEN",
+            "SECRET_QUERY_TOKEN",
+        ),
+        ("http://localhost:11434#SECRET_FRAGMENT", "SECRET_FRAGMENT"),
+        ("http://localhost:11434/SECRET_PATH", "SECRET_PATH"),
+    ],
+)
+def test_ollama_initialization_error_redacts_unsafe_base_url(
+    monkeypatch, unsafe_base_url, secret
+):
+    monkeypatch.setenv("OLLAMA_BASE_URL", unsafe_base_url)
+    qa = DocumentQA(fast_mode=True, llm_backend="ollama")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        qa._initialize_llm()
+
+    chain_messages = exception_chain_messages(exc_info.value)
+    assert chain_messages
+    assert all(secret not in message for message in chain_messages)
+    assert all(unsafe_base_url not in message for message in chain_messages)
+    assert any("http://localhost:11434" in message for message in chain_messages)
+
+
+def test_ollama_backend_rejects_remote_base_url_before_request(monkeypatch):
+    request_attempted = False
+
+    def forbidden_open(request, timeout):
+        nonlocal request_attempted
+        request_attempted = True
+        raise AssertionError("remote Ollama request should not be sent")
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://gateway.example:11434")
+    monkeypatch.setattr(document_qa_module.OLLAMA_NO_PROXY_OPENER, "open", forbidden_open)
+    qa = DocumentQA(fast_mode=True, llm_backend="ollama")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        qa._initialize_llm()
+
+    assert request_attempted is False
+    assert "OLLAMA_BASE_URL" in str(exc_info.value)
+    assert "openai-compatible" in str(exc_info.value)
+
+
+def test_rejects_removed_embedding_model_names():
+    with pytest.raises(RuntimeError, match="Unsupported embeddings_model"):
+        DocumentQA(
+            embeddings_model="sentence-transformers/all-MiniLM-L6-v2",
+            fast_mode=True,
+            llm_backend="mock",
+        )
+
+
+def test_mock_backend_rejects_unsupported_embeddings_model_env(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "mock")
+    monkeypatch.setenv(
+        "EMBEDDINGS_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+    with pytest.raises(RuntimeError, match="Unsupported embeddings_model"):
+        DocumentQA(fast_mode=True)
+
+
+def test_default_local_hashing_embeddings_retrieve_common_launch_paraphrase(
+    tmp_path,
+):
+    document = tmp_path / "phoenix-plan.txt"
+    document.write_text(
+        "Budget approval notes say the finance review is complete.\n\n"
+        "Project Phoenix launch date is June 2026. The release goes to customers then.\n\n"
+        "Support staffing notes describe the help desk rotation.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.profile["splitter_chunk_size"] = 90
+    qa.profile["splitter_chunk_overlap"] = 0
+    qa.profile["retrieval_k"] = 1
+    qa.profile["retrieval_fetch_k"] = 3
+
+    qa.process_document(str(document))
+    result = qa.query_with_trace("When does it go live?")
+
+    assert len(result.trace.citations) == 1
+    assert "June 2026" in result.trace.citations[0].excerpt
+    assert "June 2026" in result.answer
+
+
+def test_ollama_embeddings_use_api_embed(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps({"embeddings": [[1.0, 0.0, 0.0]]}).encode("utf-8")
+
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        requests.append(
+            {
+                "url": request.full_url,
+                "payload": json.loads(request.data.decode("utf-8")),
+                "timeout": timeout,
+            }
+        )
+        return FakeResponse()
+
+    monkeypatch.setenv("EMBEDDINGS_MODEL", "embeddinggemma")
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="ollama")
+
+    qa._initialize_embeddings()
+    vector = qa.embeddings.embed_query("Project Phoenix")
+
+    assert isinstance(qa.embeddings, OllamaEmbeddings)
+    assert vector == [1.0, 0.0, 0.0]
+    assert requests[0] == {
+        "url": "http://localhost:11434/api/embed",
+        "payload": {
+            "model": "embeddinggemma",
+            "input": "ok",
+            "truncate": True,
+        },
+        "timeout": 120,
+    }
+    assert requests[1]["payload"]["input"] == "Project Phoenix"
+
+
+def test_ollama_embeddings_reject_remote_base_url_before_request(monkeypatch):
+    request_attempted = False
+
+    def forbidden_open(request, timeout):
+        nonlocal request_attempted
+        request_attempted = True
+        raise AssertionError("remote Ollama embeddings request should not be sent")
+
+    monkeypatch.setattr(document_qa_module.OLLAMA_NO_PROXY_OPENER, "open", forbidden_open)
+
+    with pytest.raises(RuntimeError, match="OLLAMA_BASE_URL"):
+        OllamaEmbeddings(
+            model="embeddinggemma",
+            base_url="http://gateway.example:11434",
+        )
+
+    assert request_attempted is False
+
+
+def test_ollama_embeddings_http_error_body_is_not_reflected(monkeypatch):
+    class SecretHttpError(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(
+                url="http://localhost:11434/api/embed",
+                code=500,
+                msg="SECRET_STATUS_TEXT",
+                hdrs={},
+                fp=None,
+            )
+
+        def read(self):
+            return b"SECRET_BODY_TOKEN"
+
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        raise SecretHttpError()
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    embeddings = OllamaEmbeddings(model="embeddinggemma")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        embeddings.validate_model_available()
+
+    message = str(exc_info.value)
+    assert "HTTP 500" in message
+    assert "SECRET_BODY_TOKEN" not in message
+    assert "SECRET_STATUS_TEXT" not in message
+
+
+def test_ollama_embeddings_url_error_reason_is_not_reflected(monkeypatch):
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        raise urllib.error.URLError("proxy failed with SECRET_REASON_TOKEN")
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    embeddings = OllamaEmbeddings(model="embeddinggemma")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        embeddings.validate_model_available()
+
+    message = str(exc_info.value)
+    assert "http://localhost:11434/api/embed" in message
+    assert "SECRET_REASON_TOKEN" not in message
+    assert "proxy failed" not in message
+
+
+@pytest.mark.parametrize(
+    "payload, expected_error",
+    [
+        ({"embeddings": []}, "lacked vectors"),
+        ({"embeddings": [[1.0], [2.0]]}, "unexpected length"),
+        ({"embeddings": [["not-a-number"]]}, "non-numeric"),
+        ({"embeddings": [[float("nan")]]}, "non-finite"),
+        ({"embeddings": [[float("inf")]]}, "non-finite"),
+    ],
+)
+def test_ollama_embeddings_validation_rejects_invalid_scalar_response(
+    monkeypatch, payload, expected_error
+):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode("utf-8")
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_ollama_request_no_proxy",
+        lambda request, *, timeout: FakeResponse(),
+    )
+    embeddings = OllamaEmbeddings(model="embeddinggemma")
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        embeddings.validate_model_available()
+
+
+def test_ollama_embeddings_reject_inconsistent_document_dimensions(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps({"embeddings": [[1.0, 0.0], [1.0]]}).encode(
+                "utf-8"
+            )
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_ollama_request_no_proxy",
+        lambda request, *, timeout: FakeResponse(),
+    )
+    embeddings = OllamaEmbeddings(model="embeddinggemma")
+
+    with pytest.raises(RuntimeError, match="inconsistent dimensions"):
+        embeddings.embed_documents(["alpha", "beta"])
+
+
+def test_openai_compatible_embeddings_use_embeddings_endpoint(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "data": [
+                        {"index": 0, "embedding": [0.25, 0.75]},
+                    ]
+                }
+            ).encode("utf-8")
+
+    def fake_open_openai_compatible_request(request, *, timeout):
+        requests.append(
+            {
+                "url": request.full_url,
+                "headers": {
+                    key.lower(): value for key, value in request.header_items()
+                },
+                "payload": json.loads(request.data.decode("utf-8")),
+                "timeout": timeout,
+            }
+        )
+        return FakeResponse()
+
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "secret-token")
+    monkeypatch.setenv("EMBEDDINGS_MODEL", "text-embedding-local")
+    monkeypatch.setenv("OPENAI_COMPAT_TIMEOUT", "9")
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="openai-compatible")
+
+    qa._initialize_embeddings()
+    vector = qa.embeddings.embed_query("Project Phoenix")
+
+    assert isinstance(qa.embeddings, OpenAICompatibleEmbeddings)
+    assert vector == [0.25, 0.75]
+    assert requests[0]["url"] == "http://localhost:8000/v1/embeddings"
+    assert requests[0]["headers"]["authorization"] == "Bearer secret-token"
+    assert requests[0]["payload"] == {
+        "model": "text-embedding-local",
+        "input": "ok",
+    }
+    assert requests[0]["timeout"] == 9
+    assert requests[1]["payload"]["input"] == "Project Phoenix"
+
+
+def test_openai_compatible_embeddings_direct_constructor_rejects_remote_http(
+    monkeypatch,
+):
+    request_attempted = False
+
+    def fake_open_openai_compatible_request(request, *, timeout):
+        nonlocal request_attempted
+        request_attempted = True
+        raise AssertionError("remote HTTP embeddings request should not be sent")
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        OpenAICompatibleEmbeddings(
+            model="text-embedding-local",
+            base_url="http://gateway.example/v1",
+            api_key="SECRET_TOKEN",
+        )
+
+    chain_messages = exception_chain_messages(exc_info.value)
+    assert request_attempted is False
+    assert any("HTTPS" in message for message in chain_messages)
+    assert all("SECRET_TOKEN" not in message for message in chain_messages)
+
+
+def test_openai_compatible_embeddings_preserve_response_index_order(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "data": [
+                        {"index": 1, "embedding": [0.0, 1.0]},
+                        {"index": 0, "embedding": [1.0, 0.0]},
+                    ]
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        lambda request, *, timeout: FakeResponse(),
+    )
+    embeddings = OpenAICompatibleEmbeddings(
+        model="text-embedding-local",
+        base_url="http://localhost:8000/v1",
+    )
+
+    assert embeddings.embed_documents(["alpha", "beta"]) == [
+        [1.0, 0.0],
+        [0.0, 1.0],
+    ]
+
+
+def test_openai_compatible_embeddings_url_error_reason_is_not_reflected(
+    monkeypatch,
+):
+    def fake_open_openai_compatible_request(request, *, timeout):
+        raise urllib.error.URLError(
+            "proxy failed with https://gateway.example/v1/SECRET_PATH and "
+            "SECRET_REASON_TOKEN"
+        )
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+    embeddings = OpenAICompatibleEmbeddings(
+        model="text-embedding-local",
+        base_url="https://gateway.example/v1/SECRET_PATH",
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        embeddings.validate_model_available()
+
+    chain_messages = exception_chain_messages(exc_info.value)
+    assert chain_messages
+    assert all("SECRET_PATH" not in message for message in chain_messages)
+    assert all("SECRET_REASON_TOKEN" not in message for message in chain_messages)
+    assert all("proxy failed" not in message for message in chain_messages)
+    assert any("https://gateway.example/embeddings" in message for message in chain_messages)
+
+
+@pytest.mark.parametrize(
+    "payload, expected_error",
+    [
+        ({"data": []}, "unexpected length"),
+        (
+            {
+                "data": [
+                    {"index": 0, "embedding": [1.0]},
+                    {"index": 1, "embedding": [2.0]},
+                ]
+            },
+            "unexpected length",
+        ),
+        (
+            {"data": [{"index": 0, "embedding": ["not-a-number"]}]},
+            "non-numeric",
+        ),
+        (
+            {"data": [{"index": 0, "embedding": [float("nan")]}]},
+            "non-finite",
+        ),
+        (
+            {"data": [{"index": 0, "embedding": [float("inf")]}]},
+            "non-finite",
+        ),
+    ],
+)
+def test_openai_compatible_embeddings_validation_rejects_invalid_scalar_response(
+    monkeypatch, payload, expected_error
+):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(payload).encode("utf-8")
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        lambda request, *, timeout: FakeResponse(),
+    )
+    embeddings = OpenAICompatibleEmbeddings(
+        model="text-embedding-local",
+        base_url="http://localhost:8000/v1",
+    )
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        embeddings.validate_model_available()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [
+            {"index": 0, "embedding": [1.0, 0.0]},
+            {"index": 0, "embedding": [0.0, 1.0]},
+        ],
+        [
+            {"index": 0, "embedding": [1.0, 0.0]},
+            {"embedding": [0.0, 1.0]},
+        ],
+        [
+            {"index": 0, "embedding": [1.0, 0.0]},
+            {"index": 2, "embedding": [0.0, 1.0]},
+        ],
+        [
+            {"index": -1, "embedding": [1.0, 0.0]},
+            {"index": 1, "embedding": [0.0, 1.0]},
+        ],
+        [
+            {"index": False, "embedding": [1.0, 0.0]},
+            {"index": 1, "embedding": [0.0, 1.0]},
+        ],
+    ],
+)
+def test_openai_compatible_embeddings_reject_invalid_document_indices(
+    monkeypatch, data
+):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps({"data": data}).encode("utf-8")
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        lambda request, *, timeout: FakeResponse(),
+    )
+    embeddings = OpenAICompatibleEmbeddings(
+        model="text-embedding-local",
+        base_url="http://localhost:8000/v1",
+    )
+
+    with pytest.raises(RuntimeError, match="invalid indices"):
+        embeddings.embed_documents(["alpha", "beta"])
+
+
+def test_openai_compatible_embeddings_reject_inconsistent_document_dimensions(
+    monkeypatch,
+):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "data": [
+                        {"index": 0, "embedding": [1.0, 0.0]},
+                        {"index": 1, "embedding": [1.0]},
+                    ]
+                }
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        lambda request, *, timeout: FakeResponse(),
+    )
+    embeddings = OpenAICompatibleEmbeddings(
+        model="text-embedding-local",
+        base_url="http://localhost:8000/v1",
+    )
+
+    with pytest.raises(RuntimeError, match="inconsistent dimensions"):
+        embeddings.embed_documents(["alpha", "beta"])
+
+
+def test_openai_compatible_embeddings_without_model_fail_closed(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.delenv("EMBEDDINGS_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPAT_EMBED_MODEL", raising=False)
+    qa = DocumentQA(fast_mode=True, llm_backend="openai-compatible")
+
+    qa._initialize_embeddings()
+
+    assert qa.embeddings is None
+    assert "EMBEDDINGS_MODEL" in qa.embeddings_error
 
 
 def test_failed_unsupported_replacement_keeps_previous_document_queryable(tmp_path):
@@ -1481,7 +2157,7 @@ def test_concurrent_replacement_uploads_are_serialized(monkeypatch, tmp_path):
     first.write_text("First document for Project Phoenix.", encoding="utf-8")
     second = tmp_path / "second.txt"
     second.write_text("Second document for Project Phoenix.", encoding="utf-8")
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.embeddings = FakeEmbeddings()
     original_process_document = DocumentQA.process_document
     original_load_documents = DocumentQA._load_documents
@@ -1578,7 +2254,7 @@ def test_failed_embedding_initialization_keeps_previous_document_queryable(
 
     monkeypatch.setattr(DocumentQA, "_initialize_embeddings", fail_initialize_embeddings)
 
-    with pytest.raises(RuntimeError, match="Embedding model is unavailable"):
+    with pytest.raises(RuntimeError, match="Embedding backend is unavailable"):
         qa.process_document(str(replacement))
 
     assert qa.current_document_name == "phoenix.txt"
@@ -1590,7 +2266,8 @@ def test_failed_embedding_initialization_keeps_previous_document_queryable(
     assert report.phase == "initialize_embeddings"
     assert report.attempted_document_name == "replacement.txt"
     assert report.active_document_name == "phoenix.txt"
-    assert "Embedding model is unavailable" in report.error_message
+    assert "Embedding backend is unavailable" in report.error_message
+    assert "boom" in report.error_message
 
 
 def test_empty_replacement_keeps_previous_document_queryable(tmp_path):
@@ -1679,7 +2356,6 @@ def test_successful_upload_report_records_truncation(tmp_path):
     document.write_text(("Project Phoenix launch notes.\n" * 500), encoding="utf-8")
     qa = DocumentQA(
         fast_mode=True,
-        hf_token="dummy",
         llm_backend="mock",
         max_document_chunks=1,
     )
@@ -1698,7 +2374,7 @@ def test_successful_upload_report_records_truncation(tmp_path):
 def test_text_loader_sets_source_metadata(tmp_path):
     document = tmp_path / "notes.md"
     document.write_text("# Notes\nProject Phoenix launch notes.", encoding="utf-8")
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(str(document), ".md")
 
@@ -1766,7 +2442,7 @@ def test_text_loader_sets_source_metadata(tmp_path):
 def test_text_loader_detects_common_non_utf8_encodings(tmp_path, encoding, text):
     document = tmp_path / "legacy.txt"
     document.write_bytes(text.encode(encoding))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(
         str(document), ".txt", text_encoding=encoding
@@ -1791,7 +2467,7 @@ def test_text_loader_detects_common_non_utf8_encodings(tmp_path, encoding, text)
 def test_text_loader_utf8_or_western_mode_preserves_text(tmp_path, encoding, text):
     document = tmp_path / "default_text.txt"
     document.write_bytes(text.encode(encoding))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(
         str(document), ".txt", text_encoding="utf-8-or-western"
@@ -1815,7 +2491,7 @@ def test_text_loader_utf8_or_western_mode_preserves_text(tmp_path, encoding, tex
 def test_text_loader_detects_utf_family_encodings(tmp_path, encoding, text):
     document = tmp_path / "unicode.txt"
     document.write_bytes(text.encode(encoding))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(str(document), ".txt")
 
@@ -1827,7 +2503,7 @@ def test_text_loader_uses_confident_detector_for_legacy_encoding(tmp_path):
     text = "Zażółć gęślą jaźń"
     document = tmp_path / "polish.txt"
     document.write_bytes(text.encode("cp1250"))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(str(document), ".txt")
 
@@ -1848,7 +2524,7 @@ def test_text_loader_uses_confident_detector_for_legacy_encoding(tmp_path):
 def test_text_loader_uses_explicit_legacy_encoding(tmp_path, encoding, text):
     document = tmp_path / "legacy.txt"
     document.write_bytes(text.encode(encoding))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     loaded_documents = qa._load_documents(
         str(document), ".txt", text_encoding=encoding
@@ -1860,7 +2536,7 @@ def test_text_loader_uses_explicit_legacy_encoding(tmp_path, encoding, text):
 def test_text_loader_reports_invalid_explicit_encoding(tmp_path):
     document = tmp_path / "legacy.txt"
     document.write_bytes("Phoenix".encode("utf-8"))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     with pytest.raises(ValueError, match="Could not decode text document"):
         qa._load_documents(str(document), ".txt", text_encoding="not-a-codec")
@@ -1899,7 +2575,7 @@ def test_text_loader_rejects_ambiguous_legacy_text_instead_of_mojibake(
 ):
     document = tmp_path / "ambiguous.txt"
     document.write_bytes(text.encode(encoding))
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     with pytest.raises(ValueError, match="Could not decode text document"):
         qa._load_documents(str(document), ".txt")
@@ -1924,7 +2600,7 @@ def test_faiss_vector_store_returns_relevant_documents():
 def test_rejects_unsupported_file_type_before_model_initialization(tmp_path):
     document = tmp_path / "data.csv"
     document.write_text("a,b\n1,2\n", encoding="utf-8")
-    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
     with pytest.raises(RuntimeError, match="Unsupported file type: .csv"):
         qa.process_document(str(document))
@@ -1936,7 +2612,7 @@ def test_rejects_oversized_document_before_model_initialization(tmp_path):
     document = tmp_path / "too-large.txt"
     document.write_text("too large", encoding="utf-8")
     qa = DocumentQA(
-        fast_mode=True, hf_token="dummy", llm_backend="mock", max_document_bytes=1
+        fast_mode=True, llm_backend="mock", max_document_bytes=1
     )
 
     with pytest.raises(RuntimeError, match="File is too large"):
@@ -1945,124 +2621,113 @@ def test_rejects_oversized_document_before_model_initialization(tmp_path):
     assert qa.llm is None
 
 
-def test_auto_backend_uses_endpoint_on_cpu_with_token(monkeypatch):
-    def fake_endpoint_loader(self, model_id):
+def test_auto_backend_uses_ollama_when_available(monkeypatch):
+    def fake_ollama_loader(self, model_id):
         return MockLLM()
 
-    monkeypatch.delenv("HF_ENDPOINT_URL", raising=False)
-    monkeypatch.setattr(DocumentQA, "_load_endpoint_model", fake_endpoint_loader)
-    qa = DocumentQA(device="cpu", hf_token="real-token", llm_backend="auto")
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OLLAMA_MODEL", "nemotron-3-nano:4b")
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
+    qa = DocumentQA(device="cpu", llm_backend="auto")
 
     qa._initialize_llm()
 
-    assert qa.active_llm_backend == "endpoint"
-    assert qa.loaded_model_id == "Qwen/Qwen2.5-1.5B-Instruct"
+    assert qa.active_llm_backend == "ollama"
+    assert qa.loaded_model_id == "nemotron-3-nano:4b"
+    assert qa.loaded_model_label == "Ollama (nemotron-3-nano:4b)"
 
 
-def test_endpoint_url_does_not_also_set_repo_id(monkeypatch):
-    monkeypatch.setenv("HF_ENDPOINT_URL", "https://example.invalid")
-    qa = DocumentQA(device="cpu", hf_token="real-token", llm_backend="endpoint")
+def test_invalid_llm_backend_env_fails_closed_before_loading_model(monkeypatch):
+    load_attempted = False
 
-    llm = qa._load_endpoint_model("Qwen/Qwen2.5-1.5B-Instruct")
+    def forbidden_ollama_loader(self, model_id):
+        nonlocal load_attempted
+        load_attempted = True
+        raise AssertionError("invalid backend must not select Ollama")
 
-    assert llm.endpoint_url == "https://example.invalid"
-    assert llm.repo_id is None
+    monkeypatch.setenv("LLM_BACKEND", "mockk")
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", forbidden_ollama_loader)
+
+    with pytest.raises(RuntimeError, match="Unsupported LLM_BACKEND='mockk'"):
+        DocumentQA(device="cpu")
+
+    assert load_attempted is False
 
 
-def test_custom_endpoint_records_endpoint_label_not_candidate_model(monkeypatch):
-    def fake_endpoint_loader(self, model_id):
+@pytest.mark.parametrize("backend", ["endpoint", "local"])
+def test_removed_hf_backend_names_fail_closed_before_loading_model(
+    monkeypatch, backend
+):
+    load_attempted = False
+
+    def forbidden_ollama_loader(self, model_id):
+        nonlocal load_attempted
+        load_attempted = True
+        raise AssertionError("removed backend must not select Ollama")
+
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", forbidden_ollama_loader)
+
+    with pytest.raises(RuntimeError, match="Unsupported LLM_BACKEND"):
+        DocumentQA(device="cpu", llm_backend=backend)
+
+    assert load_attempted is False
+
+
+def test_auto_backend_uses_ollama_on_cuda_when_available(monkeypatch):
+    def fake_ollama_loader(self, model_id):
         return MockLLM()
 
-    monkeypatch.setenv("HF_ENDPOINT_URL", "https://example.invalid")
-    monkeypatch.setattr(DocumentQA, "_load_endpoint_model", fake_endpoint_loader)
-    qa = DocumentQA(device="cpu", hf_token="real-token", llm_backend="endpoint")
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
+    qa = DocumentQA(device="cuda", llm_backend="auto")
 
     qa._initialize_llm()
 
-    assert qa.loaded_model_id is None
-    assert qa.loaded_model_label == "Custom endpoint (https://example.invalid)"
+    assert qa.active_llm_backend == "ollama"
+    assert qa.loaded_model_id == "nemotron-3-nano:4b"
 
 
-def test_auto_backend_uses_local_on_cuda_device_with_token(monkeypatch):
-    def fake_local_loader(self, model_id):
+def test_auto_backend_uses_ollama_on_mps_when_available(monkeypatch):
+    def fake_ollama_loader(self, model_id):
         return MockLLM()
 
-    monkeypatch.setattr(DocumentQA, "_load_local_model", fake_local_loader)
-    qa = DocumentQA(device="cuda", hf_token="real-token", llm_backend="auto")
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("OLLAMA_MODEL", raising=False)
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
+    qa = DocumentQA(device="mps", llm_backend="auto")
 
     qa._initialize_llm()
 
-    assert qa.active_llm_backend == "local"
-    assert qa.loaded_model_id == "Qwen/Qwen2.5-1.5B-Instruct"
+    assert qa.active_llm_backend == "ollama"
+    assert qa.loaded_model_id == "nemotron-3-nano:4b"
 
 
-def test_auto_backend_uses_endpoint_on_mps_with_token(monkeypatch):
-    def fake_endpoint_loader(self, model_id):
-        return MockLLM()
+def test_auto_backend_fails_closed_when_ollama_unavailable(monkeypatch):
+    def failing_ollama_loader(self, model_id):
+        raise ValueError("ollama unavailable")
 
-    monkeypatch.delenv("HF_ENDPOINT_URL", raising=False)
-    monkeypatch.setattr(DocumentQA, "_load_endpoint_model", fake_endpoint_loader)
-    qa = DocumentQA(device="mps", hf_token="real-token", llm_backend="auto")
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", failing_ollama_loader)
+    qa = DocumentQA(device="mps", llm_backend="auto")
 
-    qa._initialize_llm()
-
-    assert qa.active_llm_backend == "endpoint"
-    assert qa.loaded_model_id == "Qwen/Qwen2.5-1.5B-Instruct"
-
-
-def test_auto_backend_on_mps_without_token_falls_back_to_mock(monkeypatch):
-    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
-    qa = DocumentQA(device="mps", llm_backend="auto", hf_token=None)
-
-    qa._initialize_llm()
-
-    assert qa.active_llm_backend == "mock"
-    assert isinstance(qa.llm, MockLLM)
-
-
-def test_auto_endpoint_without_token_falls_back_to_mock(monkeypatch):
-    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
-    qa = DocumentQA(device="cpu", llm_backend="auto", hf_token=None)
-
-    qa._initialize_llm()
-
-    assert qa.active_llm_backend == "mock"
-    assert isinstance(qa.llm, MockLLM)
-
-
-def test_explicit_endpoint_without_token_fails_closed(monkeypatch):
-    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
-    qa = DocumentQA(device="cpu", llm_backend="endpoint", hf_token=None)
-
-    with pytest.raises(RuntimeError, match="token is required for endpoint inference"):
-        qa._initialize_llm()
-
-
-def test_explicit_local_backend_failure_fails_closed(monkeypatch):
-    def failing_local_loader(self, model_id):
-        raise ValueError("boom")
-
-    monkeypatch.setattr(DocumentQA, "_load_local_model", failing_local_loader)
-    qa = DocumentQA(device="cpu", llm_backend="local", hf_token="real-token")
-
-    with pytest.raises(RuntimeError, match="Unable to initialize local LLM"):
+    with pytest.raises(RuntimeError, match="Unable to initialize auto-selected"):
         qa._initialize_llm()
 
     assert qa.active_llm_backend is None
     assert qa.llm is None
 
 
-def test_explicit_ollama_backend_uses_ollama_without_hf_token(monkeypatch):
+def test_explicit_ollama_backend_uses_ollama(monkeypatch):
     loaded_models = []
 
     def fake_ollama_loader(self, model_id):
         loaded_models.append(model_id)
         return MockLLM()
 
-    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.setenv("OLLAMA_MODEL", "nemotron-3-nano:4b")
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
-    qa = DocumentQA(device="cpu", llm_backend="ollama", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="ollama")
 
     qa._initialize_llm()
 
@@ -2073,12 +2738,12 @@ def test_explicit_ollama_backend_uses_ollama_without_hf_token(monkeypatch):
     assert qa.status().active_model_label == "Ollama (nemotron-3-nano:4b)"
 
 
-def test_explicit_ollama_backend_with_dummy_hf_token_does_not_mock(monkeypatch):
+def test_explicit_ollama_backend_does_not_mock(monkeypatch):
     def fake_ollama_loader(self, model_id):
         return MockLLM()
 
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", fake_ollama_loader)
-    qa = DocumentQA(device="cpu", llm_backend="ollama", hf_token="dummy")
+    qa = DocumentQA(device="cpu", llm_backend="ollama")
 
     qa._initialize_llm()
 
@@ -2090,7 +2755,7 @@ def test_explicit_ollama_backend_failure_fails_closed(monkeypatch):
         raise ValueError("ollama down")
 
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", failing_ollama_loader)
-    qa = DocumentQA(device="cpu", llm_backend="ollama", hf_token=None)
+    qa = DocumentQA(device="cpu", llm_backend="ollama")
 
     with pytest.raises(RuntimeError, match="Unable to initialize ollama LLM"):
         qa._initialize_llm()
@@ -2099,30 +2764,562 @@ def test_explicit_ollama_backend_failure_fails_closed(monkeypatch):
     assert qa.llm is None
 
 
-@pytest.mark.parametrize("backend", ["endpoint", "local"])
-def test_explicit_real_backend_with_dummy_token_fails_closed(backend):
-    qa = DocumentQA(device="cpu", llm_backend=backend, hf_token="dummy")
+def test_explicit_openai_compatible_backend_uses_chat_completions(monkeypatch):
+    requests = []
 
-    with pytest.raises(RuntimeError, match="Dummy HuggingFace token"):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "ok"}}]}
+            ).encode("utf-8")
+
+    def fake_open_openai_compatible_request(request, *, timeout):
+        requests.append(
+            {
+                "url": request.full_url,
+                "headers": {
+                    key.lower(): value for key, value in request.header_items()
+                },
+                "payload": json.loads(request.data.decode("utf-8")),
+                "timeout": timeout,
+            }
+        )
+        return FakeResponse()
+
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "secret-token")
+    monkeypatch.setenv("OPENAI_COMPAT_TIMEOUT", "7")
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
+
+    qa._initialize_llm()
+    answer = qa.llm._call("Question?", stop=["END"])
+
+    assert answer == "ok"
+    assert qa.active_llm_backend == "openai-compatible"
+    assert qa.loaded_model_id == "local-chat"
+    assert qa.loaded_model_label == "OpenAI-compatible (local-chat)"
+    assert len(requests) == 2
+    assert requests[0]["url"] == "http://localhost:8000/v1/chat/completions"
+    assert requests[0]["headers"]["authorization"] == "Bearer secret-token"
+    assert requests[0]["timeout"] == 7
+    assert requests[0]["payload"]["model"] == "local-chat"
+    assert requests[0]["payload"]["messages"] == [
+        {"role": "user", "content": "Respond with ok."}
+    ]
+    assert requests[0]["payload"]["max_tokens"] == 1
+    assert requests[1]["payload"]["messages"] == [
+        {"role": "user", "content": "Question?"}
+    ]
+    assert requests[1]["payload"]["stop"] == ["END"]
+
+
+def test_openai_compatible_llm_direct_constructor_rejects_remote_http(
+    monkeypatch,
+):
+    request_attempted = False
+
+    def fake_open_openai_compatible_request(request, *, timeout):
+        nonlocal request_attempted
+        request_attempted = True
+        raise AssertionError("remote HTTP chat request should not be sent")
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        OpenAICompatibleLLM(
+            model="local-chat",
+            base_url="http://gateway.example/v1",
+            api_key="SECRET_TOKEN",
+        )
+
+    chain_messages = exception_chain_messages(exc_info.value)
+    assert request_attempted is False
+    assert any("HTTPS" in message for message in chain_messages)
+    assert all("SECRET_TOKEN" not in message for message in chain_messages)
+
+
+def test_openai_compatible_does_not_use_generic_openai_api_key(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "ok"}}]}
+            ).encode("utf-8")
+
+    def fake_open_openai_compatible_request(request, *, timeout):
+        requests.append(
+            {key.lower(): value for key, value in request.header_items()}
+        )
+        return FakeResponse()
+
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
+    monkeypatch.delenv("OPENAI_COMPAT_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "should-not-be-used")
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
+
+    qa._initialize_llm()
+
+    assert "authorization" not in requests[0]
+
+
+def test_openai_compatible_http_error_body_is_not_reflected(monkeypatch):
+    class SecretHttpError(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(
+                url="http://localhost:8000/v1/chat/completions",
+                code=401,
+                msg="Unauthorized SECRET_STATUS_TEXT",
+                hdrs={},
+                fp=None,
+            )
+
+        def read(self):
+            return b"debug echo SECRET_API_KEY from proxy"
+
+    def fake_open_openai_compatible_request(request, *, timeout):
+        raise SecretHttpError()
+
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        qa._initialize_llm()
+
+    message = str(exc_info.value)
+    inner_error = exc_info.value.__cause__
+    assert inner_error is not None
+    cause_message = str(inner_error)
+    assert "HTTP 401" in message
+    assert "HTTP 401" in cause_message
+    assert "SECRET_API_KEY" not in message
+    assert "SECRET_API_KEY" not in cause_message
+    assert "SECRET_STATUS_TEXT" not in message
+    assert "SECRET_STATUS_TEXT" not in cause_message
+    assert "debug echo" not in message
+    assert "debug echo" not in cause_message
+    assert inner_error.__cause__ is None
+
+
+def test_openai_compatible_url_error_reason_is_not_reflected(monkeypatch):
+    def fake_open_openai_compatible_request(request, *, timeout):
+        raise urllib.error.URLError("proxy failed with SECRET_REASON_TOKEN")
+
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        qa._initialize_llm()
+
+    message = str(exc_info.value)
+    inner_error = exc_info.value.__cause__
+    assert inner_error is not None
+    cause_message = str(inner_error)
+    assert "http://localhost:8000/v1/chat/completions" in message
+    assert "http://localhost:8000/v1/chat/completions" in cause_message
+    assert "SECRET_REASON_TOKEN" not in message
+    assert "SECRET_REASON_TOKEN" not in cause_message
+    assert "proxy failed" not in message
+    assert "proxy failed" not in cause_message
+    assert inner_error.__cause__ is None
+    assert inner_error.__context__ is None
+    assert all(
+        "SECRET_REASON_TOKEN" not in chain_message
+        for chain_message in exception_chain_messages(exc_info.value)
+    )
+    assert all(
+        "proxy failed" not in chain_message
+        for chain_message in exception_chain_messages(exc_info.value)
+    )
+
+
+def test_openai_compatible_initialization_error_redacts_path_secret(monkeypatch):
+    def fake_open_openai_compatible_request(request, *, timeout):
+        raise urllib.error.URLError("proxy failed")
+
+    unsafe_base_url = "https://gateway.example/v1/SECRET_PATH"
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", unsafe_base_url)
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        qa._initialize_llm()
+
+    chain_messages = exception_chain_messages(exc_info.value)
+    assert chain_messages
+    assert all("SECRET_PATH" not in message for message in chain_messages)
+    assert all(unsafe_base_url not in message for message in chain_messages)
+    assert any("https://gateway.example" in message for message in chain_messages)
+    assert all("proxy failed" not in message for message in chain_messages)
+
+
+def test_openai_compatible_initialization_logs_redact_path_secret(
+    monkeypatch, caplog
+):
+    def fake_open_openai_compatible_request(request, *, timeout):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                if request.full_url.endswith("/chat/completions"):
+                    return json.dumps(
+                        {"choices": [{"message": {"content": "ok"}}]}
+                    ).encode("utf-8")
+                return json.dumps(
+                    {"data": [{"index": 0, "embedding": [1.0, 0.0]}]}
+                ).encode("utf-8")
+
+        return FakeResponse()
+
+    unsafe_base_url = "https://gateway.example/v1/SECRET_PATH"
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", unsafe_base_url)
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
+    monkeypatch.setenv("EMBEDDINGS_MODEL", "text-embedding-local")
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+    caplog.set_level(logging.INFO, logger=document_qa_module.LOGGER.name)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
+
+    qa._initialize_llm()
+    qa._initialize_embeddings()
+
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "https://gateway.example" in log_text
+    assert "SECRET_PATH" not in log_text
+    assert unsafe_base_url not in log_text
+
+
+def test_openai_compatible_backend_alias_is_supported(monkeypatch):
+    def fake_openai_compatible_loader(self, model_id):
+        return MockLLM()
+
+    monkeypatch.setattr(
+        DocumentQA, "_load_openai_compatible_model", fake_openai_compatible_loader
+    )
+    qa = DocumentQA(device="cpu", llm_backend="openai_compatible")
+
+    qa._initialize_llm()
+
+    assert qa.llm_backend == "openai-compatible"
+    assert qa.active_llm_backend == "openai-compatible"
+
+
+def test_explicit_openai_compatible_without_base_url_fails_closed(monkeypatch):
+    monkeypatch.delenv("OPENAI_COMPAT_BASE_URL", raising=False)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
+
+    with pytest.raises(RuntimeError, match="OPENAI_COMPAT_BASE_URL"):
         qa._initialize_llm()
 
     assert qa.active_llm_backend is None
     assert qa.llm is None
 
 
-def test_local_backend_without_token_still_attempts_local_public_model(monkeypatch):
-    monkeypatch.delenv("HUGGINGFACEHUB_API_TOKEN", raising=False)
+def test_explicit_openai_compatible_without_model_fails_closed(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPAT_MODEL", raising=False)
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
-    def fake_local_loader(self, model_id):
+    with pytest.raises(RuntimeError, match="OPENAI_COMPAT_MODEL"):
+        qa._initialize_llm()
+
+    assert qa.active_llm_backend is None
+    assert qa.llm is None
+
+
+@pytest.mark.parametrize(
+    "base_url, expected",
+    [
+        ("http://localhost:8000/v1/", "http://localhost:8000/v1"),
+        ("http://127.0.0.1:8000/v1", "http://127.0.0.1:8000/v1"),
+        ("http://[::1]:8000/v1", "http://[::1]:8000/v1"),
+        ("https://gateway.example/v1", "https://gateway.example/v1"),
+    ],
+)
+def test_normalize_openai_compatible_base_url_accepts_http_forms(
+    base_url, expected
+):
+    assert normalize_openai_compatible_base_url(base_url) == expected
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "not-a-url",
+        "file:///tmp/model",
+        "http://user:pass@localhost:8000/v1",
+        "http://localhost:bad/v1",
+        "http://gateway.example/v1",
+        "http://localhost:8000/v1?token=x",
+        "http://localhost:8000/v1#fragment",
+    ],
+)
+def test_normalize_openai_compatible_base_url_rejects_unsafe_forms(base_url):
+    with pytest.raises(RuntimeError, match="OPENAI_COMPAT_BASE_URL"):
+        normalize_openai_compatible_base_url(base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url, expected",
+    [
+        (
+            "https://user:SECRET_PASSWORD@gateway.example/v1",
+            "https://gateway.example/v1",
+        ),
+        (
+            "https://gateway.example/v1?api_key=SECRET_QUERY_TOKEN",
+            "https://gateway.example/v1",
+        ),
+        (
+            "https://gateway.example:8443/v1#SECRET_FRAGMENT",
+            "https://gateway.example:8443/v1",
+        ),
+        (
+            "https://gateway.example/v1/SECRET_PATH",
+            "https://gateway.example",
+        ),
+        ("not-a-url", "<invalid>"),
+        ("", "<unset>"),
+    ],
+)
+def test_safe_openai_compatible_base_url_for_error_redacts_secrets(
+    base_url, expected
+):
+    assert safe_openai_compatible_base_url_for_error(base_url) == expected
+
+
+def exception_chain_messages(error):
+    messages = []
+    seen = set()
+    stack = [error]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        messages.append(str(current))
+        stack.extend([current.__cause__, current.__context__])
+    return messages
+
+
+@pytest.mark.parametrize(
+    "unsafe_base_url, secret",
+    [
+        ("https://user:SECRET_PASSWORD@gateway.example/v1", "SECRET_PASSWORD"),
+        (
+            "https://gateway.example/v1?api_key=SECRET_QUERY_TOKEN",
+            "SECRET_QUERY_TOKEN",
+        ),
+        ("https://gateway.example/v1#SECRET_FRAGMENT", "SECRET_FRAGMENT"),
+    ],
+)
+def test_openai_compatible_initialization_error_redacts_unsafe_url(
+    monkeypatch, unsafe_base_url, secret
+):
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", unsafe_base_url)
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        qa._initialize_llm()
+
+    message = str(exc_info.value)
+    cause_message = str(exc_info.value.__cause__)
+    assert secret not in message
+    assert secret not in cause_message
+    assert unsafe_base_url not in message
+    assert unsafe_base_url not in cause_message
+    assert "gateway.example" in message
+
+
+def test_openai_compatible_invalid_port_error_drops_parser_cause(monkeypatch):
+    monkeypatch.setenv(
+        "OPENAI_COMPAT_BASE_URL", "http://localhost:SECRET_PORT/v1"
+    )
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        qa._initialize_llm()
+
+    chain_messages = exception_chain_messages(exc_info.value)
+    assert chain_messages
+    assert all("SECRET_PORT" not in message for message in chain_messages)
+    assert all(
+        "http://localhost:SECRET_PORT/v1" not in message
+        for message in chain_messages
+    )
+    assert exc_info.value.__cause__ is not None
+    assert exc_info.value.__cause__.__cause__ is None
+    assert exc_info.value.__cause__.__context__ is None
+
+
+def test_openai_compatible_rejects_remote_http_before_sending_api_key(
+    monkeypatch,
+):
+    request_attempted = False
+
+    def fake_open_openai_compatible_request(request, *, timeout):
+        nonlocal request_attempted
+        request_attempted = True
+        raise AssertionError("remote HTTP request should not be sent")
+
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "http://gateway.example/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "local-chat")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "SECRET_API_KEY")
+    monkeypatch.setattr(
+        document_qa_module,
+        "open_openai_compatible_request",
+        fake_open_openai_compatible_request,
+    )
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        qa._initialize_llm()
+
+    chain_messages = exception_chain_messages(exc_info.value)
+    assert not request_attempted
+    assert any("HTTPS" in message for message in chain_messages)
+    assert all("SECRET_API_KEY" not in message for message in chain_messages)
+
+
+def test_openai_compatible_loopback_http_bypasses_proxy_urlopen(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "ok"}}]}
+            ).encode("utf-8")
+
+    def fake_no_proxy_open(request, timeout):
+        requests.append(
+            {
+                "url": request.full_url,
+                "headers": {
+                    key.lower(): value for key, value in request.header_items()
+                },
+                "timeout": timeout,
+            }
+        )
+        return FakeResponse()
+
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8443")
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout: (_ for _ in ()).throw(
+            AssertionError(
+                "OpenAI-compatible loopback HTTP must bypass proxy-aware urlopen"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        document_qa_module.OPENAI_COMPAT_NO_PROXY_OPENER,
+        "open",
+        fake_no_proxy_open,
+    )
+    llm = OpenAICompatibleLLM(
+        model="local-chat",
+        base_url="http://localhost:8000/v1",
+        api_key="SECRET_PROXY_TOKEN",
+        timeout=7,
+    )
+
+    llm.validate_model_available()
+
+    assert requests == [
+        {
+            "url": "http://localhost:8000/v1/chat/completions",
+            "headers": {
+                "content-type": "application/json",
+                "authorization": "Bearer SECRET_PROXY_TOKEN",
+            },
+            "timeout": 7,
+        }
+    ]
+
+
+def test_openai_compatible_initializes_with_explicit_backend(monkeypatch):
+    def fake_openai_compatible_loader(self, model_id):
         return MockLLM()
 
-    monkeypatch.setattr(DocumentQA, "_load_local_model", fake_local_loader)
-    qa = DocumentQA(device="cpu", llm_backend="local", hf_token=None)
+    monkeypatch.setattr(
+        DocumentQA, "_load_openai_compatible_model", fake_openai_compatible_loader
+    )
+    qa = DocumentQA(device="cpu", llm_backend="openai-compatible")
 
     qa._initialize_llm()
 
-    assert qa.active_llm_backend == "local"
-    assert qa.loaded_model_id == "Qwen/Qwen2.5-1.5B-Instruct"
+    assert qa.active_llm_backend == "openai-compatible"
+    assert isinstance(qa.llm, MockLLM)
 
 
 def test_ollama_llm_validates_model_and_generates(monkeypatch):
@@ -2169,7 +3366,7 @@ def test_ollama_llm_validates_model_and_generates(monkeypatch):
     )
     llm = OllamaLLM(
         model=DEFAULT_OLLAMA_MODEL,
-        base_url="http://ollama.test/",
+        base_url="http://localhost:11434/",
         timeout=7,
         options={"temperature": 0, "num_predict": 160},
     )
@@ -2180,11 +3377,11 @@ def test_ollama_llm_validates_model_and_generates(monkeypatch):
     assert answer == "Project Phoenix answer [1]."
     assert llm._strip_thinking_text("<think>unfinished reasoning") == ""
     assert requests[0] == (
-        "http://ollama.test/api/show",
+        "http://localhost:11434/api/show",
         {"model": DEFAULT_OLLAMA_MODEL},
         7,
     )
-    assert requests[1][0] == "http://ollama.test/api/generate"
+    assert requests[1][0] == "http://localhost:11434/api/generate"
     assert requests[1][1]["model"] == DEFAULT_OLLAMA_MODEL
     assert requests[1][1]["prompt"] == "Answer with citation."
     assert requests[1][1]["stream"] is False
@@ -2194,3 +3391,54 @@ def test_ollama_llm_validates_model_and_generates(monkeypatch):
         "num_predict": 160,
         "stop": ["END"],
     }
+
+
+def test_ollama_llm_http_error_body_is_not_reflected(monkeypatch):
+    class SecretHttpError(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(
+                url="http://localhost:11434/api/show",
+                code=500,
+                msg="SECRET_STATUS_TEXT",
+                hdrs={},
+                fp=None,
+            )
+
+        def read(self):
+            return b"SECRET_BODY_TOKEN"
+
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        raise SecretHttpError()
+
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    llm = OllamaLLM(model=DEFAULT_OLLAMA_MODEL)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        llm.validate_model_available()
+
+    message = str(exc_info.value)
+    assert "HTTP 500" in message
+    assert "SECRET_BODY_TOKEN" not in message
+    assert "SECRET_STATUS_TEXT" not in message
+
+
+def test_ollama_llm_url_error_reason_is_not_reflected(monkeypatch):
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        raise urllib.error.URLError("proxy failed with SECRET_REASON_TOKEN")
+
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    llm = OllamaLLM(model=DEFAULT_OLLAMA_MODEL)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        llm.validate_model_available()
+
+    message = str(exc_info.value)
+    assert "http://localhost:11434/api/show" in message
+    assert "SECRET_REASON_TOKEN" not in message
+    assert "proxy failed" not in message

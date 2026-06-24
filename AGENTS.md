@@ -11,9 +11,13 @@ document-grounded agent loop.
 
 Primary runtime files:
 
-- `src/DocumentQA.py`: ingestion, encoding detection, embeddings, vector search,
-  document context provider wrapper, LLM backend selection, retrieval chain,
-  Ollama adapter, and query handling.
+- `src/ai_loop_engine.py`: canonical public runtime API. New code should import
+  `AILoopEngine` from this module.
+- `src/DocumentQA.py`: legacy implementation module during the refactor. It
+  still owns ingestion, encoding detection, embeddings, vector search, document
+  context provider wrapper, LLM backend selection, retrieval chain, Ollama
+  adapter, and query handling while exposing `DocumentQA` as a compatibility
+  alias.
 - `src/loop_engine.py`: provider-neutral loop primitives for typed run, step,
   policy, verifier, human-review, session, and report records.
 - `src/loop_eval.py`: unified provider-free and optional live Ollama loop eval
@@ -37,22 +41,24 @@ Primary runtime files:
 - Pip fallback: `python -m pip install -r requirements-dev.txt`
 - Run the app locally: `uv run ai-loop-engine` or `python -m src.app`
 - Run tests: `uv run pytest` or `python -m pytest`
-- Compile check: `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
+- Compile check: `python -m py_compile src/__init__.py src/app.py src/ai_loop_engine.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
 - Dependency checks: `python -m pip check` and `python -m pip_audit -r requirements.txt --strict`
 
 ## Non-Negotiable Contracts
 
-- Do not silently fall back from explicit real LLM backends. `LLM_BACKEND=endpoint`,
-  `LLM_BACKEND=local`, and `LLM_BACKEND=ollama` must fail closed when credentials,
-  model loading, server reachability, or model availability are invalid. Mock mode
-  must be explicit or an `auto` demo fallback.
+- Do not silently fall back from explicit real LLM backends.
+  `LLM_BACKEND=ollama` and `LLM_BACKEND=openai-compatible` must fail closed when
+  model loading, server reachability, model availability, or gateway
+  credentials are invalid. Mock mode must be explicit and must never be reached
+  as a fallback. Removed backend names such as `endpoint` and `local` must fail
+  closed as invalid configuration.
 - Do not let UI status imply inference readiness before inference has actually
   happened. Document upload means indexed, not proven ready.
 - Document upload replacement must be transactional. Failed uploads must preserve
   the previous successful document, vector store, retrieval chain, and query
   behavior while recording the failed attempt in the processing report.
-- `DocumentQA.status()` and its processing report are the source of truth for UI
-  status. UI code and tests should not inspect random internal attributes.
+- `AILoopEngine.status()` and its processing report are the source of truth for
+  UI status. UI code and tests should not inspect random internal attributes.
 - Answer traces and citations must come from the retrieved chunks used to build
   the LLM prompt. Do not bolt on citations from a separate post-answer lookup.
 - Answer self-checking must remain document-only. Cheap mechanical checks and
@@ -61,7 +67,7 @@ Primary runtime files:
   mechanically valid answers as `not_verified`, not `supported`.
 - Golden document evals must remain provider-free and deterministic. They should
   exercise upload, retrieval, citation trace, self-check, retry, and fail-closed
-  behavior without requiring a live Ollama or Hugging Face backend in CI. The
+  behavior without requiring a live Ollama backend in CI. The
   unified `src.loop_eval --mode fake` CLI should emit JSON artifacts with the
   loop reports and pass/fail decisions for local inspection.
 - Live Ollama model comparison is optional and manual. Do not add it to CI; use
@@ -76,21 +82,31 @@ Primary runtime files:
   runs may validate builds, but must not publish release images.
 - Preserve deterministic generation for context-grounded answers unless a
   test-backed product reason requires changing it.
-- Ollama support is explicit, not part of `auto`. Use `OLLAMA_MODEL`,
-  `OLLAMA_BASE_URL`, and `OLLAMA_TIMEOUT`; do not route Ollama through
-  Hugging Face model ids or tokens.
-- Native runtime defaults must be installed before Gradio, NumPy, FAISS, torch,
+- `LLM_BACKEND=auto` is local-first and real-backend-only: it selects Ollama
+  and fails closed if Ollama or the configured model is unavailable. Explicit
+  `LLM_BACKEND=mock` is only for tests/demos and must never be an automatic
+  fallback.
+- Ollama runtime URLs must be loopback local only. Remote/cloud model gateways
+  must use `LLM_BACKEND=openai-compatible`, not `OLLAMA_BASE_URL`.
+- Cloud or gateway deployment should use `LLM_BACKEND=openai-compatible` with
+  `OPENAI_COMPAT_BASE_URL`, `LLM_MODEL`, `EMBEDDINGS_MODEL`, optional
+  `OPENAI_COMPAT_API_KEY`, and `OPENAI_COMPAT_TIMEOUT`. Plain HTTP is allowed
+  only for loopback local development; remote gateways must use HTTPS.
+- `LLM_BACKEND` is the single provider/runtime selector. Do not add a separate
+  embedding backend variable. Configure the chat model with `LLM_MODEL` and the
+  retrieval model with `EMBEDDINGS_MODEL`; provider-specific model env vars are
+  compatibility aliases only.
+- Native runtime defaults must be installed before Gradio, NumPy, FAISS,
   or other native-heavy imports in app entrypoints. Use `src.native_runtime`
   instead of duplicating env setup in modules that may be imported too late.
-- Embedding runtime is separate from LLM runtime. On Apple Silicon/MPS,
-  embeddings default to CPU for upload stability; `EMBEDDINGS_DEVICE=mps` is an
-  explicit opt-in, not the default happy path.
-- `LLM_BACKEND=auto` must not silently select in-process Hugging Face local
-  models on Apple MPS. Use Ollama for the recommended local Mac path; keep
-  `LLM_BACKEND=local` explicit for users who knowingly accept that risk.
-- Product direction is local-first. Keep Hugging Face support as an optional
-  hosted/deployment path, but do not make new happy-path features require a
-  Hugging Face token when they can run through Ollama.
+- Embedding runtime follows the selected provider. Ollama uses `/api/embed`;
+  OpenAI-compatible gateways use `/embeddings`; mock mode uses built-in local
+  hashing for deterministic demos/tests.
+- `LLM_BACKEND=auto` must select Ollama only. It must not silently select mock,
+  provider-specific hosted backends, or in-process model loading.
+- Product direction is local-first. First-party model providers are Ollama and
+  generic OpenAI-compatible gateways; do not reintroduce provider-token happy
+  paths without an explicit product decision.
 - Product identity is AI Loop Engine. Document answering is now a
   document context provider capability, not the repo's strategic identity.
 - Typed loop records are the contract surface for future agent work. Add or
@@ -98,7 +114,7 @@ Primary runtime files:
   `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
   `HumanReviewRequest` before adding planner, multi-agent, tool, replay, or
   framework-adapter behavior.
-- `DocumentQA.query_with_trace()` must expose a `LoopReport` that matches the
+- `AILoopEngine.query_with_trace()` must expose a `LoopReport` that matches the
   actual query path: prompt evidence, draft, mechanical check, verifier outcome,
   retry/refusal state, and final answer.
 - Completed query loop reports must be retained in bounded in-memory
@@ -143,11 +159,11 @@ Use this loop for every non-trivial change:
   internal attributes.
 - Treat failed replacement uploads as hostile state-integrity cases. Assert the
   old document is still active and queryable after every failed upload path.
-- Preserve `DocumentQA.query()` as the simple string API; add richer answer
+- Preserve `AILoopEngine.query()` as the simple string API; add richer answer
   evidence through structured result objects such as `query_with_trace()`.
 - Keep replay/export behavior local and explicit. Do not add SQLite, server
   persistence, or background replay jobs until tests prove the product need.
-- Keep `DocumentQA` honest before making it clever. Reliability beats agentic
+- Keep `AILoopEngine` honest before making it clever. Reliability beats agentic
   theater.
 - Do not add OpenAI Agents SDK, LangGraph, or Microsoft Agent Framework as a core
   dependency until provider-neutral loop reports are real and test-covered.
@@ -178,7 +194,7 @@ For Python behavior changes:
 - `uv run pytest tests/test_langgraph_manifest_adapter.py -q`
 - `uv run pytest tests/test_loop_export.py -q`
 - `uv lock --check`
-- `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
+- `python -m py_compile src/__init__.py src/app.py src/ai_loop_engine.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:

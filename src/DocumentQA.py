@@ -1,23 +1,22 @@
+import hashlib
+import ipaddress
 import json
 import logging
+import math
 import os
 import re
-import sys
 import threading
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from getpass import getpass
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 try:
-    from .native_runtime import (
-        apply_native_runtime_defaults,
-        apply_torch_thread_limit,
-    )
+    from .native_runtime import apply_native_runtime_defaults
 except ImportError:
-    from native_runtime import apply_native_runtime_defaults, apply_torch_thread_limit
+    from native_runtime import apply_native_runtime_defaults
 
 
 apply_native_runtime_defaults()
@@ -25,15 +24,14 @@ apply_native_runtime_defaults()
 import docx2txt
 import faiss
 import numpy as np
-import torch
 from charset_normalizer import from_bytes
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.llms import LLM
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.retrievers import BaseRetriever
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFacePipeline
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pydantic import ConfigDict, Field
 from pypdf import PdfReader
@@ -69,34 +67,52 @@ except ImportError:
 
 LOGGER = logging.getLogger(__name__)
 OLLAMA_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-HF_TOKEN_ENV_VAR = "HUGGINGFACEHUB_API_TOKEN"
+OPENAI_COMPAT_NO_PROXY_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({})
+)
 FAST_MODE_ENV_VAR = "FAST_MODE"
 LLM_BACKEND_ENV_VAR = "LLM_BACKEND"
-HF_ENDPOINT_URL_ENV_VAR = "HF_ENDPOINT_URL"
-HF_ENDPOINT_TIMEOUT_ENV_VAR = "HF_ENDPOINT_TIMEOUT"
+LLM_MODEL_ENV_VAR = "LLM_MODEL"
+EMBEDDINGS_MODEL_ENV_VAR = "EMBEDDINGS_MODEL"
 OLLAMA_BASE_URL_ENV_VAR = "OLLAMA_BASE_URL"
 OLLAMA_MODEL_ENV_VAR = "OLLAMA_MODEL"
+OLLAMA_EMBEDDINGS_MODEL_ENV_VAR = "OLLAMA_EMBED_MODEL"
 OLLAMA_TIMEOUT_ENV_VAR = "OLLAMA_TIMEOUT"
+OPENAI_COMPAT_BASE_URL_ENV_VAR = "OPENAI_COMPAT_BASE_URL"
+OPENAI_COMPAT_API_KEY_ENV_VAR = "OPENAI_COMPAT_API_KEY"
+OPENAI_COMPAT_MODEL_ENV_VAR = "OPENAI_COMPAT_MODEL"
+OPENAI_COMPAT_EMBEDDINGS_MODEL_ENV_VAR = "OPENAI_COMPAT_EMBED_MODEL"
+OPENAI_COMPAT_TIMEOUT_ENV_VAR = "OPENAI_COMPAT_TIMEOUT"
 EMBEDDINGS_DEVICE_ENV_VAR = "EMBEDDINGS_DEVICE"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "nemotron-3-nano:4b"
+DEFAULT_OLLAMA_EMBEDDINGS_MODEL = "embeddinggemma"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
-SUPPORTED_LLM_BACKENDS = {"auto", "endpoint", "local", "mock", "ollama"}
+SUPPORTED_LLM_BACKENDS = {
+    "auto",
+    "mock",
+    "ollama",
+    "openai-compatible",
+}
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_DOCUMENT_CHUNKS = 2_000
 DEFAULT_MAX_SESSION_REPORTS = 200
-DEFAULT_QUALITY_EMBEDDINGS_MODEL = "Alibaba-NLP/gte-modernbert-base"
-DEFAULT_FAST_EMBEDDINGS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-DEFAULT_QUALITY_MODELS = (
-    "Qwen/Qwen2.5-1.5B-Instruct",
-    "Qwen/Qwen2.5-7B-Instruct",
-    "meta-llama/Llama-3.2-3B-Instruct",
-)
-DEFAULT_FAST_MODELS = (
-    "Qwen/Qwen2.5-1.5B-Instruct",
-    "meta-llama/Llama-3.2-3B-Instruct",
-    "Qwen/Qwen2.5-7B-Instruct",
-)
+DEFAULT_EMBEDDINGS_MODEL = "local-hashing-384"
+SUPPORTED_EMBEDDINGS_MODELS = {DEFAULT_EMBEDDINGS_MODEL}
+LOCAL_HASHING_EMBEDDINGS_DIMENSIONS = 384
+LOCAL_HASHING_ALIASES = {
+    "go_live": ("launch", "launch_date", "release", "release_date"),
+    "launch": ("go_live", "release", "start"),
+    "launched": ("launch", "go_live", "released"),
+    "launches": ("launch", "go_live", "releases"),
+    "launching": ("launch", "go_live", "releasing"),
+    "release": ("launch", "go_live"),
+    "released": ("release", "launch"),
+    "releases": ("release", "launch"),
+    "release_date": ("launch_date", "go_live"),
+    "launch_date": ("release_date", "go_live"),
+    "live": ("go_live",),
+}
 QUALITY_PROFILE = {
     "max_new_tokens": 384,
     "retrieval_k": 6,
@@ -210,11 +226,177 @@ SELF_CHECK_REFUSAL_ANSWER = (
 SELF_CHECK_PASS_OUTCOMES = {"supported", "not_verified"}
 VERIFIER_OUTCOMES = {"supported", "unsupported", "insufficient"}
 
-apply_torch_thread_limit(torch, logger=LOGGER)
+
+def is_loopback_host(hostname: str) -> bool:
+    host = hostname.rstrip(".").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def normalize_ollama_base_url(base_url: str) -> str:
+    raw_base_url = base_url.strip().rstrip("/")
+    if not raw_base_url:
+        raise RuntimeError(f"{OLLAMA_BASE_URL_ENV_VAR} must not be empty.")
+    parse_failed = False
+    try:
+        parsed = urllib.parse.urlsplit(raw_base_url)
+        _port = parsed.port
+    except ValueError:
+        parse_failed = True
+    if parse_failed:
+        raise RuntimeError(
+            f"{OLLAMA_BASE_URL_ENV_VAR} must be a valid loopback HTTP(S) URL."
+        ) from None
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError(
+            f"{OLLAMA_BASE_URL_ENV_VAR} must be a loopback HTTP(S) URL."
+        )
+    if not is_loopback_host(parsed.hostname):
+        raise RuntimeError(
+            f"{OLLAMA_BASE_URL_ENV_VAR} must point to loopback local Ollama. "
+            "Use LLM_BACKEND=openai-compatible for remote gateways."
+        )
+    if parsed.username or parsed.password:
+        raise RuntimeError(f"{OLLAMA_BASE_URL_ENV_VAR} must not include credentials.")
+    if parsed.query or parsed.fragment:
+        raise RuntimeError(
+            f"{OLLAMA_BASE_URL_ENV_VAR} must not include query or fragment data."
+        )
+    if parsed.path not in {"", "/"}:
+        raise RuntimeError(f"{OLLAMA_BASE_URL_ENV_VAR} must not include a path.")
+
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
+    return urllib.parse.urlunsplit((parsed.scheme, netloc, "", "", ""))
+
+
+def safe_ollama_base_url_for_error(base_url: str) -> str:
+    raw_base_url = base_url.strip()
+    if not raw_base_url:
+        return "<unset>"
+    try:
+        parsed = urllib.parse.urlsplit(raw_base_url)
+    except ValueError:
+        return "<invalid>"
+
+    if parsed.hostname:
+        netloc = parsed.hostname
+        try:
+            if parsed.port is not None:
+                netloc = f"{netloc}:{parsed.port}"
+        except ValueError:
+            pass
+        if parsed.scheme in {"http", "https"}:
+            return urllib.parse.urlunsplit((parsed.scheme, netloc, "", "", ""))
+    return "<invalid>"
 
 
 def open_ollama_request_no_proxy(request, *, timeout: int):
+    try:
+        parsed = urllib.parse.urlsplit(request.full_url)
+        _port = parsed.port
+    except ValueError:
+        raise RuntimeError(
+            f"{OLLAMA_BASE_URL_ENV_VAR} must be a valid loopback HTTP(S) URL."
+        ) from None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or not is_loopback_host(parsed.hostname)
+        or parsed.username
+        or parsed.password
+    ):
+        raise RuntimeError(
+            f"{OLLAMA_BASE_URL_ENV_VAR} must point to loopback local Ollama. "
+            "Use LLM_BACKEND=openai-compatible for remote gateways."
+        )
     return OLLAMA_NO_PROXY_OPENER.open(request, timeout=timeout)
+
+
+def open_openai_compatible_request(request, *, timeout: int):
+    try:
+        parsed = urllib.parse.urlsplit(request.full_url)
+    except ValueError:
+        parsed = None
+    if (
+        parsed is not None
+        and parsed.hostname
+        and is_loopback_openai_compatible_host(parsed.hostname)
+    ):
+        return OPENAI_COMPAT_NO_PROXY_OPENER.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def is_loopback_openai_compatible_host(hostname: str) -> bool:
+    return is_loopback_host(hostname)
+
+
+def normalize_openai_compatible_base_url(base_url: str) -> str:
+    raw_base_url = base_url.strip().rstrip("/")
+    if not raw_base_url:
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} is required for "
+            "LLM_BACKEND=openai-compatible."
+        )
+    parse_failed = False
+    try:
+        parsed = urllib.parse.urlsplit(raw_base_url)
+        _port = parsed.port
+    except ValueError:
+        parse_failed = True
+    if parse_failed:
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must be a valid HTTP(S) URL."
+        )
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must be an HTTP(S) URL."
+        )
+    if parsed.scheme == "http" and not is_loopback_openai_compatible_host(
+        parsed.hostname
+    ):
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must use HTTPS for non-loopback "
+            "hosts."
+        )
+    if parsed.username or parsed.password:
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must not include credentials."
+        )
+    if parsed.query or parsed.fragment:
+        raise RuntimeError(
+            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must not include query strings "
+            "or fragments."
+        )
+    return raw_base_url
+
+
+def safe_openai_compatible_base_url_for_error(base_url: str) -> str:
+    raw_base_url = base_url.strip()
+    if not raw_base_url:
+        return "<unset>"
+    try:
+        parsed = urllib.parse.urlsplit(raw_base_url)
+    except ValueError:
+        return "<invalid>"
+
+    if parsed.hostname:
+        netloc = parsed.hostname
+        try:
+            if parsed.port is not None:
+                netloc = f"{netloc}:{parsed.port}"
+        except ValueError:
+            pass
+        path = "/v1" if parsed.path.rstrip("/") == "/v1" else ""
+        if parsed.scheme in {"http", "https"}:
+            return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
+    return "<invalid>"
 
 
 ANSWER_SUPPORT_STOPWORDS = {
@@ -672,6 +854,14 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def first_env_value(*names: str) -> Optional[str]:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return None
+
+
 def normalize_encoding_name(encoding: Optional[str]) -> Optional[str]:
     if not encoding:
         return None
@@ -792,8 +982,150 @@ def nul_ratio(raw_content: bytes, offset: int, stride: int) -> float:
     return sampled_bytes.count(0) / len(sampled_bytes)
 
 
+class LocalHashingEmbeddings(Embeddings):
+    """Deterministic local lexical embeddings with no model download."""
+
+    def __init__(self, dimensions: int = LOCAL_HASHING_EMBEDDINGS_DIMENSIONS):
+        self.dimensions = max(32, int(dimensions))
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return [self._embed(text) for text in texts]
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed(text)
+
+    def _embed(self, text: str) -> List[float]:
+        vector = [0.0] * self.dimensions
+        tokens = re.findall(r"\w+", text.casefold(), flags=re.UNICODE)
+        phrase_tokens = [
+            f"{left}_{right}" for left, right in zip(tokens, tokens[1:])
+        ]
+        weighted_terms = [(token, 1.0) for token in tokens]
+        weighted_terms.extend((token, 0.8) for token in phrase_tokens)
+        for token in tokens + phrase_tokens:
+            weighted_terms.extend(
+                (alias, 0.65) for alias in LOCAL_HASHING_ALIASES.get(token, ())
+            )
+
+        for token, weight in weighted_terms:
+            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+            bucket = int.from_bytes(digest[:4], "big") % self.dimensions
+            sign = -1.0 if digest[4] & 1 else 1.0
+            vector[bucket] += sign * weight
+
+        norm = math.sqrt(sum(value * value for value in vector))
+        if not norm:
+            return vector
+        return [value / norm for value in vector]
+
+
+def _validate_embedding_vectors(
+    embeddings: Any, provider_label: str
+) -> List[List[float]]:
+    if not isinstance(embeddings, list) or not embeddings:
+        raise RuntimeError(f"{provider_label} embeddings response lacked vectors")
+
+    validated: List[List[float]] = []
+    for embedding in embeddings:
+        if not isinstance(embedding, list) or not embedding:
+            raise RuntimeError(f"{provider_label} embeddings response lacked vectors")
+        if not all(
+            isinstance(value, (int, float)) and not isinstance(value, bool)
+            for value in embedding
+        ):
+            raise RuntimeError(
+                f"{provider_label} embeddings response contained non-numeric values"
+            )
+        vector = [float(value) for value in embedding]
+        if not all(math.isfinite(value) for value in vector):
+            raise RuntimeError(
+                f"{provider_label} embeddings response contained non-finite values"
+            )
+        validated.append(vector)
+
+    dimensions = {len(embedding) for embedding in validated}
+    if len(dimensions) != 1:
+        raise RuntimeError(
+            f"{provider_label} embeddings response had inconsistent dimensions"
+        )
+    return validated
+
+
+def _validate_single_embedding_vector(
+    embeddings: List[List[float]], provider_label: str
+) -> List[float]:
+    if len(embeddings) != 1:
+        raise RuntimeError(f"{provider_label} embeddings response had unexpected length")
+    return embeddings[0]
+
+
+class OllamaEmbeddings(Embeddings):
+    """Ollama embedding adapter using the selected local provider runtime."""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        base_url: str = DEFAULT_OLLAMA_BASE_URL,
+        timeout: int = 120,
+    ):
+        self.model = model
+        self.base_url = normalize_ollama_base_url(base_url)
+        self.timeout = timeout
+
+    def _post_embed(self, inputs: str | List[str]) -> List[List[float]]:
+        request = urllib.request.Request(
+            f"{self.base_url}/api/embed",
+            data=json.dumps(
+                {
+                    "model": self.model,
+                    "input": inputs,
+                    "truncate": True,
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with open_ollama_request_no_proxy(
+                request, timeout=self.timeout
+            ) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(
+                f"Ollama embeddings API returned HTTP {exc.code} for /api/embed."
+            ) from None
+        except urllib.error.URLError:
+            raise RuntimeError(
+                f"Could not connect to Ollama embeddings at {self.base_url}/api/embed."
+            ) from None
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Ollama embeddings endpoint returned invalid JSON") from exc
+
+        embeddings = parsed.get("embeddings") if isinstance(parsed, dict) else None
+        return _validate_embedding_vectors(embeddings, "Ollama")
+
+    def validate_model_available(self) -> None:
+        _validate_single_embedding_vector(self._post_embed("ok"), "Ollama")
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        embeddings = self._post_embed(texts)
+        if len(embeddings) != len(texts):
+            raise RuntimeError("Ollama embeddings response had unexpected length")
+        return embeddings
+
+    def embed_query(self, text: str) -> List[float]:
+        embeddings = self._post_embed(text)
+        return _validate_single_embedding_vector(embeddings, "Ollama")
+
+
 class MockLLM(LLM):
-    """Fallback LLM when no HuggingFace token/model is available."""
+    """Explicit deterministic demo/test LLM."""
 
     @property
     def _llm_type(self) -> str:
@@ -815,8 +1147,8 @@ class MockLLM(LLM):
                     sentence = re.split(r"(?<=[.!?])\s+", stripped_line, maxsplit=1)[0]
                     return f"{sentence} [{citation_id}]"
         return (
-            "This is a mock response. Configure a valid HuggingFace token to enable real "
-            "AI-powered answers."
+            "This is a mock response. Configure Ollama or an OpenAI-compatible "
+            "backend to enable real AI-powered answers."
         )
 
 
@@ -834,7 +1166,7 @@ class OllamaLLM(LLM):
 
     @property
     def _api_base_url(self) -> str:
-        return self.base_url.rstrip("/")
+        return normalize_ollama_base_url(self.base_url)
 
     def _post_json(self, path: str, payload: Dict[str, object]) -> Dict[str, object]:
         request = urllib.request.Request(
@@ -849,14 +1181,11 @@ class OllamaLLM(LLM):
             ) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Ollama API returned HTTP {exc.code} for {path}.") from None
+        except urllib.error.URLError:
             raise RuntimeError(
-                f"Ollama API returned HTTP {exc.code} for {path}: {detail}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                f"Could not connect to Ollama at {self._api_base_url}: {exc.reason}"
-            ) from exc
+                f"Could not connect to Ollama at {self._api_base_url}{path}."
+            ) from None
 
         try:
             parsed = json.loads(body)
@@ -903,35 +1232,242 @@ class OllamaLLM(LLM):
         return self._strip_thinking_text(generated_text)
 
 
-class DocumentQA:
+class OpenAICompatibleLLM(LLM):
+    """Minimal OpenAI-compatible chat-completions adapter."""
+
+    model: str
+    base_url: str
+    api_key: Optional[str] = None
+    timeout: int = 120
+    max_tokens: int = 384
+    model_config = ConfigDict(validate_assignment=True)
+
+    def model_post_init(self, __context) -> None:
+        self.base_url = normalize_openai_compatible_base_url(self.base_url)
+
+    @property
+    def _llm_type(self) -> str:
+        return "openai-compatible"
+
+    @property
+    def _api_base_url(self) -> str:
+        return normalize_openai_compatible_base_url(self.base_url)
+
+    @property
+    def _chat_completions_url(self) -> str:
+        return f"{self._api_base_url}/chat/completions"
+
+    def _post_chat(
+        self,
+        prompt: str,
+        *,
+        max_tokens: Optional[int] = None,
+        stop: Optional[List[str]] = None,
+    ) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "max_tokens": max_tokens or self.max_tokens,
+            "stream": False,
+        }
+        if stop:
+            payload["stop"] = stop
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        request = urllib.request.Request(
+            self._chat_completions_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        error_message = None
+        try:
+            with open_openai_compatible_request(
+                request, timeout=self.timeout
+            ) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            status_code = exc.code
+            error_message = (
+                "OpenAI-compatible API returned HTTP "
+                f"{status_code} for /chat/completions."
+            )
+        except urllib.error.URLError:
+            safe_base_url = safe_openai_compatible_base_url_for_error(self.base_url)
+            error_message = (
+                "Could not connect to OpenAI-compatible endpoint at "
+                f"{safe_base_url}/chat/completions."
+            )
+        if error_message:
+            raise RuntimeError(error_message) from None
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("OpenAI-compatible endpoint returned invalid JSON") from exc
+
+        if not isinstance(parsed, dict):
+            raise RuntimeError("OpenAI-compatible endpoint returned unexpected JSON")
+        choices = parsed.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("OpenAI-compatible response did not include choices")
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            raise RuntimeError("OpenAI-compatible response choice was invalid")
+        message = first_choice.get("message")
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            return message["content"].strip()
+        if isinstance(first_choice.get("text"), str):
+            return first_choice["text"].strip()
+        raise RuntimeError("OpenAI-compatible response did not include generated text")
+
+    def validate_model_available(self) -> None:
+        self._post_chat("Respond with ok.", max_tokens=1)
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
+        return self._post_chat(prompt, stop=stop)
+
+
+class OpenAICompatibleEmbeddings(Embeddings):
+    """OpenAI-compatible embeddings adapter using /embeddings."""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        base_url: str,
+        api_key: Optional[str] = None,
+        timeout: int = 120,
+    ):
+        self.model = model
+        self.base_url = normalize_openai_compatible_base_url(base_url)
+        self.api_key = api_key
+        self.timeout = timeout
+
+    @property
+    def _embeddings_url(self) -> str:
+        return f"{self.base_url}/embeddings"
+
+    def _post_embeddings(self, inputs: str | List[str]) -> List[List[float]]:
+        expected_count = 1 if isinstance(inputs, str) else len(inputs)
+        payload = {
+            "model": self.model,
+            "input": inputs,
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        request = urllib.request.Request(
+            self._embeddings_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        error_message = None
+        try:
+            with open_openai_compatible_request(
+                request, timeout=self.timeout
+            ) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            error_message = (
+                "OpenAI-compatible embeddings API returned HTTP "
+                f"{exc.code} for /embeddings."
+            )
+        except urllib.error.URLError:
+            safe_base_url = safe_openai_compatible_base_url_for_error(self.base_url)
+            error_message = (
+                "Could not connect to OpenAI-compatible embeddings endpoint at "
+                f"{safe_base_url}/embeddings."
+            )
+        if error_message:
+            raise RuntimeError(error_message) from None
+
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "OpenAI-compatible embeddings endpoint returned invalid JSON"
+            ) from exc
+
+        data = parsed.get("data") if isinstance(parsed, dict) else None
+        if not isinstance(data, list):
+            raise RuntimeError("OpenAI-compatible embeddings response was invalid")
+        if len(data) != expected_count:
+            raise RuntimeError(
+                "OpenAI-compatible embeddings response had unexpected length"
+            )
+        ordered_embeddings: List[Any] = [None] * expected_count
+        seen_indices = set()
+        for item in data:
+            if not isinstance(item, dict):
+                raise RuntimeError(
+                    "OpenAI-compatible embeddings response item was invalid"
+                )
+            index = item.get("index")
+            if (
+                not isinstance(index, int)
+                or isinstance(index, bool)
+                or index < 0
+                or index >= expected_count
+                or index in seen_indices
+            ):
+                raise RuntimeError(
+                    "OpenAI-compatible embeddings response had invalid indices"
+                )
+            seen_indices.add(index)
+            ordered_embeddings[index] = item.get("embedding")
+        if len(seen_indices) != expected_count or any(
+            embedding is None for embedding in ordered_embeddings
+        ):
+            raise RuntimeError(
+                "OpenAI-compatible embeddings response had invalid indices"
+            )
+        embeddings = ordered_embeddings
+        return _validate_embedding_vectors(embeddings, "OpenAI-compatible")
+
+    def validate_model_available(self) -> None:
+        _validate_single_embedding_vector(
+            self._post_embeddings("ok"), "OpenAI-compatible"
+        )
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        embeddings = self._post_embeddings(texts)
+        if len(embeddings) != len(texts):
+            raise RuntimeError(
+                "OpenAI-compatible embeddings response had unexpected length"
+            )
+        return embeddings
+
+    def embed_query(self, text: str) -> List[float]:
+        embeddings = self._post_embeddings(text)
+        return _validate_single_embedding_vector(
+            embeddings, "OpenAI-compatible"
+        )
+
+
+class AILoopEngine:
     def __init__(
         self,
         model_id: Optional[str] = None,
         embeddings_model: Optional[str] = None,
-        hf_token: Optional[str] = None,
         device: Optional[str] = None,
         embeddings_device: Optional[str] = None,
         fast_mode: Optional[bool] = None,
         llm_backend: Optional[str] = None,
-        allow_interactive_token: bool = False,
         max_document_bytes: int = MAX_DOCUMENT_BYTES,
         max_document_chunks: int = MAX_DOCUMENT_CHUNKS,
         max_session_reports: int = DEFAULT_MAX_SESSION_REPORTS,
         loop_middlewares: Optional[Tuple[LoopMiddleware, ...]] = None,
     ):
-        self.device = device or self._detect_device()
+        self.device = device or "cpu"
         self.fast_mode = env_flag(FAST_MODE_ENV_VAR, False) if fast_mode is None else fast_mode
-        default_models = DEFAULT_FAST_MODELS if self.fast_mode else DEFAULT_QUALITY_MODELS
-        default_embeddings_model = (
-            DEFAULT_FAST_EMBEDDINGS_MODEL
-            if self.fast_mode
-            else DEFAULT_QUALITY_EMBEDDINGS_MODEL
-        )
-        self.model_id = model_id or os.getenv("LLM_MODEL_ID", default_models[0])
-        self.embeddings_model = embeddings_model or default_embeddings_model
-        self.embeddings_device = self._normalize_embeddings_device(embeddings_device)
-        self.hf_token = hf_token or self._get_hf_token(allow_interactive_token)
         self.llm_backend = self._normalize_llm_backend(llm_backend)
+        self.model_id = model_id
         self.max_document_bytes = max_document_bytes
         self.max_document_chunks = max_document_chunks
         self.max_session_reports = max(0, int(max_session_reports))
@@ -940,14 +1476,28 @@ class DocumentQA:
             os.getenv(OLLAMA_BASE_URL_ENV_VAR, DEFAULT_OLLAMA_BASE_URL).strip()
             or DEFAULT_OLLAMA_BASE_URL
         )
+        generic_llm_model = (model_id or first_env_value(LLM_MODEL_ENV_VAR) or "").strip()
         self.ollama_model = (
-            os.getenv(OLLAMA_MODEL_ENV_VAR, DEFAULT_OLLAMA_MODEL).strip()
+            generic_llm_model
+            or os.getenv(OLLAMA_MODEL_ENV_VAR, DEFAULT_OLLAMA_MODEL).strip()
             or DEFAULT_OLLAMA_MODEL
         )
         self.ollama_timeout = env_int(OLLAMA_TIMEOUT_ENV_VAR, 120)
+        self.openai_compat_base_url = os.getenv(
+            OPENAI_COMPAT_BASE_URL_ENV_VAR, ""
+        ).strip()
+        self.openai_compat_api_key = (
+            os.getenv(OPENAI_COMPAT_API_KEY_ENV_VAR, "").strip()
+            or None
+        )
+        self.openai_compat_model = generic_llm_model or os.getenv(
+            OPENAI_COMPAT_MODEL_ENV_VAR, ""
+        ).strip()
+        self.openai_compat_timeout = env_int(OPENAI_COMPAT_TIMEOUT_ENV_VAR, 120)
+        self.embeddings_model = self._resolve_embeddings_model(embeddings_model)
+        self.embeddings_device = self._normalize_embeddings_device(embeddings_device)
 
-        # Lazy initialization keeps web startup fast on constrained environments
-        # (for example Hugging Face Spaces CPU instances).
+        # Lazy initialization keeps web startup fast on constrained environments.
         self.llm = None
         self.loaded_model_id: Optional[str] = None
         self.loaded_model_label: Optional[str] = None
@@ -975,17 +1525,45 @@ class DocumentQA:
         self.loop_sessions: Dict[str, LoopSession] = {}
         self.loop_middlewares = tuple(loop_middlewares or ())
 
-    def _detect_device(self) -> str:
-        if torch.cuda.is_available():
-            return "cuda"
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
+    def _default_embeddings_device(self) -> str:
+        if self._select_llm_backend() in {"ollama", "openai-compatible"}:
+            return "external"
         return "cpu"
 
-    def _default_embeddings_device(self) -> str:
-        if self.device == "cuda":
-            return "cuda"
-        return "cpu"
+    def _resolve_embeddings_model(self, embeddings_model: Optional[str]) -> str:
+        selected_backend = self._select_llm_backend()
+        requested = (embeddings_model or "").strip()
+        generic_model = first_env_value(EMBEDDINGS_MODEL_ENV_VAR)
+
+        if selected_backend == "mock":
+            requested = requested or generic_model or DEFAULT_EMBEDDINGS_MODEL
+            if requested in SUPPORTED_EMBEDDINGS_MODELS:
+                return requested
+            raise RuntimeError(
+                "Unsupported embeddings_model="
+                f"{requested!r}. Mock document embeddings support only "
+                f"{DEFAULT_EMBEDDINGS_MODEL!r}."
+            )
+
+        if selected_backend == "ollama":
+            return (
+                requested
+                or generic_model
+                or first_env_value(OLLAMA_EMBEDDINGS_MODEL_ENV_VAR)
+                or DEFAULT_OLLAMA_EMBEDDINGS_MODEL
+            )
+
+        if selected_backend == "openai-compatible":
+            return (
+                requested
+                or generic_model
+                or first_env_value(OPENAI_COMPAT_EMBEDDINGS_MODEL_ENV_VAR)
+                or ""
+            )
+
+        raise RuntimeError(
+            f"Unsupported embeddings backend for {LLM_BACKEND_ENV_VAR}={self.llm_backend!r}."
+        )
 
     def _normalize_embeddings_device(
         self, embeddings_device: Optional[str] = None
@@ -996,167 +1574,66 @@ class DocumentQA:
         ).strip().lower()
         if not requested or requested == "auto":
             return self._default_embeddings_device()
-        if requested == "cuda":
-            if torch.cuda.is_available():
-                return "cuda"
+        if self._default_embeddings_device() == "external":
             LOGGER.warning(
-                "%s=cuda requested but CUDA is unavailable. Using CPU.",
+                "%s=%s requested, but %s=%s uses external provider embeddings.",
                 EMBEDDINGS_DEVICE_ENV_VAR,
+                requested,
+                LLM_BACKEND_ENV_VAR,
+                self.llm_backend,
             )
-            return "cpu"
-        if requested == "mps":
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return "mps"
+            return "external"
+        if requested in {"cuda", "mps"}:
             LOGGER.warning(
-                "%s=mps requested but MPS is unavailable. Using CPU.",
+                "%s=%s requested, but built-in local hashing embeddings run on CPU.",
                 EMBEDDINGS_DEVICE_ENV_VAR,
+                requested,
             )
             return "cpu"
         if requested == "cpu":
             return "cpu"
         LOGGER.warning(
-            "Unsupported %s=%r. Supported values: auto, cpu, cuda, mps. Using %s.",
+            "Unsupported %s=%r. Supported values: auto, cpu. Using CPU.",
             EMBEDDINGS_DEVICE_ENV_VAR,
             requested,
-            self._default_embeddings_device(),
         )
-        return self._default_embeddings_device()
+        return "cpu"
 
     def _normalize_llm_backend(self, llm_backend: Optional[str]) -> str:
-        backend = (llm_backend or os.getenv(LLM_BACKEND_ENV_VAR, "auto")).strip().lower()
+        raw_backend = (
+            llm_backend
+            if llm_backend is not None
+            else os.getenv(LLM_BACKEND_ENV_VAR, "auto")
+        )
+        backend = raw_backend.strip().lower().replace("_", "-")
+        if backend in {"openai", "openai-compatible-chat"}:
+            backend = "openai-compatible"
         if backend not in SUPPORTED_LLM_BACKENDS:
-            LOGGER.warning(
-                "Unsupported %s=%r. Supported values: %s. Using auto.",
-                LLM_BACKEND_ENV_VAR,
-                backend,
-                ", ".join(sorted(SUPPORTED_LLM_BACKENDS)),
+            raise RuntimeError(
+                f"Unsupported {LLM_BACKEND_ENV_VAR}={raw_backend!r}. "
+                "Supported values: "
+                f"{', '.join(sorted(SUPPORTED_LLM_BACKENDS))}."
             )
-            return "auto"
         return backend
 
     def _select_llm_backend(self) -> str:
         if self.llm_backend != "auto":
             return self.llm_backend
-        if self.device == "cuda":
-            return "local"
-        if self.device == "mps":
-            LOGGER.warning(
-                "LLM_BACKEND=auto no longer selects in-process local Hugging Face "
-                "models on Apple MPS. Use LLM_BACKEND=ollama for the recommended "
-                "local Mac path, or LLM_BACKEND=local to opt into in-process "
-                "Transformers explicitly."
-            )
-        return "endpoint"
-
-    def _get_hf_token(self, allow_interactive_token: bool) -> Optional[str]:
-        token = os.getenv(HF_TOKEN_ENV_VAR, "").strip()
-        if token:
-            return token
-
-        if not allow_interactive_token:
-            return None
-
-        if not sys.stdin or not sys.stdin.isatty():
-            LOGGER.warning(
-                "Interactive token prompt requested, but no TTY is available. "
-                "Set %s in the environment instead.",
-                HF_TOKEN_ENV_VAR,
-            )
-            return None
-
-        try:
-            token = getpass("Enter HF token (or press Enter to skip): ").strip()
-        except (KeyboardInterrupt, EOFError):
-            LOGGER.warning("No HuggingFace token provided.")
-            return None
-
-        if token:
-            os.environ[HF_TOKEN_ENV_VAR] = token
-            return token
-        return None
-
-    def _model_dtype(self) -> torch.dtype:
-        if self.device in {"cuda", "mps"}:
-            return torch.float16
-        return torch.float32
-
-    def _endpoint_url(self) -> Optional[str]:
-        return os.getenv(HF_ENDPOINT_URL_ENV_VAR, "").strip() or None
+        return "ollama"
 
     def _loaded_model_label(self, model_id: str, backend: str) -> str:
-        endpoint_url = self._endpoint_url()
-        if backend == "endpoint" and endpoint_url:
-            return f"Custom endpoint ({endpoint_url})"
         if backend == "ollama":
             return f"Ollama ({model_id})"
+        if backend == "openai-compatible":
+            return f"OpenAI-compatible ({model_id or 'unconfigured'})"
         return model_id
 
-    def _load_endpoint_model(self, model_id: str) -> LLM:
-        from langchain_huggingface import HuggingFaceEndpoint
-
-        endpoint_url = self._endpoint_url()
-        LOGGER.info(
-            "Configuring Hugging Face endpoint %s",
-            endpoint_url if endpoint_url else model_id,
-        )
-        endpoint_kwargs = {
-            "task": "text-generation",
-            "huggingfacehub_api_token": self.hf_token,
-            "max_new_tokens": self.profile["max_new_tokens"],
-            "do_sample": False,
-            "repetition_penalty": 1.05,
-            "return_full_text": False,
-            "temperature": 0.1,
-            "timeout": env_int(HF_ENDPOINT_TIMEOUT_ENV_VAR, 120),
-        }
-        if endpoint_url:
-            endpoint_kwargs["endpoint_url"] = endpoint_url
-        else:
-            endpoint_kwargs["repo_id"] = model_id
-        return HuggingFaceEndpoint(**endpoint_kwargs)
-
-    def _load_local_model(self, model_id: str) -> HuggingFacePipeline:
-        from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-
-        LOGGER.info("Loading model %s on %s", model_id, self.device)
-        tokenizer = AutoTokenizer.from_pretrained(model_id, token=self.hf_token)
-
-        model_kwargs = {
-            "dtype": self._model_dtype(),
-            "token": self.hf_token,
-            "low_cpu_mem_usage": True,
-        }
-        if self.device == "cuda":
-            model_kwargs["device_map"] = "auto"
-
-        model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
-
-        if self.device == "mps":
-            model = model.to("mps")
-
-        # Some model configs still carry a legacy max_length default, which
-        # causes transformers to warn when max_new_tokens is also provided.
-        model.generation_config.max_length = None
-
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        text_pipeline = pipeline(
-            task="text-generation",
-            model=model,
-            tokenizer=tokenizer,
-            max_new_tokens=self.profile["max_new_tokens"],
-            do_sample=False,
-            repetition_penalty=1.05,
-            return_full_text=False,
-        )
-        return HuggingFacePipeline(pipeline=text_pipeline)
-
     def _load_ollama_model(self, model_id: str) -> OllamaLLM:
-        LOGGER.info("Configuring Ollama model %s at %s", model_id, self.ollama_base_url)
+        base_url = normalize_ollama_base_url(self.ollama_base_url)
+        LOGGER.info("Configuring Ollama model %s at %s", model_id, base_url)
         llm = OllamaLLM(
             model=model_id,
-            base_url=self.ollama_base_url,
+            base_url=base_url,
             timeout=self.ollama_timeout,
             options={
                 "temperature": 0,
@@ -1166,13 +1643,71 @@ class DocumentQA:
         llm.validate_model_available()
         return llm
 
-    def _candidate_models(self) -> List[str]:
-        candidates = [self.model_id]
-        default_models = DEFAULT_FAST_MODELS if self.fast_mode else DEFAULT_QUALITY_MODELS
-        for fallback_model in default_models:
-            if fallback_model not in candidates:
-                candidates.append(fallback_model)
-        return candidates
+    def _load_ollama_embeddings(self, model_id: str) -> OllamaEmbeddings:
+        if not model_id:
+            raise RuntimeError(
+                f"{EMBEDDINGS_MODEL_ENV_VAR} or {OLLAMA_EMBEDDINGS_MODEL_ENV_VAR} "
+                "is required for Ollama embeddings."
+            )
+        base_url = normalize_ollama_base_url(self.ollama_base_url)
+        LOGGER.info(
+            "Configuring Ollama embedding model %s at %s",
+            model_id,
+            base_url,
+        )
+        embeddings = OllamaEmbeddings(
+            model=model_id,
+            base_url=base_url,
+            timeout=self.ollama_timeout,
+        )
+        embeddings.validate_model_available()
+        return embeddings
+
+    def _load_openai_compatible_model(self, model_id: str) -> OpenAICompatibleLLM:
+        base_url = normalize_openai_compatible_base_url(self.openai_compat_base_url)
+        if not model_id:
+            raise RuntimeError(
+                f"{LLM_MODEL_ENV_VAR} or {OPENAI_COMPAT_MODEL_ENV_VAR} is required for "
+                "LLM_BACKEND=openai-compatible."
+            )
+        LOGGER.info(
+            "Configuring OpenAI-compatible model %s at %s",
+            model_id,
+            safe_openai_compatible_base_url_for_error(base_url),
+        )
+        llm = OpenAICompatibleLLM(
+            model=model_id,
+            base_url=base_url,
+            api_key=self.openai_compat_api_key,
+            timeout=self.openai_compat_timeout,
+            max_tokens=self.profile["max_new_tokens"],
+        )
+        llm.validate_model_available()
+        return llm
+
+    def _load_openai_compatible_embeddings(
+        self, model_id: str
+    ) -> OpenAICompatibleEmbeddings:
+        base_url = normalize_openai_compatible_base_url(self.openai_compat_base_url)
+        if not model_id:
+            raise RuntimeError(
+                f"{EMBEDDINGS_MODEL_ENV_VAR} or "
+                f"{OPENAI_COMPAT_EMBEDDINGS_MODEL_ENV_VAR} is required for "
+                "LLM_BACKEND=openai-compatible document embeddings."
+            )
+        LOGGER.info(
+            "Configuring OpenAI-compatible embedding model %s at %s",
+            model_id,
+            safe_openai_compatible_base_url_for_error(base_url),
+        )
+        embeddings = OpenAICompatibleEmbeddings(
+            model=model_id,
+            base_url=base_url,
+            api_key=self.openai_compat_api_key,
+            timeout=self.openai_compat_timeout,
+        )
+        embeddings.validate_model_available()
+        return embeddings
 
     def _initialize_llm(self) -> None:
         requested_backend = self._select_llm_backend()
@@ -1181,31 +1716,6 @@ class DocumentQA:
             self.active_llm_backend = "mock"
             self.llm = MockLLM()
             return
-
-        if self.hf_token == "dummy":
-            message = (
-                "Dummy HuggingFace token is only allowed with LLM_BACKEND=mock "
-                "or auto demo fallback."
-            )
-            if self.llm_backend in {"endpoint", "local"}:
-                raise RuntimeError(message)
-            if requested_backend != "ollama":
-                LOGGER.warning("%s Falling back to MockLLM.", message)
-                self.active_llm_backend = "mock"
-                self.llm = MockLLM()
-                return
-
-        if requested_backend == "endpoint" and not self.hf_token:
-            message = (
-                "HuggingFace token is required for endpoint inference. "
-                f"Set {HF_TOKEN_ENV_VAR} or use LLM_BACKEND=mock for demo mode."
-            )
-            if self.llm_backend == "auto":
-                LOGGER.warning("%s Falling back to MockLLM.", message)
-                self.active_llm_backend = "mock"
-                self.llm = MockLLM()
-                return
-            raise RuntimeError(message)
 
         if requested_backend == "ollama":
             try:
@@ -1220,51 +1730,52 @@ class DocumentQA:
             except Exception as exc:
                 self.llm = None
                 self.active_llm_backend = None
+                backend_label = (
+                    "auto-selected ollama"
+                    if self.llm_backend == "auto"
+                    else "ollama"
+                )
+                safe_base_url = safe_ollama_base_url_for_error(
+                    self.ollama_base_url
+                )
                 raise RuntimeError(
-                    f"Unable to initialize ollama LLM `{self.ollama_model}` at "
-                    f"{self.ollama_base_url}. Last error: {exc}"
+                    f"Unable to initialize {backend_label} LLM "
+                    f"`{self.ollama_model}` at {safe_base_url}. "
+                    "Start Ollama and pull the configured model, choose "
+                    "LLM_BACKEND=openai-compatible for a gateway, or set "
+                    "LLM_BACKEND=mock only for explicit demo/test mode. "
+                    f"Last error: {exc}"
                 ) from exc
 
-        last_error = None
-        for candidate_model in self._candidate_models():
+        if requested_backend == "openai-compatible":
             try:
-                if requested_backend == "endpoint":
-                    self.llm = self._load_endpoint_model(candidate_model)
-                else:
-                    self.llm = self._load_local_model(candidate_model)
-                self.active_llm_backend = requested_backend
+                self.llm = self._load_openai_compatible_model(
+                    self.openai_compat_model
+                )
+                self.active_llm_backend = "openai-compatible"
+                self.loaded_model_id = self.openai_compat_model
                 self.loaded_model_label = self._loaded_model_label(
-                    candidate_model, requested_backend
+                    self.openai_compat_model, "openai-compatible"
                 )
-                self.loaded_model_id = (
-                    None
-                    if requested_backend == "endpoint" and self._endpoint_url()
-                    else candidate_model
+                LOGGER.info(
+                    "Using OpenAI-compatible model %s", self.openai_compat_model
                 )
-                self.model_id = candidate_model
-                LOGGER.info("Using %s model %s", requested_backend, candidate_model)
                 return
             except Exception as exc:
-                last_error = exc
-                LOGGER.warning(
-                    "Failed to load model %s: %s. Trying next fallback.",
-                    candidate_model,
-                    exc,
+                self.llm = None
+                self.active_llm_backend = None
+                safe_base_url = safe_openai_compatible_base_url_for_error(
+                    self.openai_compat_base_url
                 )
+                raise RuntimeError(
+                    "Unable to initialize openai-compatible LLM "
+                    f"`{self.openai_compat_model}` at "
+                    f"{safe_base_url}. Last error: {exc}"
+                ) from exc
 
-        candidate_list = ", ".join(self._candidate_models()) or "none"
-        if last_error and self.llm_backend in {"endpoint", "local"}:
-            raise RuntimeError(
-                f"Unable to initialize {requested_backend} LLM after trying "
-                f"{candidate_list}. Last error: {last_error}"
-            ) from last_error
-
-        if last_error:
-            LOGGER.exception("All model candidates failed. Falling back to MockLLM.")
-        else:
-            LOGGER.warning("No model candidates available. Falling back to MockLLM.")
-        self.active_llm_backend = "mock"
-        self.llm = MockLLM()
+        raise RuntimeError(
+            f"Unsupported initialized LLM backend: {requested_backend}."
+        )
 
     def _ensure_llm_initialized(self) -> None:
         with self._state_lock:
@@ -1413,9 +1924,22 @@ class DocumentQA:
             return
 
         try:
-            self.embeddings = HuggingFaceEmbeddings(
-                model_name=self.embeddings_model,
-                model_kwargs={"device": self.embeddings_device},
+            selected_backend = self._select_llm_backend()
+            if selected_backend == "mock":
+                self.embeddings = LocalHashingEmbeddings()
+                return
+            if selected_backend == "ollama":
+                self.embeddings = self._load_ollama_embeddings(
+                    self.embeddings_model
+                )
+                return
+            if selected_backend == "openai-compatible":
+                self.embeddings = self._load_openai_compatible_embeddings(
+                    self.embeddings_model
+                )
+                return
+            raise RuntimeError(
+                f"Unsupported embeddings backend: {selected_backend}."
             )
         except Exception as exc:
             self.embeddings_error = str(exc)
@@ -1434,10 +1958,16 @@ class DocumentQA:
 
         active_backend = self._active_backend()
         if active_backend == "mock":
-            return "MockLLM (fallback)"
+            return "MockLLM (explicit demo)"
+        if active_backend == "auto":
+            return f"Auto (Ollama {self.ollama_model})"
         if active_backend == "ollama":
             return self._loaded_model_label(self.ollama_model, "ollama")
-        return self.model_id
+        if active_backend == "openai-compatible":
+            return self._loaded_model_label(
+                self.openai_compat_model, "openai-compatible"
+            )
+        return self.model_id or "unconfigured"
 
     def _text_encoding_mode(self, text_encoding: Optional[str]) -> str:
         return (text_encoding or "auto").strip().lower() or "auto"
@@ -1805,8 +2335,15 @@ class DocumentQA:
                 if not self.embeddings:
                     self._initialize_embeddings()
                 if not self.embeddings:
+                    error_detail = (
+                        f" Last error: {self.embeddings_error}"
+                        if self.embeddings_error
+                        else ""
+                    )
                     raise RuntimeError(
-                        "Embedding model is unavailable. Check network access/model cache and retry."
+                        "Embedding backend is unavailable. "
+                        "Check the configured embedding model and provider runtime."
+                        f"{error_detail}"
                     )
 
                 phase = "load"
@@ -3070,7 +3607,10 @@ class DocumentQA:
                     run=run,
                 )
             return self._finish_query_result(
-                answer="Language model is not initialized. Please check your HuggingFace token setup.",
+                answer=(
+                    "Language model is not initialized. Please check your LLM "
+                    "backend setup."
+                ),
                 question=clean_prompt,
                 active_state=active_state,
                 run=run,
@@ -3497,3 +4037,8 @@ class DocumentQA:
     def query(self, prompt: str, session_id: str = "default") -> str:
         """Answer a user query using retrieved document context."""
         return self.query_with_trace(prompt, session_id=session_id).answer
+
+
+# Backward-compatible public name. New code should import AILoopEngine from
+# src.ai_loop_engine, but existing callers and tests may still use DocumentQA.
+DocumentQA = AILoopEngine
