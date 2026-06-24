@@ -15,7 +15,9 @@ from typing import Callable, List, Optional, Sequence
 from src.DocumentQA import (
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
+    LLM_MODEL_ENV_VAR,
     OLLAMA_BASE_URL_ENV_VAR,
+    OLLAMA_MODEL_ENV_VAR,
     SELF_CHECK_REFUSAL_ANSWER,
     DocumentQA,
     QueryResult,
@@ -24,7 +26,6 @@ from src.golden_eval import (
     GOLDEN_DOCUMENT_TEXT,
     GOLDEN_EVAL_CASES,
     GoldenEvalCase,
-    GoldenEvalEmbeddings,
 )
 
 
@@ -96,7 +97,6 @@ def build_ollama_qa(model: str, base_url: str, timeout: int) -> DocumentQA:
     qa.ollama_model = model
     qa.ollama_base_url = normalize_local_ollama_base_url(base_url)
     qa.ollama_timeout = timeout
-    qa.embeddings = GoldenEvalEmbeddings()
     return qa
 
 
@@ -248,11 +248,18 @@ def unload_ollama_model(
 
 def models_from_args(args) -> List[str]:
     if args.models:
-        return args.models
+        return [model.strip() for model in args.models if model and model.strip()]
     env_models = os.getenv("OLLAMA_EVAL_MODELS", "").strip()
     if env_models:
-        return [model.strip() for model in env_models.split(",") if model.strip()]
-    env_model = os.getenv("OLLAMA_MODEL", "").strip()
+        parsed_env_models = [
+            model.strip() for model in env_models.split(",") if model.strip()
+        ]
+        if parsed_env_models:
+            return parsed_env_models
+    env_model = (
+        os.getenv(LLM_MODEL_ENV_VAR, "").strip()
+        or os.getenv(OLLAMA_MODEL_ENV_VAR, "").strip()
+    )
     if env_model:
         return [env_model]
     return [DEFAULT_OLLAMA_MODEL]
@@ -305,7 +312,7 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         help=(
             "Ollama model tags to compare, for example "
             "`nemotron-3-nano:4b qwen3:8b`. Defaults to OLLAMA_EVAL_MODELS, "
-            "OLLAMA_MODEL, or the app default."
+            "LLM_MODEL, OLLAMA_MODEL, or the app default."
         ),
     )
     parser.add_argument(
@@ -382,6 +389,9 @@ def main(
         print(str(exc), file=output_stream)
         return 2
     models = models_from_args(args)
+    if not models:
+        print("No model tags selected for Ollama eval.", file=output_stream)
+        return 2
     if len(models) > 1 and not args.allow_multi_model:
         print(
             "Multiple Ollama models in one eval are disabled by default to avoid "

@@ -11,8 +11,7 @@ talk to an agent whose loop is visible and testable.
 - **Local-first LLM Backend:** Recommended local path is Ollama; cloud or
   gateway deployment uses a generic OpenAI-compatible chat-completions backend
 - **Vector Search:** Uses FAISS for efficient similarity search with
-  deterministic local hashing embeddings; embeddings run on CPU and require no
-  model downloads
+  provider-backed embedding models through Ollama or OpenAI-compatible gateways
 - **Gradio Interface:** Web interface for document context upload, agent chat, runtime status, compact loop summaries, and answer traces
 - **External Model Runtime:** Uses Ollama or an OpenAI-compatible gateway for
   generation so Python document indexing stays lightweight and stable
@@ -66,15 +65,16 @@ talk to an agent whose loop is visible and testable.
 
     ```bash
     ollama pull nemotron-3-nano:4b
+    ollama pull embeddinggemma
     export LLM_BACKEND=ollama
-    export OLLAMA_MODEL=nemotron-3-nano:4b
+    export LLM_MODEL=nemotron-3-nano:4b
+    export EMBEDDINGS_MODEL=embeddinggemma
     export OLLAMA_BASE_URL=http://localhost:11434
     export FAST_MODE=true
-    export EMBEDDINGS_DEVICE=cpu
     ```
 
-    Document embeddings are local CPU hashing embeddings. Keep model execution
-    in Ollama or an OpenAI-compatible runtime, not inside this Python process.
+    `LLM_BACKEND` selects the provider runtime. `LLM_MODEL` chooses the chat
+    model. `EMBEDDINGS_MODEL` chooses the retrieval embedding model.
 
 4. (Optional) choose a different backend:
 
@@ -91,7 +91,8 @@ talk to an agent whose loop is visible and testable.
     ```bash
     export LLM_BACKEND=openai-compatible
     export OPENAI_COMPAT_BASE_URL=http://localhost:8000/v1
-    export OPENAI_COMPAT_MODEL=gpt-oss:20b
+    export LLM_MODEL=gpt-oss:20b
+    export EMBEDDINGS_MODEL=text-embedding-local
     export OPENAI_COMPAT_API_KEY=optional_token_here
     ```
 
@@ -148,7 +149,8 @@ For a deployed model gateway:
    docker run -p 7860:7860 \
      -e LLM_BACKEND=openai-compatible \
      -e OPENAI_COMPAT_BASE_URL=https://your-gateway.example/v1 \
-     -e OPENAI_COMPAT_MODEL=your-model \
+     -e LLM_MODEL=your-chat-model \
+     -e EMBEDDINGS_MODEL=your-embedding-model \
      -e OPENAI_COMPAT_API_KEY=optional_token_here \
      ai-loop-engine
    ```
@@ -196,14 +198,19 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   - `openai-compatible`: OpenAI-style `/v1/chat/completions` endpoint for cloud,
     private gateway, vLLM, llama.cpp server, LM Studio, or similar runtimes
   - `mock`: explicit deterministic demo/test backend; never used as fallback
-- **Ollama:** optionally configurable with `OLLAMA_MODEL` (default `nemotron-3-nano:4b`), `OLLAMA_BASE_URL` (default `http://localhost:11434`), and `OLLAMA_TIMEOUT`
+- **Chat model:** configure with `LLM_MODEL`. Provider-specific aliases
+  `OLLAMA_MODEL` and `OPENAI_COMPAT_MODEL` are still accepted for compatibility.
+- **Embedding model:** configure with `EMBEDDINGS_MODEL`. Ollama defaults to
+  `embeddinggemma`; OpenAI-compatible gateways require an explicit embedding
+  model. Provider-specific aliases `OLLAMA_EMBED_MODEL` and
+  `OPENAI_COMPAT_EMBED_MODEL` are accepted for compatibility.
+- **Ollama:** optionally configurable with loopback-only `OLLAMA_BASE_URL`
+  (default `http://localhost:11434`) and `OLLAMA_TIMEOUT`
 - **OpenAI-compatible endpoint:** requires `OPENAI_COMPAT_BASE_URL` and
-  `OPENAI_COMPAT_MODEL`; optionally set `OPENAI_COMPAT_API_KEY` and
+  `LLM_MODEL`; optionally set `OPENAI_COMPAT_API_KEY` and
   `OPENAI_COMPAT_TIMEOUT`
-- **Embeddings:** deterministic local hashing embeddings
-  (`local-hashing-384`) with no model download and no provider token.
-  `EMBEDDINGS_DEVICE=auto|cpu` resolves to CPU; accelerated values are accepted
-  only as explicit no-op compatibility inputs and are normalized back to CPU.
+- **Mock embeddings:** `LLM_BACKEND=mock` uses deterministic local hashing
+  embeddings (`local-hashing-384`) for demos/tests only.
 - **Vector Store:** FAISS for efficient similarity search
 - **Framework:** LangChain for orchestration
 
@@ -232,8 +239,9 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   new product decision makes that tradeoff explicit.
 - New AI Loop Engine features should work through the local Ollama path first
   and the OpenAI-compatible deployment path second.
-- On Apple Silicon, keep generation outside this Python process and leave
-  embeddings on the built-in CPU hashing path for upload stability.
+- On Apple Silicon, keep generation and embeddings outside this Python process
+  by using Ollama; mock mode keeps built-in hashing only for deterministic
+  demos/tests.
 
 ## Loop Engineering Pattern
 This repo is intentionally built around three loops:
@@ -337,9 +345,11 @@ stay stable before replay becomes a real product surface.
 ### Optional Live Ollama Model Eval
 
 CI stays provider-free. When you want to compare a pulled local Ollama model,
-run the unified loop eval command manually. Each case performs answer and
-verifier calls, so start with one model and one case on memory-constrained Macs.
-The live eval command only accepts loopback Ollama URLs such as
+run the unified loop eval command manually. Ollama mode exercises the configured
+chat model and embedding model, so make sure both models are pulled first. Each
+case performs document indexing, retrieval, answer, and verifier calls, so start
+with one model and one case on memory-constrained Macs. The live eval command
+only accepts loopback Ollama URLs such as
 `http://localhost:11434` or `http://127.0.0.1:11434`; it is not an arbitrary
 remote model benchmark tool.
 

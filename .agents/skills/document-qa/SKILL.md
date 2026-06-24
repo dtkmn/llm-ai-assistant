@@ -31,19 +31,25 @@ first context provider, not the product boundary.
 - `auto` backend is local-first and real-backend-only: select Ollama and fail
   closed when Ollama or the configured model is unavailable. It must not fall
   back to mock.
+- Ollama runtime URLs must be loopback local only. Remote/cloud model gateways
+  must use `LLM_BACKEND=openai-compatible`, not `OLLAMA_BASE_URL`.
 - Explicit real backends must fail closed: `ollama` and
   `openai-compatible`. Removed backend names such as `endpoint` and `local`
   must fail closed as invalid configuration.
 - `openai-compatible` is the cloud/private-gateway deployment path. Use
-  `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, optional
+  `OPENAI_COMPAT_BASE_URL`, `LLM_MODEL`, `EMBEDDINGS_MODEL`, optional
   `OPENAI_COMPAT_API_KEY`, and `OPENAI_COMPAT_TIMEOUT`. Plain HTTP is allowed
   only for loopback local development; remote gateways must use HTTPS.
+- `LLM_BACKEND` is the single provider/runtime selector. Do not add a separate
+  embedding backend variable. Configure the chat model with `LLM_MODEL` and the
+  retrieval model with `EMBEDDINGS_MODEL`; provider-specific model env vars are
+  compatibility aliases only.
 - Native runtime defaults must be installed before Gradio, NumPy, FAISS,
   or other native-heavy imports in app entrypoints. Use `src.native_runtime`
   instead of duplicating env setup in modules that may be imported too late.
-- Embeddings and LLM generation have separate device choices. On Apple
-  Silicon/MPS, keep embeddings on the built-in CPU local hashing path for
-  upload stability.
+- Embedding runtime follows the selected provider. Ollama uses `/api/embed`;
+  OpenAI-compatible gateways use `/embeddings`; mock mode uses built-in local
+  hashing for deterministic demos/tests.
 - `LLM_BACKEND=auto` must select Ollama only. It must not silently select mock,
   provider-specific hosted backends, or in-process model loading.
 - Product identity is AI Loop Engine. Treat document answering as
@@ -151,9 +157,11 @@ For backend routing changes:
 - Exercise `LLM_BACKEND=auto`, `mock`, `ollama`, `openai-compatible`,
   and invalid removed backend names such as `endpoint` and `local` when the
   change touches backend selection.
-- Clear or set `LLM_BACKEND`, `OLLAMA_MODEL`, `OLLAMA_BASE_URL`,
-  `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, and
-  `OPENAI_COMPAT_API_KEY` inside tests so shell state cannot poison CI.
+- Clear or set `LLM_BACKEND`, `LLM_MODEL`, `EMBEDDINGS_MODEL`,
+  `OLLAMA_MODEL`, `OLLAMA_EMBED_MODEL`, `OLLAMA_BASE_URL`,
+  `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`,
+  `OPENAI_COMPAT_EMBED_MODEL`, and `OPENAI_COMPAT_API_KEY` inside tests so
+  shell state cannot poison CI.
 
 For answer-loop or agent-pattern changes:
 

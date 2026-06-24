@@ -82,15 +82,22 @@ Primary runtime files:
   and fails closed if Ollama or the configured model is unavailable. Explicit
   `LLM_BACKEND=mock` is only for tests/demos and must never be an automatic
   fallback.
+- Ollama runtime URLs must be loopback local only. Remote/cloud model gateways
+  must use `LLM_BACKEND=openai-compatible`, not `OLLAMA_BASE_URL`.
 - Cloud or gateway deployment should use `LLM_BACKEND=openai-compatible` with
-  `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, optional
+  `OPENAI_COMPAT_BASE_URL`, `LLM_MODEL`, `EMBEDDINGS_MODEL`, optional
   `OPENAI_COMPAT_API_KEY`, and `OPENAI_COMPAT_TIMEOUT`. Plain HTTP is allowed
   only for loopback local development; remote gateways must use HTTPS.
+- `LLM_BACKEND` is the single provider/runtime selector. Do not add a separate
+  embedding backend variable. Configure the chat model with `LLM_MODEL` and the
+  retrieval model with `EMBEDDINGS_MODEL`; provider-specific model env vars are
+  compatibility aliases only.
 - Native runtime defaults must be installed before Gradio, NumPy, FAISS,
   or other native-heavy imports in app entrypoints. Use `src.native_runtime`
   instead of duplicating env setup in modules that may be imported too late.
-- Embedding runtime is separate from LLM runtime. On Apple Silicon/MPS,
-  embeddings use the built-in CPU local hashing path for upload stability.
+- Embedding runtime follows the selected provider. Ollama uses `/api/embed`;
+  OpenAI-compatible gateways use `/embeddings`; mock mode uses built-in local
+  hashing for deterministic demos/tests.
 - `LLM_BACKEND=auto` must select Ollama only. It must not silently select mock,
   provider-specific hosted backends, or in-process model loading.
 - Product direction is local-first. First-party model providers are Ollama and

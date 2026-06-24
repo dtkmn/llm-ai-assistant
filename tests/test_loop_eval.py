@@ -172,6 +172,7 @@ def test_loop_eval_ollama_mode_rejects_multi_model_without_override():
 
 def test_loop_eval_ollama_empty_eval_models_env_falls_through_to_default(monkeypatch):
     monkeypatch.setenv("OLLAMA_EVAL_MODELS", ",")
+    monkeypatch.delenv("LLM_MODEL", raising=False)
     monkeypatch.delenv("OLLAMA_MODEL", raising=False)
     monkeypatch.setattr(loop_eval, "unload_ollama_model", lambda model, **kwargs: None)
     output = io.StringIO()
@@ -186,6 +187,24 @@ def test_loop_eval_ollama_empty_eval_models_env_falls_through_to_default(monkeyp
     assert exit_code == 0
     assert len(payload["results"]) == 1
     assert payload["results"][0]["model"] == loop_eval.DEFAULT_OLLAMA_MODEL
+
+
+def test_loop_eval_ollama_uses_generic_llm_model_env(monkeypatch):
+    monkeypatch.delenv("OLLAMA_EVAL_MODELS", raising=False)
+    monkeypatch.setenv("LLM_MODEL", "custom-chat:4b")
+    monkeypatch.setenv("OLLAMA_MODEL", "ignored-chat:4b")
+    monkeypatch.setattr(loop_eval, "unload_ollama_model", lambda model, **kwargs: None)
+    output = io.StringIO()
+
+    exit_code = main(
+        ["--mode", "ollama", "--no-unload", "--json"],
+        qa_factory=build_provider_free_qa,
+        output_stream=output,
+    )
+
+    payload = json.loads(output.getvalue())
+    assert exit_code == 0
+    assert payload["results"][0]["model"] == "custom-chat:4b"
 
 
 def test_loop_eval_rejects_empty_model_list_before_scoring():

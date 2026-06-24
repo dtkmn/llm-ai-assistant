@@ -14,7 +14,9 @@ from pydantic import Field
 from src.DocumentQA import (
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_MODEL,
+    LLM_MODEL_ENV_VAR,
     OLLAMA_BASE_URL_ENV_VAR,
+    OLLAMA_MODEL_ENV_VAR,
     SELF_CHECK_REFUSAL_ANSWER,
     DocumentQA,
     QueryResult,
@@ -155,7 +157,10 @@ def models_from_args(args) -> List[str]:
         parsed_env_models = _non_empty_model_tags(env_models.split(","))
         if parsed_env_models:
             return parsed_env_models
-    env_model = os.getenv("OLLAMA_MODEL", "").strip()
+    env_model = (
+        os.getenv(LLM_MODEL_ENV_VAR, "").strip()
+        or os.getenv(OLLAMA_MODEL_ENV_VAR, "").strip()
+    )
     if env_model:
         return [env_model]
     return [DEFAULT_OLLAMA_MODEL]
@@ -401,7 +406,8 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         nargs="+",
         help=(
             "Model labels/tags. Fake mode defaults to provider-free-golden. "
-            "Ollama mode defaults to OLLAMA_EVAL_MODELS, OLLAMA_MODEL, or the app default."
+            "Ollama mode defaults to OLLAMA_EVAL_MODELS, LLM_MODEL, "
+            "OLLAMA_MODEL, or the app default."
         ),
     )
     parser.add_argument(

@@ -65,10 +65,14 @@ class GoldenEvalLLM(LLM):
 def clear_provider_env(monkeypatch):
     for env_var in (
         "LLM_BACKEND",
+        "LLM_MODEL",
+        "EMBEDDINGS_MODEL",
         "OLLAMA_MODEL",
+        "OLLAMA_EMBED_MODEL",
         "OLLAMA_BASE_URL",
         "OPENAI_COMPAT_BASE_URL",
         "OPENAI_COMPAT_MODEL",
+        "OPENAI_COMPAT_EMBED_MODEL",
         "OPENAI_COMPAT_API_KEY",
         "OPENAI_COMPAT_TIMEOUT",
     ):
