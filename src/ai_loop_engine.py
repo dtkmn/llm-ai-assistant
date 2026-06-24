@@ -1,11 +1,11 @@
 """Canonical public runtime API for AI Loop Engine.
 
-The historical runtime lived behind ``src.DocumentQA``. Keep that module as a
-compatibility shim while new code imports this public boundary.
+The runtime implementation lives in ``src.ai_loop_runtime``. The historical
+``src.DocumentQA`` module remains as a compatibility shim.
 """
 
 try:
-    from .DocumentQA import (
+    from .ai_loop_runtime import (
         DEFAULT_OLLAMA_BASE_URL,
         DEFAULT_OLLAMA_MODEL,
         LLM_MODEL_ENV_VAR,
@@ -21,7 +21,7 @@ try:
         QueryResult,
     )
 except ImportError:
-    from DocumentQA import (
+    from ai_loop_runtime import (
         DEFAULT_OLLAMA_BASE_URL,
         DEFAULT_OLLAMA_MODEL,
         LLM_MODEL_ENV_VAR,

@@ -9,6 +9,7 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 
 import src.DocumentQA as document_qa_module
+import src.ai_loop_runtime as ai_loop_runtime_module
 from src.ai_loop_engine import AILoopEngine, DocumentQA as PublicDocumentQA
 from src.DocumentQA import (
     DEFAULT_OLLAMA_EMBEDDINGS_MODEL,
@@ -69,6 +70,7 @@ def clear_model_provider_env(monkeypatch):
 def test_ai_loop_engine_is_canonical_runtime_alias():
     from src import AILoopEngine as RootAILoopEngine
 
+    assert document_qa_module is ai_loop_runtime_module
     assert RootAILoopEngine is AILoopEngine
     assert DocumentQA is AILoopEngine
     assert PublicDocumentQA is AILoopEngine

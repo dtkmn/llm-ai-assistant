@@ -117,6 +117,7 @@ first context provider, not the product boundary.
 ## Files To Inspect First
 
 - `src/ai_loop_engine.py`
+- `src/ai_loop_runtime.py`
 - `src/DocumentQA.py`
 - `src/loop_engine.py`
 - `src/app.py`

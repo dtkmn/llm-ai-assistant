@@ -13,11 +13,12 @@ Primary runtime files:
 
 - `src/ai_loop_engine.py`: canonical public runtime API. New code should import
   `AILoopEngine` from this module.
-- `src/DocumentQA.py`: legacy implementation module during the refactor. It
-  still owns ingestion, encoding detection, embeddings, vector search, document
-  context provider wrapper, LLM backend selection, retrieval chain, Ollama
-  adapter, and query handling while exposing `DocumentQA` as a compatibility
-  alias.
+- `src/ai_loop_runtime.py`: current runtime implementation module during the
+  refactor. It owns ingestion, encoding detection, embeddings, vector search,
+  document context provider wrapper, LLM backend selection, retrieval chain,
+  Ollama adapter, and query handling.
+- `src/DocumentQA.py`: legacy compatibility module for old imports and
+  monkeypatch targets. Do not add new implementation code here.
 - `src/loop_engine.py`: provider-neutral loop primitives for typed run, step,
   policy, verifier, human-review, session, and report records.
 - `src/loop_eval.py`: unified provider-free and optional live Ollama loop eval
@@ -41,7 +42,7 @@ Primary runtime files:
 - Pip fallback: `python -m pip install -r requirements-dev.txt`
 - Run the app locally: `uv run ai-loop-engine` or `python -m src.app`
 - Run tests: `uv run pytest` or `python -m pytest`
-- Compile check: `python -m py_compile src/__init__.py src/app.py src/ai_loop_engine.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
+- Compile check: `python -m py_compile src/__init__.py src/app.py src/ai_loop_engine.py src/ai_loop_runtime.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
 - Dependency checks: `python -m pip check` and `python -m pip_audit -r requirements.txt --strict`
 
 ## Non-Negotiable Contracts
@@ -194,7 +195,7 @@ For Python behavior changes:
 - `uv run pytest tests/test_langgraph_manifest_adapter.py -q`
 - `uv run pytest tests/test_loop_export.py -q`
 - `uv lock --check`
-- `python -m py_compile src/__init__.py src/app.py src/ai_loop_engine.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
+- `python -m py_compile src/__init__.py src/app.py src/ai_loop_engine.py src/ai_loop_runtime.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:
