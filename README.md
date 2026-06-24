@@ -22,9 +22,13 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 - **Loop Engineering Core:** Treats retrieval, drafting, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
 - **Document Context Provider:** Supports PDF, DOCX, and text documents with safe decoding, chunking, and transactional replacement
 - **Local-first LLM Backend:** Recommended local path is Ollama; Hugging Face endpoint/local backends remain available for hosted deployments, gated models, and Hugging Face Spaces
-- **Vector Search:** Uses FAISS for efficient similarity search with Hugging Face embeddings
+- **Vector Search:** Uses FAISS for efficient similarity search with Hugging
+  Face embeddings; embeddings run on CPU by default on Apple Silicon for upload
+  stability
 - **Gradio Interface:** Web interface for document context upload, agent chat, runtime status, compact loop summaries, and answer traces
 - **GPU/MPS Support:** Automatically utilizes CUDA, Apple Silicon (MPS), or CPU
+  for supported local generation paths. Document embeddings use a separate
+  device setting.
 
 
 ![AI Loop Engine flow](docs/ai-loop-engine-flow.svg)
@@ -76,13 +80,18 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     export LLM_BACKEND=ollama
     export OLLAMA_MODEL=nemotron-3-nano:4b
     export OLLAMA_BASE_URL=http://localhost:11434
+    export FAST_MODE=true
+    export EMBEDDINGS_DEVICE=cpu
     ```
+
+    `EMBEDDINGS_DEVICE=cpu` is the default on Apple Silicon. Keep it there
+    unless you are deliberately testing PyTorch MPS embedding stability.
 
 4. (Optional) choose a different backend:
 
     Supported values:
     - `ollama` uses a local Ollama server. This is the recommended local path.
-    - `auto` uses hosted Hugging Face inference on CPU and local weights on CUDA/MPS.
+    - `auto` uses hosted Hugging Face inference on CPU/MPS and local weights on CUDA.
     - `endpoint` always uses hosted Hugging Face inference.
     - `local` always downloads and runs Hugging Face model weights in-process.
     - `mock` disables real inference for demos/tests.
@@ -99,10 +108,10 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     export LLM_MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct
     ```
 
-7. (Optional) enable fast mode (lower latency, lower quality):
+7. (Optional) switch back to quality mode:
 
     ```bash
-    export FAST_MODE=true
+    export FAST_MODE=false
     ```
 
 8. (Optional) enable debug logs:
@@ -178,7 +187,7 @@ The application is containerized for easy deployment.
 ### Model
 - **LLM backend:** Configurable via `LLM_BACKEND`
   - `ollama`: local Ollama server via `OLLAMA_BASE_URL`; recommended for local use
-  - `auto` (default): hosted endpoint on CPU, local model on CUDA/MPS
+  - `auto` (default): hosted endpoint on CPU/MPS, local model on CUDA
   - `endpoint`: hosted Hugging Face inference
   - `local`: in-process Transformers pipeline
   - `mock`: deterministic demo/test fallback
@@ -190,6 +199,9 @@ The application is containerized for easy deployment.
 - **Embeddings:**
   - **Quality mode:** `Alibaba-NLP/gte-modernbert-base`
   - **Fast mode:** `sentence-transformers/all-MiniLM-L6-v2`
+  - **Device:** `EMBEDDINGS_DEVICE=auto|cpu|cuda|mps`. `auto` uses CPU on
+    Apple Silicon/MPS to avoid native PyTorch crashes during upload, and CUDA
+    when CUDA is available.
 - **Vector Store:** FAISS for efficient similarity search
 - **Framework:** LangChain for orchestration
 
@@ -201,6 +213,12 @@ The application is containerized for easy deployment.
   - **Quality:** `k=6`, `fetch_k=24`
   - **Fast:** `k=3`, `fetch_k=10`
 - **Safety limits:** Max upload size 25 MB, chunk cap 2,000 chunks per document
+- **Native runtime defaults:** unless you override them, app entrypoints
+  bootstrap `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
+  `VECLIB_MAXIMUM_THREADS`, and tokenizer parallelism before Gradio, NumPy,
+  FAISS, or torch load native libraries. Torch threads default to `1` after
+  torch import unless `TORCH_NUM_THREADS` is set. This is intentional: upload
+  stability beats parallel tensor-loading crashes on local Macs.
 
 ## Local-First Direction
 - The product direction is **download and run locally first**. Ollama is the
@@ -212,6 +230,9 @@ The application is containerized for easy deployment.
 - New AI Loop Engine features should not require Hugging Face tokens for the
   happy path. If a feature works locally, document the Ollama path first and the
   hosted path second.
+- On Apple Silicon, avoid in-process Hugging Face local weights for the default
+  path. Use Ollama for local generation and CPU embeddings for document upload
+  stability.
 
 ## Loop Engineering Pattern
 This repo is intentionally built around three loops:

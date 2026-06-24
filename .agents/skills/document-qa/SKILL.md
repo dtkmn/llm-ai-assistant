@@ -34,6 +34,16 @@ first context provider, not the product boundary.
   closed when the server or configured model is unavailable.
 - `hf_token="dummy"` is valid only for Hugging Face mock/demo paths. Ollama does
   not use Hugging Face tokens.
+- Native runtime defaults must be installed before Gradio, NumPy, FAISS, torch,
+  or other native-heavy imports in app entrypoints. Use `src.native_runtime`
+  instead of duplicating env setup in modules that may be imported too late.
+- Embeddings and LLM generation have separate device choices. On Apple
+  Silicon/MPS, keep embeddings on CPU by default; MPS embeddings are an explicit
+  `EMBEDDINGS_DEVICE=mps` opt-in because native PyTorch crashes can kill the
+  Python process during upload.
+- `LLM_BACKEND=auto` should avoid in-process local Hugging Face models on Apple
+  MPS. The Mac happy path is explicit Ollama; explicit `local` remains available
+  for users who knowingly want Transformers in-process.
 - Product identity is AI Loop Engine. Treat document answering as
   the first context provider capability, not the repo's strategic identity.
 - Document context is the first `ContextProvider`; keep provider identity in

@@ -11,6 +11,17 @@ from dataclasses import dataclass
 from getpass import getpass
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
+try:
+    from .native_runtime import (
+        apply_native_runtime_defaults,
+        apply_torch_thread_limit,
+    )
+except ImportError:
+    from native_runtime import apply_native_runtime_defaults, apply_torch_thread_limit
+
+
+apply_native_runtime_defaults()
+
 import docx2txt
 import faiss
 import numpy as np
@@ -66,6 +77,7 @@ HF_ENDPOINT_TIMEOUT_ENV_VAR = "HF_ENDPOINT_TIMEOUT"
 OLLAMA_BASE_URL_ENV_VAR = "OLLAMA_BASE_URL"
 OLLAMA_MODEL_ENV_VAR = "OLLAMA_MODEL"
 OLLAMA_TIMEOUT_ENV_VAR = "OLLAMA_TIMEOUT"
+EMBEDDINGS_DEVICE_ENV_VAR = "EMBEDDINGS_DEVICE"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "nemotron-3-nano:4b"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
@@ -198,6 +210,8 @@ SELF_CHECK_REFUSAL_ANSWER = (
 SELF_CHECK_PASS_OUTCOMES = {"supported", "not_verified"}
 VERIFIER_OUTCOMES = {"supported", "unsupported", "insufficient"}
 
+apply_torch_thread_limit(torch, logger=LOGGER)
+
 
 def open_ollama_request_no_proxy(request, *, timeout: int):
     return OLLAMA_NO_PROXY_OPENER.open(request, timeout=timeout)
@@ -286,6 +300,7 @@ class DocumentQAStatus:
     loaded_model_id: Optional[str]
     loaded_model_label: Optional[str]
     embeddings_model: str
+    embeddings_device: str
     device: str
     document_name: Optional[str]
     ready_for_queries: bool
@@ -895,6 +910,7 @@ class DocumentQA:
         embeddings_model: Optional[str] = None,
         hf_token: Optional[str] = None,
         device: Optional[str] = None,
+        embeddings_device: Optional[str] = None,
         fast_mode: Optional[bool] = None,
         llm_backend: Optional[str] = None,
         allow_interactive_token: bool = False,
@@ -913,6 +929,7 @@ class DocumentQA:
         )
         self.model_id = model_id or os.getenv("LLM_MODEL_ID", default_models[0])
         self.embeddings_model = embeddings_model or default_embeddings_model
+        self.embeddings_device = self._normalize_embeddings_device(embeddings_device)
         self.hf_token = hf_token or self._get_hf_token(allow_interactive_token)
         self.llm_backend = self._normalize_llm_backend(llm_backend)
         self.max_document_bytes = max_document_bytes
@@ -965,6 +982,46 @@ class DocumentQA:
             return "mps"
         return "cpu"
 
+    def _default_embeddings_device(self) -> str:
+        if self.device == "cuda":
+            return "cuda"
+        return "cpu"
+
+    def _normalize_embeddings_device(
+        self, embeddings_device: Optional[str] = None
+    ) -> str:
+        requested = (
+            embeddings_device
+            or os.getenv(EMBEDDINGS_DEVICE_ENV_VAR, "auto")
+        ).strip().lower()
+        if not requested or requested == "auto":
+            return self._default_embeddings_device()
+        if requested == "cuda":
+            if torch.cuda.is_available():
+                return "cuda"
+            LOGGER.warning(
+                "%s=cuda requested but CUDA is unavailable. Using CPU.",
+                EMBEDDINGS_DEVICE_ENV_VAR,
+            )
+            return "cpu"
+        if requested == "mps":
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                return "mps"
+            LOGGER.warning(
+                "%s=mps requested but MPS is unavailable. Using CPU.",
+                EMBEDDINGS_DEVICE_ENV_VAR,
+            )
+            return "cpu"
+        if requested == "cpu":
+            return "cpu"
+        LOGGER.warning(
+            "Unsupported %s=%r. Supported values: auto, cpu, cuda, mps. Using %s.",
+            EMBEDDINGS_DEVICE_ENV_VAR,
+            requested,
+            self._default_embeddings_device(),
+        )
+        return self._default_embeddings_device()
+
     def _normalize_llm_backend(self, llm_backend: Optional[str]) -> str:
         backend = (llm_backend or os.getenv(LLM_BACKEND_ENV_VAR, "auto")).strip().lower()
         if backend not in SUPPORTED_LLM_BACKENDS:
@@ -980,8 +1037,15 @@ class DocumentQA:
     def _select_llm_backend(self) -> str:
         if self.llm_backend != "auto":
             return self.llm_backend
-        if self.device in {"cuda", "mps"}:
+        if self.device == "cuda":
             return "local"
+        if self.device == "mps":
+            LOGGER.warning(
+                "LLM_BACKEND=auto no longer selects in-process local Hugging Face "
+                "models on Apple MPS. Use LLM_BACKEND=ollama for the recommended "
+                "local Mac path, or LLM_BACKEND=local to opt into in-process "
+                "Transformers explicitly."
+            )
         return "endpoint"
 
     def _get_hf_token(self, allow_interactive_token: bool) -> Optional[str]:
@@ -1329,6 +1393,7 @@ class DocumentQA:
             loaded_model_id=self.loaded_model_id,
             loaded_model_label=self.loaded_model_label,
             embeddings_model=self.embeddings_model,
+            embeddings_device=self.embeddings_device,
             device=self.device,
             document_name=active_state.document_name,
             ready_for_queries=(
@@ -1350,7 +1415,7 @@ class DocumentQA:
         try:
             self.embeddings = HuggingFaceEmbeddings(
                 model_name=self.embeddings_model,
-                model_kwargs={"device": self.device},
+                model_kwargs={"device": self.embeddings_device},
             )
         except Exception as exc:
             self.embeddings_error = str(exc)

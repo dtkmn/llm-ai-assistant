@@ -4,6 +4,14 @@ import os
 from dataclasses import replace
 from typing import Optional
 
+try:
+    from .native_runtime import apply_native_runtime_defaults
+except ImportError:
+    from native_runtime import apply_native_runtime_defaults
+
+
+apply_native_runtime_defaults()
+
 import gradio as gr
 
 try:
@@ -112,6 +120,9 @@ def format_runtime_status(qa_status: DocumentQAStatus) -> str:
         "backend": qa_status.active_backend,
         "model": qa_status.active_model_label,
         "profile": qa_status.profile_label,
+        "model_device": qa_status.device,
+        "embeddings_model": qa_status.embeddings_model,
+        "embeddings_device": qa_status.embeddings_device,
         "ready_for_queries": qa_status.ready_for_queries,
         "readiness_scope": "retrieval_pipeline",
         "inference_validated": False,
