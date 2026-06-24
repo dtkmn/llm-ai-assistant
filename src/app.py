@@ -351,6 +351,8 @@ def chat(message, history):
 def clear_chat():
     """Clear the chat history."""
     qa_system.chat_history.clear()
+    if hasattr(qa_system, "clear_loop_session"):
+        qa_system.clear_loop_session("default")
     return [], format_loop_summary(None), format_answer_trace(None)
 
 

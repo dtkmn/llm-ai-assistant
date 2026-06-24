@@ -15,7 +15,7 @@ from src.DocumentQA import (
     MockLLM,
     OllamaLLM,
 )
-from src.loop_engine import GuardrailDecision, LoopDecision, LoopPhase
+from src.loop_engine import GuardrailDecision, LoopDecision, LoopPhase, LoopReport
 
 
 class FakeEmbeddings(Embeddings):
@@ -190,6 +190,64 @@ def test_query_with_trace_includes_loop_report_for_prompt_evidence(tmp_path):
     assert verify_step.decision == LoopDecision.NOT_VERIFIED
     assert verify_step.verification.outcome.value == "not_verified"
     assert verify_step.verification.reasons == tuple(result.trace.self_check.reasons)
+
+
+def test_query_records_loop_session_and_exports_jsonl(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+
+    first_result = qa.query_with_trace("What is Project Phoenix?", session_id="alpha")
+    second_result = qa.query_with_trace("What is the launch date?", session_id="alpha")
+    qa.query_with_trace("What is the launch date?", session_id="beta")
+
+    alpha_session = qa.loop_session("alpha")
+    beta_session = qa.loop_session("beta")
+    artifact_path = tmp_path / "alpha-session.jsonl"
+    exported_path = qa.export_loop_session_jsonl(artifact_path, session_id="alpha")
+    exported_lines = artifact_path.read_text(encoding="utf-8").splitlines()
+    restored_reports = [
+        LoopReport.from_dict(json.loads(line)) for line in exported_lines
+    ]
+
+    assert exported_path == str(artifact_path)
+    assert alpha_session.report_count == 2
+    assert beta_session.report_count == 1
+    assert [report.run.run_id for report in alpha_session.reports] == [
+        first_result.loop_report.run.run_id,
+        second_result.loop_report.run.run_id,
+    ]
+    assert [report.run.session_id for report in restored_reports] == [
+        "alpha",
+        "alpha",
+    ]
+    assert restored_reports[0].run.user_input == "What is Project Phoenix?"
+    assert restored_reports[1].run.final_decision == LoopDecision.NOT_VERIFIED
+
+
+def test_loop_session_history_is_bounded(tmp_path):
+    qa, _document = create_processed_mock_qa(tmp_path)
+    qa.max_session_reports = 1
+
+    first_result = qa.query_with_trace("What is Project Phoenix?", session_id="alpha")
+    second_result = qa.query_with_trace("What is the launch date?", session_id="alpha")
+
+    alpha_session = qa.loop_session("alpha")
+
+    assert alpha_session.report_count == 1
+    assert alpha_session.reports[0].run.run_id == second_result.loop_report.run.run_id
+    assert alpha_session.reports[0].run.run_id != first_result.loop_report.run.run_id
+
+
+def test_blocked_query_is_recorded_for_replay(tmp_path):
+    qa = DocumentQA(fast_mode=True, hf_token="dummy", llm_backend="mock")
+
+    result = qa.query_with_trace("What is this?", session_id="blocked")
+
+    session = qa.loop_session("blocked")
+
+    assert result.trace.error_message == "document_not_loaded"
+    assert session.report_count == 1
+    assert session.reports[0].run.final_decision == LoopDecision.BLOCK
+    assert session.reports[0].run.error_message == "document_not_loaded"
 
 
 def test_processed_document_is_wrapped_as_context_provider(tmp_path):

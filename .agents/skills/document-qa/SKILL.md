@@ -40,12 +40,15 @@ first context provider, not the product boundary.
   loop reports instead of hardcoding document-specific assumptions in UI code.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,
-  `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
+  `LoopSession`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
   `HumanReviewRequest` before adding planner, multi-agent, tool, replay, or
   framework-adapter behavior.
 - `DocumentQA.query_with_trace()` must expose a `LoopReport` that matches the
   actual query path: prompt evidence, draft, mechanical check, verifier outcome,
   retry/refusal state, and final answer.
+- Completed query reports should be retained in bounded in-memory `LoopSession`
+  state. Local JSONL export may write raw reports for developer replay/debug
+  artifacts; public UI traces must continue using the redacted report surface.
 - Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
   or request human review, but it must not introduce autonomous tools by itself.
 - Upload status must say `indexed` for real backends, because endpoint readiness

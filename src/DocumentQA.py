@@ -36,6 +36,7 @@ try:
         LoopPolicy,
         LoopReport,
         LoopRun,
+        LoopSession,
         LoopStep,
         VerificationOutcome,
         VerificationResult,
@@ -49,6 +50,7 @@ except ImportError:
         LoopPolicy,
         LoopReport,
         LoopRun,
+        LoopSession,
         LoopStep,
         VerificationOutcome,
         VerificationResult,
@@ -70,6 +72,7 @@ SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 SUPPORTED_LLM_BACKENDS = {"auto", "endpoint", "local", "mock", "ollama"}
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_DOCUMENT_CHUNKS = 2_000
+DEFAULT_MAX_SESSION_REPORTS = 200
 DEFAULT_QUALITY_EMBEDDINGS_MODEL = "Alibaba-NLP/gte-modernbert-base"
 DEFAULT_FAST_EMBEDDINGS_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_QUALITY_MODELS = (
@@ -897,6 +900,7 @@ class DocumentQA:
         allow_interactive_token: bool = False,
         max_document_bytes: int = MAX_DOCUMENT_BYTES,
         max_document_chunks: int = MAX_DOCUMENT_CHUNKS,
+        max_session_reports: int = DEFAULT_MAX_SESSION_REPORTS,
         loop_middlewares: Optional[Tuple[LoopMiddleware, ...]] = None,
     ):
         self.device = device or self._detect_device()
@@ -913,6 +917,7 @@ class DocumentQA:
         self.llm_backend = self._normalize_llm_backend(llm_backend)
         self.max_document_bytes = max_document_bytes
         self.max_document_chunks = max_document_chunks
+        self.max_session_reports = max(0, int(max_session_reports))
         self.profile = FAST_PROFILE if self.fast_mode else QUALITY_PROFILE
         self.ollama_base_url = (
             os.getenv(OLLAMA_BASE_URL_ENV_VAR, DEFAULT_OLLAMA_BASE_URL).strip()
@@ -933,6 +938,7 @@ class DocumentQA:
         self.embeddings = None
         self._state_lock = threading.RLock()
         self._upload_lock = threading.Lock()
+        self._session_lock = threading.RLock()
         self._active_document_state = ActiveDocumentState(
             document_name=None,
             vector_store=None,
@@ -949,6 +955,7 @@ class DocumentQA:
         self.current_document_name: Optional[str] = None
         self.latest_processing_report: Optional[DocumentProcessingReport] = None
         self.chat_history: List[Dict[str, str]] = []
+        self.loop_sessions: Dict[str, LoopSession] = {}
         self.loop_middlewares = tuple(loop_middlewares or ())
 
     def _detect_device(self) -> str:
@@ -1203,6 +1210,54 @@ class DocumentQA:
     def _snapshot_active_document_state(self) -> ActiveDocumentState:
         with self._state_lock:
             return self._active_document_state
+
+    def _normalize_session_id(self, session_id: Optional[str]) -> str:
+        return str(session_id or "default").strip() or "default"
+
+    def _record_loop_report(self, loop_report: Optional[LoopReport]) -> None:
+        if loop_report is None:
+            return
+        session_id = self._normalize_session_id(loop_report.run.session_id)
+        with self._session_lock:
+            session = self.loop_sessions.get(
+                session_id, LoopSession(session_id=session_id)
+            )
+            self.loop_sessions[session_id] = session.add_report(
+                loop_report,
+                max_reports=self.max_session_reports,
+            )
+
+    def loop_session(self, session_id: str = "default") -> LoopSession:
+        normalized_session_id = self._normalize_session_id(session_id)
+        with self._session_lock:
+            return self.loop_sessions.get(
+                normalized_session_id,
+                LoopSession(session_id=normalized_session_id),
+            )
+
+    def loop_sessions_snapshot(self) -> Dict[str, LoopSession]:
+        with self._session_lock:
+            return dict(self.loop_sessions)
+
+    def clear_loop_session(self, session_id: Optional[str] = "default") -> None:
+        with self._session_lock:
+            if session_id is None:
+                self.loop_sessions.clear()
+                return
+            self.loop_sessions.pop(self._normalize_session_id(session_id), None)
+
+    def export_loop_session_jsonl(
+        self,
+        path: str,
+        *,
+        session_id: str = "default",
+        public: bool = False,
+    ) -> str:
+        artifact_path = self.loop_session(session_id).write_jsonl(
+            path,
+            public=public,
+        )
+        return str(artifact_path)
 
     def _commit_active_document_state(
         self,
@@ -2806,7 +2861,7 @@ class DocumentQA:
             retrieved_chunk_count = 0
             citations = []
             self_check = None
-        return self._query_result(
+        result = self._query_result(
             answer=answer,
             question=question,
             active_state=active_state,
@@ -2816,6 +2871,8 @@ class DocumentQA:
             error_message=error_message,
             loop_report=loop_report,
         )
+        self._record_loop_report(loop_report)
+        return result
 
     def _finish_guardrail_query_result(
         self,
@@ -2839,6 +2896,7 @@ class DocumentQA:
     def query_with_trace(self, prompt: str, session_id: str = "default") -> QueryResult:
         """Answer a user query and return the retrieved evidence used."""
         active_state = self._snapshot_active_document_state()
+        session_id = self._normalize_session_id(session_id)
         clean_prompt = (prompt or "").strip()
         run = self._start_loop_run(
             prompt=clean_prompt,
