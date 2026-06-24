@@ -243,12 +243,27 @@ Frameworks are interop surfaces, not the engine. The current plan is to export
 AI Loop Engine reports into framework-shaped artifacts before adding any live
 framework runtime integration:
 
-- OpenAI Agents SDK: trace-shaped export first
+- OpenAI Agents SDK: trace-shaped export first, dependency-free in
+  `src.adapters.openai_trace`
 - LangGraph: thread/checkpoint manifest export first
 - Microsoft Agent Framework: workflow event-stream export first
 
 See [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md)
 for mappings, non-goals, and the dependency boundary.
+
+Export a report or session locally when you need OpenAI-trace-shaped JSON for
+inspection or downstream tooling:
+
+```python
+from src.adapters.openai_trace import export_report, export_session
+
+trace_payload = export_report(query_result.loop_report)
+session_payload = export_session(qa_system.loop_session("default"))
+```
+
+These helpers do not import the OpenAI Agents SDK, call OpenAI APIs, or mutate
+the original loop reports. Public/redacted export is the default; use
+`public=False` only for local diagnostics you are willing to treat as sensitive.
 
 ### Local Replay Artifacts
 

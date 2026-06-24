@@ -73,9 +73,10 @@ unless that capture is disabled.
 
 ### Recommended Adapter
 
-Start with an offline exporter from `LoopReport.to_dict()` to an
-OpenAI-trace-shaped JSON document. Only later add an optional live exporter that
-uses Agents SDK tracing processors.
+The first offline exporter lives in `src.adapters.openai_trace`. It maps
+`LoopReport` and `LoopSession` objects to OpenAI-trace-shaped JSON without
+importing the OpenAI Agents SDK or sending data to a network exporter. Only later
+add an optional live exporter that uses Agents SDK tracing processors.
 
 The first live adapter should be opt-in and should:
 
@@ -206,17 +207,26 @@ Rules:
   basic mapping function.
 - Keep adapter schema versions separate from `loop-report/v1`.
 
-## Proposed File Layout
+## Current And Proposed File Layout
 
-Add only when an adapter is actually implemented:
+Current dependency-free adapter files:
 
 ```text
 src/adapters/
   __init__.py
+  base.py
   openai_trace.py
+tests/test_openai_trace_adapter.py
+```
+
+Add later when the matching adapter is actually implemented:
+
+```text
+src/adapters/
   langgraph_manifest.py
   microsoft_workflow_events.py
-tests/test_adapters_*.py
+tests/test_langgraph_manifest_adapter.py
+tests/test_microsoft_workflow_events_adapter.py
 ```
 
 Optional live integrations should be dependency-gated later:
@@ -236,10 +246,12 @@ not a framework runtime integration.
 Recommended order:
 
 1. Add a dependency-free `LoopReport` adapter protocol and one JSON manifest
-   exporter.
-2. Add tests proving redacted default export and raw explicit export.
+   exporter. Done for the OpenAI trace-shaped exporter.
+2. Add tests proving redacted default export and raw explicit export. Done for
+   the OpenAI trace-shaped exporter.
 3. Add optional OpenAI trace-shaped export first, because its trace/span model is
-   closest to current `LoopReport`.
+   closest to current `LoopReport`. Done as an offline export, not a live SDK
+   integration.
 4. Add LangGraph manifest/checkpoint-shape export second.
 5. Add Microsoft event-stream export third.
 

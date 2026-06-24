@@ -18,6 +18,9 @@ Primary runtime files:
   policy, verifier, human-review, session, and report records.
 - `src/loop_eval.py`: unified provider-free and optional live Ollama loop eval
   CLI with JSON artifacts containing scored `LoopReport` evidence.
+- `src/adapters/`: dependency-free framework-shaped exports from loop reports.
+  The current adapter is OpenAI trace-shaped JSON and must not import the
+  OpenAI Agents SDK or send data over the network.
 - `src/app.py`: Gradio UI wiring and user-facing status messages.
 - `docs/framework-adapter-strategy.md`: dependency-free adapter strategy for
   OpenAI trace-shaped export, LangGraph manifest export, and Microsoft workflow
@@ -96,6 +99,9 @@ Primary runtime files:
   execute framework runtimes. Follow `docs/framework-adapter-strategy.md`, keep
   default exports redacted/public, and do not add OpenAI Agents SDK, LangGraph,
   or Microsoft Agent Framework as core dependencies.
+- Adapter public export is a safety boundary. Raw loop reports require explicit
+  opt-in, and public adapter exports must fail closed/redact terminal
+  guardrail-like decisions instead of leaking blocked draft content.
 - `pyproject.toml` is the project metadata and local-development dependency
   contract. Keep `requirements.txt` and `requirements-dev.txt` as pip-compatible
   exports for deployment compatibility, and keep them synchronized with
@@ -154,6 +160,7 @@ For Python behavior changes:
 - `uv run pytest` or `python -m pytest`
 - `uv run pytest tests/test_golden_document_eval.py -q`
 - `uv run pytest tests/test_loop_eval.py -q`
+- `uv run pytest tests/test_openai_trace_adapter.py -q`
 - `uv lock --check`
 - `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
 - `python -m pip check`

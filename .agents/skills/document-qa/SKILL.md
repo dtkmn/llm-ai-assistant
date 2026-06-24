@@ -101,6 +101,7 @@ first context provider, not the product boundary.
 - `src/golden_eval.py`
 - `src/loop_eval.py`
 - `src/ollama_model_eval.py`
+- `src/adapters/`
 - `docs/framework-adapter-strategy.md`
 - `pyproject.toml`
 - `requirements.txt`
@@ -143,6 +144,8 @@ For answer-loop or agent-pattern changes:
 - `python -m pytest tests/test_golden_document_eval.py -q`
 - `python -m pytest tests/test_loop_eval.py -q`
 - `python -m pytest tests/test_ollama_model_eval.py -q`
+- `python -m pytest tests/test_openai_trace_adapter.py -q` when adapter export
+  behavior changes.
 - Assert cited supported answers, unsupported-answer refusal, and retry behavior.
 - Keep eval fixtures deterministic and provider-free.
 - Keep live Ollama comparison manual. Prefer one-model, one-case smoke runs on
