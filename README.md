@@ -32,7 +32,8 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 ## Installation
 
 ### Prerequisites
-- Python 3.11 or higher
+- Python 3.11 or 3.12; Python 3.12 is what CI and Docker use
+- `uv` for the recommended local workflow ([install guide](https://docs.astral.sh/uv/getting-started/installation/))
 - Ollama installed for the recommended local-first setup
 - HuggingFace account and API token for hosted endpoint inference or gated models ([get one here](https://huggingface.co/settings/tokens)); not required for `LLM_BACKEND=ollama`
 - At least 8GB RAM if forcing local model execution on CPU; GPU/MPS is strongly preferred for local models
@@ -46,20 +47,21 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     cd ai-loop-engine
     ``` 
 
-2. Create and activate a virtual environment:
+2. Install dependencies with `uv`:
+
+    ```bash
+    uv sync --dev
+    ```
+
+   Pip fallback:
 
     ```bash
     python -m venv venv
     source venv/bin/activate  # On Windows: venv\Scripts\activate
+    python -m pip install -r requirements-dev.txt
     ```
 
-3. Install the dependencies:
-
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-4. Run local-first with Ollama:
+3. Run local-first with Ollama:
 
     Terminal 1, unless the Ollama desktop app/service is already running:
 
@@ -76,7 +78,7 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     export OLLAMA_BASE_URL=http://localhost:11434
     ```
 
-5. (Optional) choose a different backend:
+4. (Optional) choose a different backend:
 
     Supported values:
     - `ollama` uses a local Ollama server. This is the recommended local path.
@@ -85,34 +87,40 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
     - `local` always downloads and runs Hugging Face model weights in-process.
     - `mock` disables real inference for demos/tests.
 
-6. (Optional) set up Hugging Face for hosted endpoint inference, CPU `auto`, or gated Hugging Face `local` models:
+5. (Optional) set up Hugging Face for hosted endpoint inference, CPU `auto`, or gated Hugging Face `local` models:
 
     ```bash
     export HUGGINGFACEHUB_API_TOKEN=your_token_here
     ```
 
-7. (Optional) choose a different Hugging Face local model:
+6. (Optional) choose a different Hugging Face local model:
 
     ```bash
     export LLM_MODEL_ID=Qwen/Qwen2.5-1.5B-Instruct
     ```
 
-8. (Optional) enable fast mode (lower latency, lower quality):
+7. (Optional) enable fast mode (lower latency, lower quality):
 
     ```bash
     export FAST_MODE=true
     ```
 
-9. (Optional) enable debug logs:
+8. (Optional) enable debug logs:
 
     ```bash
     export APP_DEBUG=false
     ```
 
-10. Run the application:
+9. Run the application:
 
     ```bash
-    python src/app.py
+    uv run ai-loop-engine
+    ```
+
+    Pip fallback after activating `venv`:
+
+    ```bash
+    python -m src.app
     ```
    
 ## 🐳 Docker Setup
@@ -219,10 +227,10 @@ Golden evals live in `tests/test_golden_document_eval.py` and the CLI lives in
 JSON artifact that includes the loop reports used to score each case:
 
 ```bash
-python -m src.loop_eval --mode fake --artifact artifacts/loop-eval.json
-python -m pytest tests/test_golden_document_eval.py -q
-python -m pytest tests/test_loop_eval.py -q
-python -m pytest
+uv run python -m src.loop_eval --mode fake --artifact artifacts/loop-eval.json
+uv run pytest tests/test_golden_document_eval.py -q
+uv run pytest tests/test_loop_eval.py -q
+uv run pytest
 ```
 
 Use these before adding planner loops, tools, multi-context memory, or more
@@ -256,8 +264,8 @@ developer diagnostics because they may include prompts, retrieved excerpts, draf
 outputs, and final answers. Planned replay/diff commands should look like:
 
 ```bash
-python -m src.loop_replay inspect artifacts/loop-session-default.jsonl
-python -m src.loop_replay diff before.jsonl after.jsonl
+uv run python -m src.loop_replay inspect artifacts/loop-session-default.jsonl
+uv run python -m src.loop_replay diff before.jsonl after.jsonl
 ```
 
 Those commands are intentionally not implemented yet. The report shape needs to
@@ -273,7 +281,7 @@ The live eval command only accepts loopback Ollama URLs such as
 remote model benchmark tool.
 
 ```bash
-python -m src.loop_eval \
+uv run python -m src.loop_eval \
   --mode ollama \
   --models nemotron-3-nano:4b \
   --case launch_date \
@@ -285,7 +293,7 @@ python -m src.loop_eval \
 Then run the full golden set for one model:
 
 ```bash
-python -m src.loop_eval \
+uv run python -m src.loop_eval \
   --mode ollama \
   --models nemotron-3-nano:4b \
   --all-cases \
@@ -304,7 +312,7 @@ override when you have enough free unified memory and are comfortable watching
 resource pressure:
 
 ```bash
-python -m src.loop_eval \
+uv run python -m src.loop_eval \
   --mode ollama \
   --models nemotron-3-nano:4b qwen3:8b \
   --allow-multi-model \
@@ -324,7 +332,11 @@ ollama stop qwen3:8b
 ```
 
 ## Security and Dependency Maintenance
-- Dependencies are pinned in `requirements.txt` for reproducible installs.
+- Dependencies are declared in `pyproject.toml` and locked in `uv.lock` for the
+  recommended local workflow.
+- `requirements.txt` and `requirements-dev.txt` remain pip-compatible exports
+  for Docker, Hugging Face Spaces, and conservative CI paths. Tests assert they
+  stay synchronized with `pyproject.toml`.
 - Dependabot is enabled weekly (`.github/dependabot.yml`) for dependency updates.
 - Current baseline includes Gradio `6.15.2`, LangChain `1.3.10`, LangChain-HuggingFace `1.2.1`, HuggingFace Hub `1.5.0`, Transformers `5.4.0`, and Torch `2.12.1`.
 - Note: `marshmallow` is intentionally pinned to `3.26.2` because `dataclasses-json` currently requires `<4.0.0`.
@@ -332,14 +344,15 @@ ollama stop qwen3:8b
 - Recommended recurring checks:
 
   ```bash
-  pip install -r requirements-dev.txt
-  pytest tests/test_loop_engine.py -q
-  pytest tests/test_golden_document_eval.py -q
-  pytest tests/test_loop_eval.py -q
-  pytest tests/test_ollama_model_eval.py -q
-  pytest
-  python -m pip_audit -r requirements.txt --strict
-  python -m pip check
+  uv sync --dev
+  uv lock --check
+  uv run pytest tests/test_loop_engine.py -q
+  uv run pytest tests/test_golden_document_eval.py -q
+  uv run pytest tests/test_loop_eval.py -q
+  uv run pytest tests/test_ollama_model_eval.py -q
+  uv run pytest
+  uv run python -m pip_audit -r requirements.txt --strict
+  uv run python -m pip check
   ```
 
 ## Agent-Assisted Development

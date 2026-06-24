@@ -27,11 +27,11 @@ Primary runtime files:
 
 ## Setup Commands
 
-- Install runtime dependencies: `python -m pip install -r requirements.txt`
-- Install test/audit dependencies: `python -m pip install -r requirements-dev.txt`
-- Run the app locally: `python src/app.py`
-- Run tests: `python -m pytest`
-- Compile check: `python -m py_compile src/app.py src/DocumentQA.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py`
+- Install local dependencies: `uv sync --dev`
+- Pip fallback: `python -m pip install -r requirements-dev.txt`
+- Run the app locally: `uv run ai-loop-engine` or `python -m src.app`
+- Run tests: `uv run pytest` or `python -m pytest`
+- Compile check: `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
 - Dependency checks: `python -m pip check` and `python -m pip_audit -r requirements.txt --strict`
 
 ## Non-Negotiable Contracts
@@ -96,6 +96,10 @@ Primary runtime files:
   execute framework runtimes. Follow `docs/framework-adapter-strategy.md`, keep
   default exports redacted/public, and do not add OpenAI Agents SDK, LangGraph,
   or Microsoft Agent Framework as core dependencies.
+- `pyproject.toml` is the project metadata and local-development dependency
+  contract. Keep `requirements.txt` and `requirements-dev.txt` as pip-compatible
+  exports for deployment compatibility, and keep them synchronized with
+  `pyproject.toml`.
 
 ## Engineering Loop
 
@@ -147,10 +151,11 @@ For narrow docs-only changes:
 
 For Python behavior changes:
 
-- `python -m pytest`
-- `python -m pytest tests/test_golden_document_eval.py -q`
-- `python -m pytest tests/test_loop_eval.py -q`
-- `python -m py_compile src/app.py src/DocumentQA.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py`
+- `uv run pytest` or `python -m pytest`
+- `uv run pytest tests/test_golden_document_eval.py -q`
+- `uv run pytest tests/test_loop_eval.py -q`
+- `uv lock --check`
+- `python -m py_compile src/__init__.py src/app.py src/DocumentQA.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:

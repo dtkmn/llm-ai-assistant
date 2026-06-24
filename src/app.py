@@ -1,14 +1,10 @@
 import json
 import logging
 import os
-import sys
 from dataclasses import replace
 from typing import Optional
 
 import gradio as gr
-
-# Add parent directory to path to handle both local and Docker execution
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from .DocumentQA import (
@@ -403,7 +399,7 @@ with gr.Blocks() as demo:
     clear.click(clear_chat, None, [chatbot, loop_summary, answer_trace], queue=False)
 
 
-if __name__ == "__main__":
+def main() -> None:
     server_name = os.getenv("GRADIO_SERVER_NAME", "0.0.0.0")
     server_port = int(os.getenv("PORT", os.getenv("GRADIO_SERVER_PORT", "7860")))
     demo.launch(
@@ -412,3 +408,7 @@ if __name__ == "__main__":
         server_port=server_port,
         share=False,
     )
+
+
+if __name__ == "__main__":
+    main()

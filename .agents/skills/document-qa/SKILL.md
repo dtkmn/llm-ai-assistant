@@ -89,6 +89,9 @@ first context provider, not the product boundary.
 - Explicit encoding selections are user intent. Preserve valid CP1250, CP1251,
   CP1252, CP1254, CP1257, Latin-1, UTF-8, UTF-16, and UTF-32 behavior when
   touching text ingestion.
+- `pyproject.toml` is the local-development dependency contract. Keep
+  `requirements.txt` and `requirements-dev.txt` synchronized as pip-compatible
+  deployment exports.
 
 ## Files To Inspect First
 
@@ -99,6 +102,9 @@ first context provider, not the product boundary.
 - `src/loop_eval.py`
 - `src/ollama_model_eval.py`
 - `docs/framework-adapter-strategy.md`
+- `pyproject.toml`
+- `requirements.txt`
+- `requirements-dev.txt`
 - `tests/test_document_qa.py`
 - `tests/test_app.py`
 - `tests/test_golden_document_eval.py`
@@ -132,6 +138,7 @@ For backend routing changes:
 
 For answer-loop or agent-pattern changes:
 
+- `uv lock --check` when packaging metadata or dependency files changed.
 - `python -m pytest tests/test_loop_engine.py -q`
 - `python -m pytest tests/test_golden_document_eval.py -q`
 - `python -m pytest tests/test_loop_eval.py -q`
