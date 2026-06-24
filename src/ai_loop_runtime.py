@@ -1,5 +1,4 @@
 import hashlib
-import ipaddress
 import json
 import logging
 import math
@@ -65,40 +64,80 @@ except ImportError:
         VerificationResult,
     )
 
+try:
+    from .runtime_config import (
+        DEFAULT_EMBEDDINGS_MODEL,
+        DEFAULT_OLLAMA_BASE_URL,
+        DEFAULT_OLLAMA_EMBEDDINGS_MODEL,
+        DEFAULT_OLLAMA_MODEL,
+        EMBEDDINGS_DEVICE_ENV_VAR,
+        EMBEDDINGS_MODEL_ENV_VAR,
+        FAST_MODE_ENV_VAR,
+        LLM_BACKEND_ENV_VAR,
+        LLM_MODEL_ENV_VAR,
+        OLLAMA_BASE_URL_ENV_VAR,
+        OLLAMA_EMBEDDINGS_MODEL_ENV_VAR,
+        OLLAMA_MODEL_ENV_VAR,
+        OLLAMA_TIMEOUT_ENV_VAR,
+        OPENAI_COMPAT_API_KEY_ENV_VAR,
+        OPENAI_COMPAT_BASE_URL_ENV_VAR,
+        OPENAI_COMPAT_EMBEDDINGS_MODEL_ENV_VAR,
+        OPENAI_COMPAT_MODEL_ENV_VAR,
+        OPENAI_COMPAT_TIMEOUT_ENV_VAR,
+        SUPPORTED_EMBEDDINGS_MODELS,
+        SUPPORTED_LLM_BACKENDS,
+        env_flag,
+        env_int,
+        first_env_value,
+        is_loopback_host,
+        is_loopback_openai_compatible_host,
+        normalize_ollama_base_url,
+        normalize_openai_compatible_base_url,
+        safe_ollama_base_url_for_error,
+        safe_openai_compatible_base_url_for_error,
+    )
+except ImportError:
+    from runtime_config import (
+        DEFAULT_EMBEDDINGS_MODEL,
+        DEFAULT_OLLAMA_BASE_URL,
+        DEFAULT_OLLAMA_EMBEDDINGS_MODEL,
+        DEFAULT_OLLAMA_MODEL,
+        EMBEDDINGS_DEVICE_ENV_VAR,
+        EMBEDDINGS_MODEL_ENV_VAR,
+        FAST_MODE_ENV_VAR,
+        LLM_BACKEND_ENV_VAR,
+        LLM_MODEL_ENV_VAR,
+        OLLAMA_BASE_URL_ENV_VAR,
+        OLLAMA_EMBEDDINGS_MODEL_ENV_VAR,
+        OLLAMA_MODEL_ENV_VAR,
+        OLLAMA_TIMEOUT_ENV_VAR,
+        OPENAI_COMPAT_API_KEY_ENV_VAR,
+        OPENAI_COMPAT_BASE_URL_ENV_VAR,
+        OPENAI_COMPAT_EMBEDDINGS_MODEL_ENV_VAR,
+        OPENAI_COMPAT_MODEL_ENV_VAR,
+        OPENAI_COMPAT_TIMEOUT_ENV_VAR,
+        SUPPORTED_EMBEDDINGS_MODELS,
+        SUPPORTED_LLM_BACKENDS,
+        env_flag,
+        env_int,
+        first_env_value,
+        is_loopback_host,
+        is_loopback_openai_compatible_host,
+        normalize_ollama_base_url,
+        normalize_openai_compatible_base_url,
+        safe_ollama_base_url_for_error,
+        safe_openai_compatible_base_url_for_error,
+    )
+
 LOGGER = logging.getLogger(__name__)
 OLLAMA_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 OPENAI_COMPAT_NO_PROXY_OPENER = urllib.request.build_opener(
     urllib.request.ProxyHandler({})
 )
-FAST_MODE_ENV_VAR = "FAST_MODE"
-LLM_BACKEND_ENV_VAR = "LLM_BACKEND"
-LLM_MODEL_ENV_VAR = "LLM_MODEL"
-EMBEDDINGS_MODEL_ENV_VAR = "EMBEDDINGS_MODEL"
-OLLAMA_BASE_URL_ENV_VAR = "OLLAMA_BASE_URL"
-OLLAMA_MODEL_ENV_VAR = "OLLAMA_MODEL"
-OLLAMA_EMBEDDINGS_MODEL_ENV_VAR = "OLLAMA_EMBED_MODEL"
-OLLAMA_TIMEOUT_ENV_VAR = "OLLAMA_TIMEOUT"
-OPENAI_COMPAT_BASE_URL_ENV_VAR = "OPENAI_COMPAT_BASE_URL"
-OPENAI_COMPAT_API_KEY_ENV_VAR = "OPENAI_COMPAT_API_KEY"
-OPENAI_COMPAT_MODEL_ENV_VAR = "OPENAI_COMPAT_MODEL"
-OPENAI_COMPAT_EMBEDDINGS_MODEL_ENV_VAR = "OPENAI_COMPAT_EMBED_MODEL"
-OPENAI_COMPAT_TIMEOUT_ENV_VAR = "OPENAI_COMPAT_TIMEOUT"
-EMBEDDINGS_DEVICE_ENV_VAR = "EMBEDDINGS_DEVICE"
-DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
-DEFAULT_OLLAMA_MODEL = "nemotron-3-nano:4b"
-DEFAULT_OLLAMA_EMBEDDINGS_MODEL = "embeddinggemma"
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
-SUPPORTED_LLM_BACKENDS = {
-    "auto",
-    "mock",
-    "ollama",
-    "openai-compatible",
-}
 MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 MAX_DOCUMENT_CHUNKS = 2_000
 DEFAULT_MAX_SESSION_REPORTS = 200
-DEFAULT_EMBEDDINGS_MODEL = "local-hashing-384"
-SUPPORTED_EMBEDDINGS_MODELS = {DEFAULT_EMBEDDINGS_MODEL}
 LOCAL_HASHING_EMBEDDINGS_DIMENSIONS = 384
 LOCAL_HASHING_ALIASES = {
     "go_live": ("launch", "launch_date", "release", "release_date"),
@@ -227,76 +266,6 @@ SELF_CHECK_PASS_OUTCOMES = {"supported", "not_verified"}
 VERIFIER_OUTCOMES = {"supported", "unsupported", "insufficient"}
 
 
-def is_loopback_host(hostname: str) -> bool:
-    host = hostname.rstrip(".").lower()
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
-def normalize_ollama_base_url(base_url: str) -> str:
-    raw_base_url = base_url.strip().rstrip("/")
-    if not raw_base_url:
-        raise RuntimeError(f"{OLLAMA_BASE_URL_ENV_VAR} must not be empty.")
-    parse_failed = False
-    try:
-        parsed = urllib.parse.urlsplit(raw_base_url)
-        _port = parsed.port
-    except ValueError:
-        parse_failed = True
-    if parse_failed:
-        raise RuntimeError(
-            f"{OLLAMA_BASE_URL_ENV_VAR} must be a valid loopback HTTP(S) URL."
-        ) from None
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise RuntimeError(
-            f"{OLLAMA_BASE_URL_ENV_VAR} must be a loopback HTTP(S) URL."
-        )
-    if not is_loopback_host(parsed.hostname):
-        raise RuntimeError(
-            f"{OLLAMA_BASE_URL_ENV_VAR} must point to loopback local Ollama. "
-            "Use LLM_BACKEND=openai-compatible for remote gateways."
-        )
-    if parsed.username or parsed.password:
-        raise RuntimeError(f"{OLLAMA_BASE_URL_ENV_VAR} must not include credentials.")
-    if parsed.query or parsed.fragment:
-        raise RuntimeError(
-            f"{OLLAMA_BASE_URL_ENV_VAR} must not include query or fragment data."
-        )
-    if parsed.path not in {"", "/"}:
-        raise RuntimeError(f"{OLLAMA_BASE_URL_ENV_VAR} must not include a path.")
-
-    host = parsed.hostname
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
-    return urllib.parse.urlunsplit((parsed.scheme, netloc, "", "", ""))
-
-
-def safe_ollama_base_url_for_error(base_url: str) -> str:
-    raw_base_url = base_url.strip()
-    if not raw_base_url:
-        return "<unset>"
-    try:
-        parsed = urllib.parse.urlsplit(raw_base_url)
-    except ValueError:
-        return "<invalid>"
-
-    if parsed.hostname:
-        netloc = parsed.hostname
-        try:
-            if parsed.port is not None:
-                netloc = f"{netloc}:{parsed.port}"
-        except ValueError:
-            pass
-        if parsed.scheme in {"http", "https"}:
-            return urllib.parse.urlunsplit((parsed.scheme, netloc, "", "", ""))
-    return "<invalid>"
-
-
 def open_ollama_request_no_proxy(request, *, timeout: int):
     try:
         parsed = urllib.parse.urlsplit(request.full_url)
@@ -331,72 +300,6 @@ def open_openai_compatible_request(request, *, timeout: int):
     ):
         return OPENAI_COMPAT_NO_PROXY_OPENER.open(request, timeout=timeout)
     return urllib.request.urlopen(request, timeout=timeout)
-
-
-def is_loopback_openai_compatible_host(hostname: str) -> bool:
-    return is_loopback_host(hostname)
-
-
-def normalize_openai_compatible_base_url(base_url: str) -> str:
-    raw_base_url = base_url.strip().rstrip("/")
-    if not raw_base_url:
-        raise RuntimeError(
-            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} is required for "
-            "LLM_BACKEND=openai-compatible."
-        )
-    parse_failed = False
-    try:
-        parsed = urllib.parse.urlsplit(raw_base_url)
-        _port = parsed.port
-    except ValueError:
-        parse_failed = True
-    if parse_failed:
-        raise RuntimeError(
-            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must be a valid HTTP(S) URL."
-        )
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise RuntimeError(
-            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must be an HTTP(S) URL."
-        )
-    if parsed.scheme == "http" and not is_loopback_openai_compatible_host(
-        parsed.hostname
-    ):
-        raise RuntimeError(
-            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must use HTTPS for non-loopback "
-            "hosts."
-        )
-    if parsed.username or parsed.password:
-        raise RuntimeError(
-            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must not include credentials."
-        )
-    if parsed.query or parsed.fragment:
-        raise RuntimeError(
-            f"{OPENAI_COMPAT_BASE_URL_ENV_VAR} must not include query strings "
-            "or fragments."
-        )
-    return raw_base_url
-
-
-def safe_openai_compatible_base_url_for_error(base_url: str) -> str:
-    raw_base_url = base_url.strip()
-    if not raw_base_url:
-        return "<unset>"
-    try:
-        parsed = urllib.parse.urlsplit(raw_base_url)
-    except ValueError:
-        return "<invalid>"
-
-    if parsed.hostname:
-        netloc = parsed.hostname
-        try:
-            if parsed.port is not None:
-                netloc = f"{netloc}:{parsed.port}"
-        except ValueError:
-            pass
-        path = "/v1" if parsed.path.rstrip("/") == "/v1" else ""
-        if parsed.scheme in {"http", "https"}:
-            return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
-    return "<invalid>"
 
 
 ANSWER_SUPPORT_STOPWORDS = {
@@ -834,32 +737,6 @@ class DocumentRetrievalChain:
         if source:
             return os.path.basename(str(source))
         return self.document_name or "uploaded document"
-
-
-def env_flag(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        LOGGER.warning("Invalid integer for %s=%r. Using %s.", name, value, default)
-        return default
-
-
-def first_env_value(*names: str) -> Optional[str]:
-    for name in names:
-        value = os.getenv(name, "").strip()
-        if value:
-            return value
-    return None
 
 
 def normalize_encoding_name(encoding: Optional[str]) -> Optional[str]:

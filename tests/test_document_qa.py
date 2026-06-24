@@ -10,6 +10,7 @@ from langchain_core.documents import Document
 
 import src.DocumentQA as document_qa_module
 import src.ai_loop_runtime as ai_loop_runtime_module
+import src.runtime_config as runtime_config_module
 from src.ai_loop_engine import AILoopEngine, DocumentQA as PublicDocumentQA
 from src.DocumentQA import (
     DEFAULT_OLLAMA_EMBEDDINGS_MODEL,
@@ -74,6 +75,11 @@ def test_ai_loop_engine_is_canonical_runtime_alias():
     assert RootAILoopEngine is AILoopEngine
     assert DocumentQA is AILoopEngine
     assert PublicDocumentQA is AILoopEngine
+    assert normalize_ollama_base_url is runtime_config_module.normalize_ollama_base_url
+    assert (
+        normalize_openai_compatible_base_url
+        is runtime_config_module.normalize_openai_compatible_base_url
+    )
 
 
 def create_processed_mock_qa(tmp_path):
