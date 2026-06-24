@@ -19,6 +19,9 @@ Primary runtime files:
 - `src/loop_eval.py`: unified provider-free and optional live Ollama loop eval
   CLI with JSON artifacts containing scored `LoopReport` evidence.
 - `src/app.py`: Gradio UI wiring and user-facing status messages.
+- `docs/framework-adapter-strategy.md`: dependency-free adapter strategy for
+  OpenAI trace-shaped export, LangGraph manifest export, and Microsoft workflow
+  event export.
 - `tests/`: regression coverage for backend honesty, ingestion, encoding, app
   status, retrieval behavior, evals, and loop primitives.
 
@@ -89,6 +92,10 @@ Primary runtime files:
   the redacted report surface.
 - Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
   or request human review, but it must not introduce autonomous tools by itself.
+- Framework adapters must export `LoopReport`/`LoopSession` surfaces before they
+  execute framework runtimes. Follow `docs/framework-adapter-strategy.md`, keep
+  default exports redacted/public, and do not add OpenAI Agents SDK, LangGraph,
+  or Microsoft Agent Framework as core dependencies.
 
 ## Engineering Loop
 
@@ -120,6 +127,9 @@ Use this loop for every non-trivial change:
   theater.
 - Do not add OpenAI Agents SDK, LangGraph, or Microsoft Agent Framework as a core
   dependency until provider-neutral loop reports are real and test-covered.
+- Before implementing framework adapters, read
+  `docs/framework-adapter-strategy.md` and preserve its non-goals unless a new
+  issue explicitly changes the adapter contract.
 - Do not add autonomous tools or multi-agent behavior until middleware,
   guardrail, telemetry, and human-review boundaries exist in the loop contract.
 - Before adding planner/tool/agent loops, add or update golden document evals

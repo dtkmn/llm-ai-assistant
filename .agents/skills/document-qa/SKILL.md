@@ -78,6 +78,10 @@ first context provider, not the product boundary.
 - OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter
   targets, not core dependencies, until provider-neutral loop reports are real
   and test-covered.
+- Framework adapter work must follow `docs/framework-adapter-strategy.md`.
+  Export framework-shaped artifacts first; do not let any framework runtime own
+  loop execution until the internal loop report contract remains stable under
+  tests.
 - Do not add autonomous tool use or multi-agent behavior until middleware,
   guardrail, telemetry, and human-review boundaries exist in the loop contract.
 - Text encoding default is `Auto`. Ambiguous non-UTF legacy files must not be
@@ -94,6 +98,7 @@ first context provider, not the product boundary.
 - `src/golden_eval.py`
 - `src/loop_eval.py`
 - `src/ollama_model_eval.py`
+- `docs/framework-adapter-strategy.md`
 - `tests/test_document_qa.py`
 - `tests/test_app.py`
 - `tests/test_golden_document_eval.py`

@@ -162,7 +162,7 @@ The application is containerized for easy deployment.
 - **Public trace surface:** the Gradio UI shows a compact loop summary plus a
   redacted public loop report; raw reports remain internal diagnostics
 - **Middleware boundary:** loop middleware can observe runs/steps, block unsafe progress, request retry/refusal, or mark a human-review pending state without introducing autonomous tool use
-- **Framework posture:** OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter targets, not core dependencies
+- **Framework posture:** OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter targets, not core dependencies. The adapter strategy lives in [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md).
 
 ### Model
 - **LLM backend:** Configurable via `LLM_BACKEND`
@@ -228,6 +228,19 @@ python -m pytest
 Use these before adding planner loops, tools, multi-context memory, or more
 agent-like behavior. Blunt rule: if the boring single-agent loop is not
 measurably honest, bigger agent features will only make the failure harder to see.
+
+### Framework Adapter Strategy
+
+Frameworks are interop surfaces, not the engine. The current plan is to export
+AI Loop Engine reports into framework-shaped artifacts before adding any live
+framework runtime integration:
+
+- OpenAI Agents SDK: trace-shaped export first
+- LangGraph: thread/checkpoint manifest export first
+- Microsoft Agent Framework: workflow event-stream export first
+
+See [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md)
+for mappings, non-goals, and the dependency boundary.
 
 ### Local Replay Artifacts
 
