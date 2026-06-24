@@ -15,10 +15,13 @@ Primary runtime files:
   document context provider wrapper, LLM backend selection, retrieval chain,
   Ollama adapter, and query handling.
 - `src/loop_engine.py`: provider-neutral loop primitives for typed run, step,
-  policy, verifier, human-review, and report records.
+  policy, verifier, human-review, session, and report records.
 - `src/loop_eval.py`: unified provider-free and optional live Ollama loop eval
   CLI with JSON artifacts containing scored `LoopReport` evidence.
 - `src/app.py`: Gradio UI wiring and user-facing status messages.
+- `docs/framework-adapter-strategy.md`: dependency-free adapter strategy for
+  OpenAI trace-shaped export, LangGraph manifest export, and Microsoft workflow
+  event export.
 - `tests/`: regression coverage for backend honesty, ingestion, encoding, app
   status, retrieval behavior, evals, and loop primitives.
 
@@ -83,8 +86,16 @@ Primary runtime files:
 - `DocumentQA.query_with_trace()` must expose a `LoopReport` that matches the
   actual query path: prompt evidence, draft, mechanical check, verifier outcome,
   retry/refusal state, and final answer.
+- Completed query loop reports must be retained in bounded in-memory
+  `LoopSession` state keyed by `session_id`. Local replay JSONL export writes
+  raw loop reports for developer diagnostics; public UI traces must keep using
+  the redacted report surface.
 - Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
   or request human review, but it must not introduce autonomous tools by itself.
+- Framework adapters must export `LoopReport`/`LoopSession` surfaces before they
+  execute framework runtimes. Follow `docs/framework-adapter-strategy.md`, keep
+  default exports redacted/public, and do not add OpenAI Agents SDK, LangGraph,
+  or Microsoft Agent Framework as core dependencies.
 
 ## Engineering Loop
 
@@ -110,10 +121,15 @@ Use this loop for every non-trivial change:
   old document is still active and queryable after every failed upload path.
 - Preserve `DocumentQA.query()` as the simple string API; add richer answer
   evidence through structured result objects such as `query_with_trace()`.
+- Keep replay/export behavior local and explicit. Do not add SQLite, server
+  persistence, or background replay jobs until tests prove the product need.
 - Keep `DocumentQA` honest before making it clever. Reliability beats agentic
   theater.
 - Do not add OpenAI Agents SDK, LangGraph, or Microsoft Agent Framework as a core
   dependency until provider-neutral loop reports are real and test-covered.
+- Before implementing framework adapters, read
+  `docs/framework-adapter-strategy.md` and preserve its non-goals unless a new
+  issue explicitly changes the adapter contract.
 - Do not add autonomous tools or multi-agent behavior until middleware,
   guardrail, telemetry, and human-review boundaries exist in the loop contract.
 - Before adding planner/tool/agent loops, add or update golden document evals

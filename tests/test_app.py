@@ -114,6 +114,9 @@ class FakeQA:
             ),
         )
 
+    def clear_loop_session(self, session_id="default"):
+        self.cleared_loop_session_id = session_id
+
 
 class FakeEndpointQA(FakeQA):
     loaded_model_id = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -688,5 +691,6 @@ def test_clear_chat_resets_answer_trace(monkeypatch):
 
     assert history == []
     assert fake_qa.chat_history == []
+    assert fake_qa.cleared_loop_session_id == "default"
     assert json.loads(loop_summary)["draft_attempt_count"] == 0
     assert json.loads(answer_trace)["citations"] == []

@@ -40,12 +40,15 @@ first context provider, not the product boundary.
   loop reports instead of hardcoding document-specific assumptions in UI code.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,
-  `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
+  `LoopSession`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
   `HumanReviewRequest` before adding planner, multi-agent, tool, replay, or
   framework-adapter behavior.
 - `DocumentQA.query_with_trace()` must expose a `LoopReport` that matches the
   actual query path: prompt evidence, draft, mechanical check, verifier outcome,
   retry/refusal state, and final answer.
+- Completed query reports should be retained in bounded in-memory `LoopSession`
+  state. Local JSONL export may write raw reports for developer replay/debug
+  artifacts; public UI traces must continue using the redacted report surface.
 - Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
   or request human review, but it must not introduce autonomous tools by itself.
 - Upload status must say `indexed` for real backends, because endpoint readiness
@@ -75,6 +78,10 @@ first context provider, not the product boundary.
 - OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter
   targets, not core dependencies, until provider-neutral loop reports are real
   and test-covered.
+- Framework adapter work must follow `docs/framework-adapter-strategy.md`.
+  Export framework-shaped artifacts first; do not let any framework runtime own
+  loop execution until the internal loop report contract remains stable under
+  tests.
 - Do not add autonomous tool use or multi-agent behavior until middleware,
   guardrail, telemetry, and human-review boundaries exist in the loop contract.
 - Text encoding default is `Auto`. Ambiguous non-UTF legacy files must not be
@@ -91,6 +98,7 @@ first context provider, not the product boundary.
 - `src/golden_eval.py`
 - `src/loop_eval.py`
 - `src/ollama_model_eval.py`
+- `docs/framework-adapter-strategy.md`
 - `tests/test_document_qa.py`
 - `tests/test_app.py`
 - `tests/test_golden_document_eval.py`

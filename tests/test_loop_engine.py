@@ -11,6 +11,7 @@ from src.loop_engine import (
     LoopPolicy,
     LoopReport,
     LoopRun,
+    LoopSession,
     LoopStep,
     VerificationOutcome,
     VerificationResult,
@@ -71,6 +72,52 @@ def test_loop_report_round_trips_through_json():
     assert payload["run"]["steps"][0]["phase"] == "verify"
     assert payload["run"]["steps"][0]["duration_ms"] == 1000
     assert payload["run"]["final_decision"] == "supported"
+
+
+def test_loop_session_keeps_reports_and_exports_jsonl(tmp_path):
+    started_at = utc("2026-06-23T10:00:00")
+    report = LoopReport(
+        run=LoopRun(
+            run_id="run_export",
+            session_id="session_local",
+            user_input="When does Project Phoenix launch?",
+            context_provider="document",
+            backend="mock",
+            model_label="MockLLM (fallback)",
+            started_at=started_at,
+            completed_at=started_at,
+            final_decision=LoopDecision.NOT_VERIFIED,
+            final_answer="Project Phoenix launches in June 2026 [1].",
+        )
+    )
+
+    session = LoopSession(session_id="session_local").add_report(report)
+    artifact_path = session.write_jsonl(tmp_path / "session.jsonl")
+    restored = LoopSession.from_jsonl(artifact_path.read_text(encoding="utf-8"))
+
+    assert session.report_count == 1
+    assert session.to_dict()["schema_version"] == "loop-session/v1"
+    assert artifact_path.exists()
+    assert restored == session
+    assert json.loads(artifact_path.read_text(encoding="utf-8"))["run"]["run_id"] == (
+        "run_export"
+    )
+
+
+def test_loop_session_rejects_cross_session_reports():
+    report = LoopReport(
+        run=LoopRun(
+            run_id="run_other",
+            session_id="other_session",
+            user_input="What happened?",
+            context_provider="document",
+            backend="mock",
+            model_label="MockLLM (fallback)",
+        )
+    )
+
+    with pytest.raises(ValueError, match="another session"):
+        LoopSession(session_id="session_local").add_report(report)
 
 
 def test_verification_result_rejects_unknown_outcome():

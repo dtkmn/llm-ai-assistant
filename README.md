@@ -27,7 +27,7 @@ https://huggingface.co/spaces/0xdant/llm-ai-assistant
 - **GPU/MPS Support:** Automatically utilizes CUDA, Apple Silicon (MPS), or CPU
 
 
-![LLM-flow.png](https://github.com/dtkmn/ai-loop-engine/blob/main/LLM-flow.png)
+![AI Loop Engine flow](docs/ai-loop-engine-flow.svg)
 
 ## Installation
 
@@ -153,12 +153,16 @@ The application is containerized for easy deployment.
 - **Context provider boundary:** `DocumentContextProvider` wraps the current
   document vector store and retrieval chain so later providers can plug into the
   loop without changing the product identity again
-- **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
+- **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopSession`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
 - **Runtime reports:** `DocumentQA.query_with_trace()` returns a `QueryResult` with both the legacy answer trace and a first-class `LoopReport`
+- **Session state:** completed loop reports are retained in bounded in-memory
+  `LoopSession` objects keyed by `session_id`
+- **Replay artifacts:** local JSONL export writes one raw `LoopReport` per line,
+  suitable for future replay and diff tooling
 - **Public trace surface:** the Gradio UI shows a compact loop summary plus a
   redacted public loop report; raw reports remain internal diagnostics
 - **Middleware boundary:** loop middleware can observe runs/steps, block unsafe progress, request retry/refusal, or mark a human-review pending state without introducing autonomous tool use
-- **Framework posture:** OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter targets, not core dependencies
+- **Framework posture:** OpenAI Agents SDK, LangGraph, and Microsoft Agent Framework are future adapter targets, not core dependencies. The adapter strategy lives in [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md).
 
 ### Model
 - **LLM backend:** Configurable via `LLM_BACKEND`
@@ -224,6 +228,40 @@ python -m pytest
 Use these before adding planner loops, tools, multi-context memory, or more
 agent-like behavior. Blunt rule: if the boring single-agent loop is not
 measurably honest, bigger agent features will only make the failure harder to see.
+
+### Framework Adapter Strategy
+
+Frameworks are interop surfaces, not the engine. The current plan is to export
+AI Loop Engine reports into framework-shaped artifacts before adding any live
+framework runtime integration:
+
+- OpenAI Agents SDK: trace-shaped export first
+- LangGraph: thread/checkpoint manifest export first
+- Microsoft Agent Framework: workflow event-stream export first
+
+See [`docs/framework-adapter-strategy.md`](docs/framework-adapter-strategy.md)
+for mappings, non-goals, and the dependency boundary.
+
+### Local Replay Artifacts
+
+`DocumentQA` keeps recent loop reports in memory per `session_id`. Export a
+session locally when you need a replay/debug artifact:
+
+```python
+qa_system.export_loop_session_jsonl("artifacts/loop-session-default.jsonl")
+```
+
+Each JSONL line is a raw `loop-report/v1` object. Treat these files as local
+developer diagnostics because they may include prompts, retrieved excerpts, draft
+outputs, and final answers. Planned replay/diff commands should look like:
+
+```bash
+python -m src.loop_replay inspect artifacts/loop-session-default.jsonl
+python -m src.loop_replay diff before.jsonl after.jsonl
+```
+
+Those commands are intentionally not implemented yet. The report shape needs to
+stay stable before replay becomes a real product surface.
 
 ### Optional Live Ollama Model Eval
 

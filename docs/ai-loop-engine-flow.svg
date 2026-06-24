@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="650" viewBox="0 0 1600 650" role="img" aria-labelledby="title desc">
+  <title id="title">AI Loop Engine flow</title>
+  <desc id="desc">A diagram of AI Loop Engine showing document context, loop execution, guardrails, loop reports, sessions, replay, and optional framework adapters.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f8fafc; }
+      .band { fill: #ffffff; stroke: #334155; stroke-width: 2.5; }
+      .box { fill: #ffffff; stroke: #475569; stroke-width: 2; }
+      .context { fill: #e0f2fe; }
+      .loop { fill: #ecfdf5; }
+      .check { fill: #fff7ed; }
+      .report { fill: #f5f3ff; }
+      .adapter { fill: #fefce8; }
+      .title { font-family: Arial, Helvetica, sans-serif; font-size: 30px; font-weight: 700; fill: #0f172a; }
+      .subtitle { font-family: Arial, Helvetica, sans-serif; font-size: 18px; font-weight: 600; fill: #334155; }
+      .label { font-family: Arial, Helvetica, sans-serif; font-size: 18px; font-weight: 700; fill: #0f172a; }
+      .small { font-family: Arial, Helvetica, sans-serif; font-size: 15px; fill: #334155; }
+      .tiny { font-family: Arial, Helvetica, sans-serif; font-size: 13px; fill: #475569; }
+      .arrow { stroke: #475569; stroke-width: 2.5; fill: none; marker-end: url(#arrowhead); }
+      .soft-arrow { stroke: #64748b; stroke-width: 2; fill: none; marker-end: url(#arrowhead); stroke-dasharray: 7 6; }
+      .fail { stroke: #dc2626; stroke-width: 2.5; fill: none; marker-end: url(#redarrow); }
+      .ok { stroke: #16a34a; stroke-width: 2.5; fill: none; marker-end: url(#greenarrow); }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M 0 0 L 10 4 L 0 8 z" fill="#475569"/>
+    </marker>
+    <marker id="greenarrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M 0 0 L 10 4 L 0 8 z" fill="#16a34a"/>
+    </marker>
+    <marker id="redarrow" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M 0 0 L 10 4 L 0 8 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1600" height="650"/>
+  <text class="title" x="54" y="54">AI Loop Engine</text>
+  <text class="subtitle" x="54" y="84">Local-first loop inspection for context, drafting, checks, verification, retries, refusals, sessions, and replay.</text>
+
+  <rect class="band context" x="54" y="120" rx="14" ry="14" width="294" height="360"/>
+  <text class="label" x="80" y="158">Context Provider</text>
+  <rect class="box" x="80" y="186" rx="10" ry="10" width="238" height="68"/>
+  <text class="small" x="102" y="214">Upload PDF, DOCX, TXT, MD</text>
+  <text class="tiny" x="102" y="236">Safe decode and validation</text>
+  <rect class="box" x="80" y="274" rx="10" ry="10" width="238" height="68"/>
+  <text class="small" x="102" y="302">Transactional index</text>
+  <text class="tiny" x="102" y="324">Split, embed, FAISS commit</text>
+  <rect class="box" x="80" y="362" rx="10" ry="10" width="238" height="70"/>
+  <text class="small" x="102" y="390">Active document state</text>
+  <text class="tiny" x="102" y="412">Atomic status snapshot</text>
+
+  <rect class="band loop" x="410" y="120" rx="14" ry="14" width="534" height="360"/>
+  <text class="label" x="436" y="158">Runtime Answer Loop</text>
+  <rect class="box" x="436" y="186" rx="10" ry="10" width="200" height="68"/>
+  <text class="small" x="460" y="214">Retrieve evidence</text>
+  <text class="tiny" x="460" y="236">Prompt-used chunks cite</text>
+  <rect class="box" x="710" y="186" rx="10" ry="10" width="200" height="68"/>
+  <text class="small" x="734" y="214">Draft answer</text>
+  <text class="tiny" x="734" y="236">Ollama or hosted model</text>
+  <rect class="box check" x="436" y="298" rx="10" ry="10" width="200" height="82"/>
+  <text class="small" x="460" y="326">Mechanical checks</text>
+  <text class="tiny" x="460" y="348">Citations exist and match</text>
+  <text class="tiny" x="460" y="366">Prompt evidence</text>
+  <rect class="box check" x="710" y="298" rx="10" ry="10" width="200" height="82"/>
+  <text class="small" x="734" y="326">Verifier</text>
+  <text class="tiny" x="734" y="348">Real backend verifies</text>
+  <text class="tiny" x="734" y="366">Mock: not_verified</text>
+  <rect class="box" x="572" y="408" rx="10" ry="10" width="200" height="50"/>
+  <text class="small" x="601" y="438">Final decision</text>
+
+  <path class="arrow" d="M 348 300 H 410"/>
+  <path class="arrow" d="M 636 220 H 710"/>
+  <path class="arrow" d="M 810 254 V 298"/>
+  <path class="arrow" d="M 710 340 H 636"/>
+  <path class="ok" d="M 636 380 C 640 400 652 408 672 408"/>
+  <path class="fail" d="M 710 380 C 694 398 682 398 672 408"/>
+  <path class="soft-arrow" d="M 572 408 C 520 400 500 382 500 358"/>
+  <text class="tiny" x="462" y="447">retry once or refuse</text>
+
+  <rect class="band check" x="1010" y="120" rx="14" ry="14" width="248" height="360"/>
+  <text class="label" x="1036" y="158">Guardrails</text>
+  <rect class="box" x="1036" y="190" rx="10" ry="10" width="196" height="70"/>
+  <text class="small" x="1060" y="218">Middleware</text>
+  <text class="tiny" x="1060" y="240">Block, retry, refuse</text>
+  <rect class="box" x="1036" y="284" rx="10" ry="10" width="196" height="70"/>
+  <text class="small" x="1060" y="312">Human review</text>
+  <text class="tiny" x="1060" y="334">requires_review state</text>
+  <rect class="box" x="1036" y="378" rx="10" ry="10" width="196" height="70"/>
+  <text class="small" x="1060" y="406">Redaction</text>
+  <text class="tiny" x="1060" y="428">Public traces stay safe</text>
+
+  <path class="soft-arrow" d="M 944 218 H 1010"/>
+  <path class="soft-arrow" d="M 944 340 H 1010"/>
+  <path class="soft-arrow" d="M 1010 408 H 944"/>
+
+  <rect class="band report" x="1320" y="120" rx="14" ry="14" width="226" height="360"/>
+  <text class="label" x="1346" y="158">Loop Evidence</text>
+  <rect class="box" x="1346" y="188" rx="10" ry="10" width="174" height="66"/>
+  <text class="small" x="1370" y="216">LoopReport</text>
+  <text class="tiny" x="1370" y="238">Typed run and steps</text>
+  <rect class="box" x="1346" y="274" rx="10" ry="10" width="174" height="66"/>
+  <text class="small" x="1370" y="302">LoopSession</text>
+  <text class="tiny" x="1370" y="324">Bounded run history</text>
+  <rect class="box" x="1346" y="360" rx="10" ry="10" width="174" height="66"/>
+  <text class="small" x="1370" y="388">Replay JSONL</text>
+  <text class="tiny" x="1370" y="410">Local diagnostics</text>
+
+  <path class="soft-arrow" d="M 772 433 C 930 500 1160 500 1320 410"/>
+  <path class="soft-arrow" d="M 1258 220 H 1320"/>
+  <path class="soft-arrow" d="M 1258 408 H 1320"/>
+
+  <rect class="band adapter" x="410" y="520" rx="14" ry="14" width="848" height="82"/>
+  <text class="label" x="436" y="553">Optional Adapter Exports</text>
+  <text class="small" x="436" y="580">OpenAI trace-shaped JSON</text>
+  <text class="small" x="698" y="580">LangGraph manifest</text>
+  <text class="small" x="928" y="580">Microsoft workflow events</text>
+  <text class="tiny" x="436" y="594">Frameworks are export targets first, not core runtime dependencies.</text>
+  <path class="soft-arrow" d="M 1433 480 C 1433 540 1258 558 1258 558"/>
+
+  <rect class="box" x="54" y="520" rx="14" ry="14" width="294" height="82"/>
+  <text class="label" x="80" y="553">User Surface</text>
+  <text class="small" x="80" y="580">Gradio chat, loop summary, trace</text>
+  <text class="tiny" x="80" y="596">Upload means indexed</text>
+</svg>

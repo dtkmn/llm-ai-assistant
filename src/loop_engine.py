@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Protocol, Tuple
 from uuid import uuid4
 
 
 SCHEMA_VERSION = "loop-report/v1"
+LOOP_SESSION_SCHEMA_VERSION = "loop-session/v1"
 GUARDRAIL_DECISION_VALUES = frozenset(
     {
         "continue",
@@ -521,6 +524,105 @@ class LoopReport:
         return cls(
             schema_version=schema_version,
             run=LoopRun.from_dict(data["run"]),
+        )
+
+
+@dataclass(frozen=True)
+class LoopSession:
+    session_id: str = "default"
+    reports: Tuple[LoopReport, ...] = ()
+    schema_version: str = LOOP_SESSION_SCHEMA_VERSION
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        session_id = str(self.session_id or "default").strip() or "default"
+        reports = tuple(self.reports or ())
+        for report in reports:
+            report_session_id = report.run.session_id
+            if report_session_id and report_session_id != session_id:
+                raise ValueError(
+                    "LoopSession cannot contain reports from another session: "
+                    f"{report_session_id!r}"
+                )
+        object.__setattr__(self, "session_id", session_id)
+        object.__setattr__(self, "reports", reports)
+        object.__setattr__(self, "metadata", _metadata_dict(self.metadata))
+
+    @property
+    def report_count(self) -> int:
+        return len(self.reports)
+
+    def add_report(
+        self,
+        report: LoopReport,
+        *,
+        max_reports: Optional[int] = None,
+    ) -> "LoopSession":
+        if report.run.session_id and report.run.session_id != self.session_id:
+            raise ValueError(
+                "Cannot add loop report from another session: "
+                f"{report.run.session_id!r}"
+            )
+        reports = (*self.reports, report)
+        if max_reports is not None and max_reports >= 0:
+            reports = reports[-max_reports:] if max_reports else ()
+        return replace(self, reports=reports)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "session_id": self.session_id,
+            "report_count": self.report_count,
+            "reports": [report.to_dict() for report in self.reports],
+            "metadata": _metadata_dict(self.metadata),
+        }
+
+    def to_jsonl(self, *, public: bool = False) -> str:
+        lines = []
+        for report in self.reports:
+            payload = report.to_public_dict() if public else report.to_dict()
+            lines.append(json.dumps(payload, sort_keys=True))
+        return "\n".join(lines) + ("\n" if lines else "")
+
+    def write_jsonl(self, path: str | Path, *, public: bool = False) -> Path:
+        artifact_path = Path(path)
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(self.to_jsonl(public=public), encoding="utf-8")
+        return artifact_path
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "LoopSession":
+        schema_version = str(data.get("schema_version", LOOP_SESSION_SCHEMA_VERSION))
+        if schema_version != LOOP_SESSION_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported loop session schema: {schema_version}")
+        return cls(
+            schema_version=schema_version,
+            session_id=str(data.get("session_id") or "default"),
+            reports=tuple(
+                LoopReport.from_dict(report) for report in data.get("reports", ())
+            ),
+            metadata=_metadata_dict(data.get("metadata")),
+        )
+
+    @classmethod
+    def from_jsonl(
+        cls,
+        content: str,
+        *,
+        session_id: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> "LoopSession":
+        reports = []
+        for line in content.splitlines():
+            if not line.strip():
+                continue
+            reports.append(LoopReport.from_dict(json.loads(line)))
+        first_report_session_id = reports[0].run.session_id if reports else None
+        inferred_session_id = session_id or first_report_session_id or "default"
+        return cls(
+            session_id=inferred_session_id,
+            reports=tuple(reports),
+            metadata=metadata or {},
         )
 
 
