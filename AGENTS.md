@@ -46,7 +46,7 @@ Primary runtime files:
   `LLM_BACKEND=ollama`, `LLM_BACKEND=openai-compatible`,
   `LLM_BACKEND=endpoint`, and `LLM_BACKEND=local` must fail closed when
   credentials, model loading, server reachability, or model availability are
-  invalid. Mock mode must be explicit or an `auto` demo fallback.
+  invalid. Mock mode must be explicit and must never be reached as a fallback.
 - Do not let UI status imply inference readiness before inference has actually
   happened. Document upload means indexed, not proven ready.
 - Document upload replacement must be transactional. Failed uploads must preserve
@@ -77,9 +77,10 @@ Primary runtime files:
   runs may validate builds, but must not publish release images.
 - Preserve deterministic generation for context-grounded answers unless a
   test-backed product reason requires changing it.
-- `LLM_BACKEND=auto` is local-first and demo-safe: try Ollama, then fall back
-  to `MockLLM` if Ollama is unavailable. Explicit `LLM_BACKEND=ollama` remains
-  fail-closed.
+- `LLM_BACKEND=auto` is local-first and real-backend-only: it selects Ollama
+  and fails closed if Ollama or the configured model is unavailable. Explicit
+  `LLM_BACKEND=mock` is only for tests/demos and must never be an automatic
+  fallback.
 - Cloud or gateway deployment should use `LLM_BACKEND=openai-compatible` with
   `OPENAI_COMPAT_BASE_URL`, `OPENAI_COMPAT_MODEL`, optional
   `OPENAI_COMPAT_API_KEY`, and `OPENAI_COMPAT_TIMEOUT`. Plain HTTP is allowed

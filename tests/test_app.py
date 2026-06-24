@@ -53,7 +53,7 @@ class FakeQA:
         active_model_label = (
             self.loaded_model_label
             or self.loaded_model_id
-            or ("MockLLM (fallback)" if active_backend == "mock" else "unknown")
+            or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
         self.latest_processing_report = DocumentProcessingReport(
             attempted_document_name=self.current_document_name,
@@ -76,7 +76,7 @@ class FakeQA:
         active_model_label = (
             self.loaded_model_label
             or self.loaded_model_id
-            or ("MockLLM (fallback)" if active_backend == "mock" else "unknown")
+            or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
         return DocumentQAStatus(
             profile_label="FAST" if self.fast_mode else "QUALITY",
@@ -98,7 +98,7 @@ class FakeQA:
         active_model_label = (
             self.loaded_model_label
             or self.loaded_model_id
-            or ("MockLLM (fallback)" if active_backend == "mock" else "unknown")
+            or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
         answer = "Project Phoenix is described in the uploaded document."
         return QueryResult(
@@ -177,7 +177,7 @@ def processed_report(
         max_chunk_limit=2000,
         text_encoding_mode="auto",
         backend="mock",
-        model_label="MockLLM (fallback)",
+        model_label="MockLLM (explicit demo)",
         error_message=error_message,
     )
 
@@ -387,7 +387,7 @@ def test_process_document_reports_failure_without_losing_active_status(
         max_chunk_limit=2000,
         text_encoding_mode="auto",
         backend="mock",
-        model_label="MockLLM (fallback)",
+        model_label="MockLLM (explicit demo)",
         error_message=None,
     )
 
@@ -404,7 +404,7 @@ def test_process_document_reports_failure_without_losing_active_status(
             max_chunk_limit=2000,
             text_encoding_mode=text_encoding or "auto",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             error_message="Could not decode text document",
         )
         raise DocumentProcessingError(
@@ -475,7 +475,7 @@ def test_format_answer_trace_includes_citations():
             question="When does it launch?",
             document_name="phoenix.txt",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             retrieved_chunk_count=1,
             citations=[
                 AnswerCitation(
@@ -524,7 +524,7 @@ def test_format_answer_trace_includes_loop_report():
             user_input="When does it launch?",
             context_provider="document",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             final_decision=LoopDecision.NOT_VERIFIED,
             final_answer="Project Phoenix launches in June 2026 [1].",
         )
@@ -535,7 +535,7 @@ def test_format_answer_trace_includes_loop_report():
             question="When does it launch?",
             document_name="phoenix.txt",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             retrieved_chunk_count=0,
             citations=[],
         ),
@@ -670,7 +670,7 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
             user_input="Generate unsafe content",
             context_provider="document",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             steps=(
                 LoopStep(
                     phase=LoopPhase.DRAFT,
@@ -710,7 +710,7 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
             question="Generate unsafe content",
             document_name="phoenix.txt",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             retrieved_chunk_count=0,
             citations=[],
             error_message=blocked_draft,

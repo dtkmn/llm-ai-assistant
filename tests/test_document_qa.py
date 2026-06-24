@@ -90,7 +90,7 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     status = qa.status()
     assert status.profile_label == "FAST"
     assert status.active_backend == "mock"
-    assert status.active_model_label == "MockLLM (fallback)"
+    assert status.active_model_label == "MockLLM (explicit demo)"
     assert status.embeddings_device == "cpu"
     assert status.document_name == "phoenix.txt"
     assert status.ready_for_queries is True
@@ -106,7 +106,7 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     assert status.processing_report.max_chunk_limit == qa.max_document_chunks
     assert status.processing_report.text_encoding_mode == "auto"
     assert status.processing_report.backend == "mock"
-    assert status.processing_report.model_label == "MockLLM (fallback)"
+    assert status.processing_report.model_label == "MockLLM (explicit demo)"
     assert status.processing_report.error_message is None
 
 
@@ -120,7 +120,7 @@ def test_query_with_trace_returns_retrieved_citations(tmp_path):
     assert result.trace.question == "What is Project Phoenix?"
     assert result.trace.document_name == "phoenix.txt"
     assert result.trace.backend == "mock"
-    assert result.trace.model_label == "MockLLM (fallback)"
+    assert result.trace.model_label == "MockLLM (explicit demo)"
     assert result.trace.retrieved_chunk_count > 0
     assert result.trace.error_message is None
     assert result.trace.self_check.outcome == "not_verified"
@@ -174,7 +174,7 @@ def test_query_with_trace_includes_loop_report_for_prompt_evidence(tmp_path):
     assert run.metadata["context_provider"] == "document"
     assert run.metadata["context_provider_name"] == "phoenix.txt"
     assert run.backend == "mock"
-    assert run.model_label == "MockLLM (fallback)"
+    assert run.model_label == "MockLLM (explicit demo)"
     assert run.policy.allow_tool_calls is False
     assert "document_text" in run.metadata["untrusted_inputs"]
     assert run.final_decision == LoopDecision.NOT_VERIFIED
@@ -1400,9 +1400,7 @@ def test_auto_status_before_initialization_reports_local_first_plan():
 
     assert status.configured_backend == "auto"
     assert status.active_backend == "auto"
-    assert status.active_model_label == (
-        "Auto (Ollama nemotron-3-nano:4b -> MockLLM fallback)"
-    )
+    assert status.active_model_label == "Auto (Ollama nemotron-3-nano:4b)"
     assert "Qwen" not in status.active_model_label
 
 
@@ -1978,6 +1976,23 @@ def test_auto_backend_uses_ollama_when_available_without_hf_token(monkeypatch):
     assert qa.loaded_model_label == "Ollama (nemotron-3-nano:4b)"
 
 
+def test_invalid_llm_backend_env_fails_closed_before_loading_model(monkeypatch):
+    load_attempted = False
+
+    def forbidden_ollama_loader(self, model_id):
+        nonlocal load_attempted
+        load_attempted = True
+        raise AssertionError("invalid backend must not select Ollama")
+
+    monkeypatch.setenv("LLM_BACKEND", "mockk")
+    monkeypatch.setattr(DocumentQA, "_load_ollama_model", forbidden_ollama_loader)
+
+    with pytest.raises(RuntimeError, match="Unsupported LLM_BACKEND='mockk'"):
+        DocumentQA(device="cpu", hf_token=None)
+
+    assert load_attempted is False
+
+
 def test_endpoint_url_does_not_also_set_repo_id(monkeypatch):
     monkeypatch.setenv("HF_ENDPOINT_URL", "https://example.invalid")
     qa = DocumentQA(device="cpu", hf_token="real-token", llm_backend="endpoint")
@@ -2028,7 +2043,7 @@ def test_auto_backend_uses_ollama_on_mps_when_available(monkeypatch):
     assert qa.loaded_model_id == "nemotron-3-nano:4b"
 
 
-def test_auto_backend_falls_back_to_mock_when_ollama_unavailable(monkeypatch):
+def test_auto_backend_fails_closed_when_ollama_unavailable(monkeypatch):
     def failing_ollama_loader(self, model_id):
         raise ValueError("ollama unavailable")
 
@@ -2036,10 +2051,11 @@ def test_auto_backend_falls_back_to_mock_when_ollama_unavailable(monkeypatch):
     monkeypatch.setattr(DocumentQA, "_load_ollama_model", failing_ollama_loader)
     qa = DocumentQA(device="mps", llm_backend="auto", hf_token=None)
 
-    qa._initialize_llm()
+    with pytest.raises(RuntimeError, match="Unable to initialize auto-selected"):
+        qa._initialize_llm()
 
-    assert qa.active_llm_backend == "mock"
-    assert isinstance(qa.llm, MockLLM)
+    assert qa.active_llm_backend is None
+    assert qa.llm is None
 
 
 def test_auto_backend_does_not_use_hf_when_hf_token_exists(monkeypatch):
@@ -2057,10 +2073,11 @@ def test_auto_backend_does_not_use_hf_when_hf_token_exists(monkeypatch):
     monkeypatch.setattr(DocumentQA, "_load_local_model", forbidden_local_loader)
     qa = DocumentQA(device="cpu", llm_backend="auto", hf_token="real-token")
 
-    qa._initialize_llm()
+    with pytest.raises(RuntimeError, match="Unable to initialize auto-selected"):
+        qa._initialize_llm()
 
-    assert qa.active_llm_backend == "mock"
-    assert isinstance(qa.llm, MockLLM)
+    assert qa.active_llm_backend is None
+    assert qa.llm is None
 
 
 def test_explicit_endpoint_without_token_fails_closed(monkeypatch):

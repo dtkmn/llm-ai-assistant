@@ -83,7 +83,7 @@ def test_loop_session_keeps_reports_and_exports_jsonl(tmp_path):
             user_input="When does Project Phoenix launch?",
             context_provider="document",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             started_at=started_at,
             completed_at=started_at,
             final_decision=LoopDecision.NOT_VERIFIED,
@@ -112,7 +112,7 @@ def test_loop_session_rejects_cross_session_reports():
             user_input="What happened?",
             context_provider="document",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
         )
     )
 
@@ -137,7 +137,7 @@ def test_loop_report_rejects_unknown_schema_version():
             user_input="What happened?",
             context_provider="document",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
         )
     ).to_dict()
     report["schema_version"] = "loop-report/v99"
@@ -191,7 +191,7 @@ def test_loop_run_add_step_and_complete_are_immutable():
         user_input="What changed?",
         context_provider="document",
         backend="mock",
-        model_label="MockLLM (fallback)",
+        model_label="MockLLM (explicit demo)",
     )
     step = LoopStep(
         step_id="step_1",

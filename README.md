@@ -92,8 +92,8 @@ talk to an agent whose loop is visible and testable.
 
     Supported values:
     - `ollama` uses a local Ollama server. This is the recommended local path.
-    - `auto` tries Ollama and falls back to mock/demo mode if Ollama is not
-      available. It does not route to Hugging Face.
+    - `auto` selects Ollama and fails closed if Ollama or the configured model
+      is unavailable. It does not route to Hugging Face or mock.
     - `openai-compatible` uses any server that implements OpenAI-style
       `/v1/chat/completions`.
     - `endpoint` is the legacy hosted Hugging Face inference backend.
@@ -179,9 +179,9 @@ For a deployed model gateway:
      ai-loop-engine
    ```
 
-**Note:** `LLM_BACKEND=auto` is local-first and demo-safe: it tries Ollama, then
-falls back to mock mode if Ollama is not reachable. Use explicit `ollama` or
-`openai-compatible` when you want a real backend to fail closed.
+**Note:** `LLM_BACKEND=auto` is local-first and real-backend-only: it selects
+Ollama and fails closed if Ollama is not reachable. Use explicit
+`LLM_BACKEND=mock` only for deterministic demos/tests.
 
 
 ## Usage
@@ -218,12 +218,12 @@ falls back to mock mode if Ollama is not reachable. Use explicit `ollama` or
 ### Model
 - **LLM backend:** Configurable via `LLM_BACKEND`
   - `ollama`: local Ollama server via `OLLAMA_BASE_URL`; recommended for local use
-  - `auto` (default): local-first demo path; tries Ollama, then mock fallback
+  - `auto` (default): local-first real path; selects Ollama and fails closed if unavailable
   - `openai-compatible`: OpenAI-style `/v1/chat/completions` endpoint for cloud,
     private gateway, vLLM, llama.cpp server, LM Studio, or similar runtimes
   - `endpoint`: legacy hosted Hugging Face inference
   - `local`: legacy in-process Transformers pipeline
-  - `mock`: deterministic demo/test fallback
+  - `mock`: explicit deterministic demo/test backend; never used as fallback
 - **Ollama:** optionally configurable with `OLLAMA_MODEL` (default `nemotron-3-nano:4b`), `OLLAMA_BASE_URL` (default `http://localhost:11434`), and `OLLAMA_TIMEOUT`
 - **OpenAI-compatible endpoint:** requires `OPENAI_COMPAT_BASE_URL` and
   `OPENAI_COMPAT_MODEL`; optionally set `OPENAI_COMPAT_API_KEY` and

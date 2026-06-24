@@ -96,7 +96,7 @@ def terminal_report_with_secret_everywhere(secret: str) -> LoopReport:
             user_input=secret,
             context_provider="document",
             backend="mock",
-            model_label="MockLLM (fallback)",
+            model_label="MockLLM (explicit demo)",
             policy=LoopPolicy(metadata={"secret": secret}),
             started_at=started_at,
             completed_at=started_at,

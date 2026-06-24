@@ -1226,19 +1226,20 @@ class DocumentQA:
         return self._default_embeddings_device()
 
     def _normalize_llm_backend(self, llm_backend: Optional[str]) -> str:
-        backend = (
-            llm_backend or os.getenv(LLM_BACKEND_ENV_VAR, "auto")
-        ).strip().lower().replace("_", "-")
+        raw_backend = (
+            llm_backend
+            if llm_backend is not None
+            else os.getenv(LLM_BACKEND_ENV_VAR, "auto")
+        )
+        backend = raw_backend.strip().lower().replace("_", "-")
         if backend in {"openai", "openai-compatible-chat"}:
             backend = "openai-compatible"
         if backend not in SUPPORTED_LLM_BACKENDS:
-            LOGGER.warning(
-                "Unsupported %s=%r. Supported values: %s. Using auto.",
-                LLM_BACKEND_ENV_VAR,
-                backend,
-                ", ".join(sorted(SUPPORTED_LLM_BACKENDS)),
+            raise RuntimeError(
+                f"Unsupported {LLM_BACKEND_ENV_VAR}={raw_backend!r}. "
+                "Supported values: "
+                f"{', '.join(sorted(SUPPORTED_LLM_BACKENDS))}."
             )
-            return "auto"
         return backend
 
     def _select_llm_backend(self) -> str:
@@ -1407,26 +1408,16 @@ class DocumentQA:
         if self.hf_token == "dummy":
             message = (
                 "Dummy HuggingFace token is only allowed with LLM_BACKEND=mock "
-                "or auto demo fallback."
+                "or non-HuggingFace backends."
             )
-            if self.llm_backend in {"endpoint", "local"}:
-                raise RuntimeError(message)
             if requested_backend in {"endpoint", "local"}:
-                LOGGER.warning("%s Falling back to MockLLM.", message)
-                self.active_llm_backend = "mock"
-                self.llm = MockLLM()
-                return
+                raise RuntimeError(message)
 
         if requested_backend == "endpoint" and not self.hf_token:
             message = (
                 "HuggingFace token is required for endpoint inference. "
                 f"Set {HF_TOKEN_ENV_VAR} or use LLM_BACKEND=mock for demo mode."
             )
-            if self.llm_backend == "auto":
-                LOGGER.warning("%s Falling back to MockLLM.", message)
-                self.active_llm_backend = "mock"
-                self.llm = MockLLM()
-                return
             raise RuntimeError(message)
 
         if requested_backend == "ollama":
@@ -1442,21 +1433,18 @@ class DocumentQA:
             except Exception as exc:
                 self.llm = None
                 self.active_llm_backend = None
-                if self.llm_backend == "auto":
-                    LOGGER.warning(
-                        "LLM_BACKEND=auto could not initialize Ollama model `%s` "
-                        "at %s. Falling back to MockLLM. Use LLM_BACKEND=ollama "
-                        "to fail closed instead. Last error: %s",
-                        self.ollama_model,
-                        self.ollama_base_url,
-                        exc,
-                    )
-                    self.active_llm_backend = "mock"
-                    self.llm = MockLLM()
-                    return
+                backend_label = (
+                    "auto-selected ollama"
+                    if self.llm_backend == "auto"
+                    else "ollama"
+                )
                 raise RuntimeError(
-                    f"Unable to initialize ollama LLM `{self.ollama_model}` at "
-                    f"{self.ollama_base_url}. Last error: {exc}"
+                    f"Unable to initialize {backend_label} LLM "
+                    f"`{self.ollama_model}` at {self.ollama_base_url}. "
+                    "Start Ollama and pull the configured model, choose "
+                    "LLM_BACKEND=openai-compatible for a gateway, or set "
+                    "LLM_BACKEND=mock only for explicit demo/test mode. "
+                    f"Last error: {exc}"
                 ) from exc
 
         if requested_backend == "openai-compatible":
@@ -1513,18 +1501,16 @@ class DocumentQA:
                 )
 
         candidate_list = ", ".join(self._candidate_models()) or "none"
-        if last_error and self.llm_backend in {"endpoint", "local"}:
+        if last_error:
             raise RuntimeError(
                 f"Unable to initialize {requested_backend} LLM after trying "
                 f"{candidate_list}. Last error: {last_error}"
             ) from last_error
 
-        if last_error:
-            LOGGER.exception("All model candidates failed. Falling back to MockLLM.")
-        else:
-            LOGGER.warning("No model candidates available. Falling back to MockLLM.")
-        self.active_llm_backend = "mock"
-        self.llm = MockLLM()
+        raise RuntimeError(
+            f"Unable to initialize {requested_backend} LLM; no model candidates "
+            "were available."
+        )
 
     def _ensure_llm_initialized(self) -> None:
         with self._state_lock:
@@ -1694,9 +1680,9 @@ class DocumentQA:
 
         active_backend = self._active_backend()
         if active_backend == "mock":
-            return "MockLLM (fallback)"
+            return "MockLLM (explicit demo)"
         if active_backend == "auto":
-            return f"Auto (Ollama {self.ollama_model} -> MockLLM fallback)"
+            return f"Auto (Ollama {self.ollama_model})"
         if active_backend == "ollama":
             return self._loaded_model_label(self.ollama_model, "ollama")
         if active_backend == "openai-compatible":

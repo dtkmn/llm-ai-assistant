@@ -28,8 +28,9 @@ first context provider, not the product boundary.
 
 ## Runtime Contracts
 
-- `auto` backend is local-first and demo-safe: try Ollama, then fall back to
-  `MockLLM` when Ollama is unavailable. It must not route to Hugging Face.
+- `auto` backend is local-first and real-backend-only: select Ollama and fail
+  closed when Ollama or the configured model is unavailable. It must not route
+  to Hugging Face or fall back to mock.
 - Explicit real backends must fail closed: `ollama`, `openai-compatible`,
   `endpoint`, and `local`.
 - `openai-compatible` is the cloud/private-gateway deployment path. Use
