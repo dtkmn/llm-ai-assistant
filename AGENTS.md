@@ -2,8 +2,8 @@
 
 ## Project Overview
 
-This repository is becoming a local-first Loop Engineering Workbench. It helps
-operators inspect and improve agent loops: context selection, retrieval, answer
+This repository is AI Loop Engine, a local-first engine for inspecting and
+hardening AI loops: context selection, retrieval, answer
 drafting, mechanical checks, verifier decisions, retries, refusals, evals, and
 eventual replay. The current built-in capability is document context: PDF, DOCX,
 TXT, and MD uploads are chunked, indexed with FAISS, and used as evidence for a
@@ -12,7 +12,8 @@ document-grounded agent loop.
 Primary runtime files:
 
 - `src/DocumentQA.py`: ingestion, encoding detection, embeddings, vector search,
-  LLM backend selection, retrieval chain, Ollama adapter, and query handling.
+  document context provider wrapper, LLM backend selection, retrieval chain,
+  Ollama adapter, and query handling.
 - `src/loop_engine.py`: provider-neutral loop primitives for typed run, step,
   policy, verifier, human-review, and report records.
 - `src/app.py`: Gradio UI wiring and user-facing status messages.
@@ -67,7 +68,7 @@ Primary runtime files:
 - Product direction is local-first. Keep Hugging Face support as an optional
   hosted/deployment path, but do not make new happy-path features require a
   Hugging Face token when they can run through Ollama.
-- Product identity is Loop Engineering Workbench. Document answering is now a
+- Product identity is AI Loop Engine. Document answering is now a
   document context provider capability, not the repo's strategic identity.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,

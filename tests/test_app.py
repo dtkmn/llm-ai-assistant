@@ -11,7 +11,15 @@ from src.DocumentQA import (
     DocumentQAStatus,
     QueryResult,
 )
-from src.loop_engine import LoopDecision, LoopPhase, LoopReport, LoopRun, LoopStep
+from src.loop_engine import (
+    LoopDecision,
+    LoopPhase,
+    LoopReport,
+    LoopRun,
+    LoopStep,
+    VerificationOutcome,
+    VerificationResult,
+)
 
 
 class FakeQA:
@@ -180,9 +188,11 @@ def test_text_encoding_dropdown_defaults_to_auto():
 
 
 def test_app_copy_frames_document_as_context():
+    assert app.APP_TITLE == "AI Loop Engine"
     assert app.file_upload.label == "Upload Document Context"
     assert app.upload_button.value == "Index Context"
     assert app.upload_status.label == "Context Status"
+    assert app.loop_summary.label == "Loop Summary"
     assert app.answer_trace.label == "Loop Trace"
 
 
@@ -446,6 +456,119 @@ def test_format_answer_trace_includes_loop_report():
     assert trace["loop_report"]["run"]["final_decision"] == "not_verified"
 
 
+def test_format_loop_summary_empty_state():
+    summary = json.loads(app.format_loop_summary(None))
+
+    assert summary == {
+        "context_provider": None,
+        "document": None,
+        "backend": None,
+        "model": None,
+        "retrieved_chunk_count": 0,
+        "draft_attempt_count": 0,
+        "mechanical_check": None,
+        "verifier": None,
+        "retry_attempted": False,
+        "refused": False,
+        "final_decision": None,
+        "last_error": None,
+    }
+
+
+def test_format_loop_summary_shows_compact_loop_fields():
+    loop_report = LoopReport(
+        run=LoopRun(
+            run_id="run_summary",
+            user_input="When does it launch?",
+            context_provider="document",
+            backend="ollama",
+            model_label="Ollama (nemotron-3-nano:4b)",
+            steps=(
+                LoopStep(
+                    phase=LoopPhase.RETRIEVE,
+                    decision=LoopDecision.CONTINUE,
+                    metadata={"retrieved_chunk_count": 1},
+                ),
+                LoopStep(
+                    phase=LoopPhase.DRAFT,
+                    decision=LoopDecision.CONTINUE,
+                ),
+                LoopStep(
+                    phase=LoopPhase.RETRY,
+                    decision=LoopDecision.RETRY,
+                    metadata={"reasons": ["missing_inline_citation"]},
+                ),
+                LoopStep(
+                    phase=LoopPhase.DRAFT,
+                    decision=LoopDecision.CONTINUE,
+                    retry_count=1,
+                ),
+                LoopStep(
+                    phase=LoopPhase.MECHANICAL_CHECK,
+                    decision=LoopDecision.CONTINUE,
+                    output_summary="mechanical_checks_passed",
+                    retry_count=1,
+                ),
+                LoopStep(
+                    phase=LoopPhase.VERIFY,
+                    decision=LoopDecision.SUPPORTED,
+                    output_summary="supported",
+                    retry_count=1,
+                    verification=VerificationResult(
+                        outcome=VerificationOutcome.SUPPORTED,
+                        reasons=(
+                            "mechanical_checks_passed",
+                            "llm_verifier_supported",
+                        ),
+                        verifier="ollama",
+                    ),
+                ),
+                LoopStep(
+                    phase=LoopPhase.FINAL,
+                    decision=LoopDecision.SUPPORTED,
+                ),
+            ),
+            final_decision=LoopDecision.SUPPORTED,
+            final_answer="Project Phoenix launches in June 2026 [1].",
+        )
+    )
+    result = QueryResult(
+        answer="Project Phoenix launches in June 2026 [1].",
+        trace=AnswerTrace(
+            question="When does it launch?",
+            document_name="phoenix.txt",
+            backend="ollama",
+            model_label="Ollama (nemotron-3-nano:4b)",
+            retrieved_chunk_count=1,
+            citations=[],
+            self_check=AnswerSelfCheck(
+                outcome="supported",
+                reasons=["mechanical_checks_passed", "llm_verifier_supported"],
+                retry_attempted=True,
+            ),
+        ),
+        loop_report=loop_report,
+    )
+
+    summary = json.loads(app.format_loop_summary(result))
+
+    assert summary["context_provider"] == "document"
+    assert summary["document"] == "phoenix.txt"
+    assert summary["backend"] == "ollama"
+    assert summary["retrieved_chunk_count"] == 1
+    assert summary["draft_attempt_count"] == 2
+    assert summary["mechanical_check"] == "mechanical_checks_passed"
+    assert summary["verifier"] == {
+        "decision": "supported",
+        "outcome": "supported",
+        "reasons": ["mechanical_checks_passed", "llm_verifier_supported"],
+    }
+    assert summary["retry_attempted"] is True
+    assert summary["refused"] is False
+    assert summary["final_decision"] == "supported"
+    assert summary["last_error"] is None
+
+
 def test_format_answer_trace_redacts_guardrail_blocked_draft():
     blocked_draft = "Sensitive blocked draft should not be public."
     loop_report = LoopReport(
@@ -505,11 +628,16 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
     assert blocked_draft in json.dumps(loop_report.to_dict())
 
     trace_json = app.format_answer_trace(result)
+    summary_json = app.format_loop_summary(result)
     trace = json.loads(trace_json)
+    summary = json.loads(summary_json)
     redacted_step = trace["loop_report"]["run"]["steps"][0]
     guardrail_step = trace["loop_report"]["run"]["steps"][1]
 
     assert blocked_draft not in trace_json
+    assert blocked_draft not in summary_json
+    assert summary["last_error"] == "terminal_guardrail_decision"
+    assert summary["final_decision"] == "block"
     assert trace["error"] == "terminal_guardrail_decision"
     assert trace["loop_report"]["run"]["error_message"] == (
         "terminal_guardrail_decision"
@@ -531,11 +659,18 @@ def test_chat_returns_answer_and_trace(monkeypatch):
     fake_qa.current_document_name = "demo.txt"
     monkeypatch.setattr(app, "qa_system", fake_qa)
 
-    history, message, answer_trace = app.chat("What is Project Phoenix?", [])
+    history, message, loop_summary, answer_trace = app.chat(
+        "What is Project Phoenix?", []
+    )
 
     assert message == ""
     assert history[-1]["role"] == "assistant"
     assert "Project Phoenix" in history[-1]["content"]
+    summary = json.loads(loop_summary)
+    assert summary["document"] == "demo.txt"
+    assert summary["retrieved_chunk_count"] == 1
+    assert summary["draft_attempt_count"] == 0
+    assert summary["final_decision"] is None
     trace = json.loads(answer_trace)
     assert trace["question"] == "What is Project Phoenix?"
     assert trace["document"] == "demo.txt"
@@ -549,8 +684,9 @@ def test_clear_chat_resets_answer_trace(monkeypatch):
     fake_qa.chat_history = [{"question": "old"}]
     monkeypatch.setattr(app, "qa_system", fake_qa)
 
-    history, answer_trace = app.clear_chat()
+    history, loop_summary, answer_trace = app.clear_chat()
 
     assert history == []
     assert fake_qa.chat_history == []
+    assert json.loads(loop_summary)["draft_attempt_count"] == 0
     assert json.loads(answer_trace)["citations"] == []

@@ -9,6 +9,7 @@ from langchain_core.documents import Document
 from src.DocumentQA import (
     DEFAULT_OLLAMA_MODEL,
     AnswerCitation,
+    DocumentContextProvider,
     DocumentQA,
     FaissVectorStore,
     MockLLM,
@@ -164,6 +165,8 @@ def test_query_with_trace_includes_loop_report_for_prompt_evidence(tmp_path):
     assert run.session_id == "session_a"
     assert run.user_input == "What is Project Phoenix?"
     assert run.context_provider == "document"
+    assert run.metadata["context_provider"] == "document"
+    assert run.metadata["context_provider_name"] == "phoenix.txt"
     assert run.backend == "mock"
     assert run.model_label == "MockLLM (fallback)"
     assert run.policy.allow_tool_calls is False
@@ -187,6 +190,19 @@ def test_query_with_trace_includes_loop_report_for_prompt_evidence(tmp_path):
     assert verify_step.decision == LoopDecision.NOT_VERIFIED
     assert verify_step.verification.outcome.value == "not_verified"
     assert verify_step.verification.reasons == tuple(result.trace.self_check.reasons)
+
+
+def test_processed_document_is_wrapped_as_context_provider(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+
+    active_state = qa._snapshot_active_document_state()
+
+    assert isinstance(active_state.context_provider, DocumentContextProvider)
+    assert active_state.context_provider.provider_type == "document"
+    assert active_state.context_provider.display_name == document.name
+    assert active_state.context_provider.vector_store is qa.vector_store
+    assert active_state.context_provider.retrieval_chain is qa.retrieval_chain
+    assert active_state.context_provider.ready is True
 
 
 def test_loop_middleware_can_block_before_retrieval(tmp_path):

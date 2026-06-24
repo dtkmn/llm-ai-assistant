@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from getpass import getpass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 import docx2txt
 import faiss
@@ -328,11 +328,35 @@ class AnswerSelfCheck:
     retry_attempted: bool = False
 
 
+class ContextProvider(Protocol):
+    provider_type: str
+    display_name: Optional[str]
+    vector_store: Optional["FaissVectorStore"]
+    retrieval_chain: Optional[object]
+
+
+@dataclass(frozen=True)
+class DocumentContextProvider:
+    document_name: Optional[str]
+    vector_store: Optional["FaissVectorStore"]
+    retrieval_chain: Optional[object]
+    provider_type: str = "document"
+
+    @property
+    def display_name(self) -> Optional[str]:
+        return self.document_name
+
+    @property
+    def ready(self) -> bool:
+        return self.retrieval_chain is not None
+
+
 @dataclass(frozen=True)
 class ActiveDocumentState:
     document_name: Optional[str]
     vector_store: Optional["FaissVectorStore"]
     retrieval_chain: Optional[object]
+    context_provider: Optional[ContextProvider] = None
 
 
 class DocumentProcessingError(RuntimeError):
@@ -913,6 +937,11 @@ class DocumentQA:
             document_name=None,
             vector_store=None,
             retrieval_chain=None,
+            context_provider=DocumentContextProvider(
+                document_name=None,
+                vector_store=None,
+                retrieval_chain=None,
+            ),
         )
         self.vector_store = None
         self.retrieval_chain = None
@@ -1183,10 +1212,16 @@ class DocumentQA:
         retrieval_chain,
         processing_report: DocumentProcessingReport,
     ) -> DocumentQAStatus:
+        context_provider = DocumentContextProvider(
+            document_name=document_name,
+            vector_store=vector_store,
+            retrieval_chain=retrieval_chain,
+        )
         active_state = ActiveDocumentState(
             document_name=document_name,
             vector_store=vector_store,
             retrieval_chain=retrieval_chain,
+            context_provider=context_provider,
         )
         with self._state_lock:
             self._active_document_state = active_state
@@ -2457,15 +2492,23 @@ class DocumentQA:
         session_id: str,
         active_state: ActiveDocumentState,
     ) -> LoopRun:
+        context_provider = active_state.context_provider
+        context_provider_type = (
+            context_provider.provider_type if context_provider else "document"
+        )
         return LoopRun(
             user_input=prompt,
-            context_provider="document",
+            context_provider=context_provider_type,
             backend=self._active_backend(),
             model_label=self._active_model_label(),
             session_id=session_id,
             policy=LoopPolicy(max_retries=1),
             metadata={
                 "document_name": active_state.document_name,
+                "context_provider": context_provider_type,
+                "context_provider_name": (
+                    context_provider.display_name if context_provider else None
+                ),
                 "profile": "FAST" if self.fast_mode else "QUALITY",
                 "allow_tool_calls": False,
                 "untrusted_inputs": [

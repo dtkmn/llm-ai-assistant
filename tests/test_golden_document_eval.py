@@ -88,6 +88,20 @@ def build_golden_qa(tmp_path, scenario="supported"):
     return qa, document
 
 
+def phase_sequence(result):
+    return [step.phase for step in result.loop_report.run.steps]
+
+
+def steps_for_phase(result, phase):
+    return [step for step in result.loop_report.run.steps if step.phase == phase]
+
+
+def only_step(result, phase):
+    steps = steps_for_phase(result, phase)
+    assert len(steps) == 1
+    return steps[0]
+
+
 def test_golden_document_supported_answer_is_cited_and_verified(tmp_path):
     qa, document = build_golden_qa(tmp_path)
     status = qa.status()
@@ -117,9 +131,7 @@ def test_golden_document_supported_answer_is_cited_and_verified(tmp_path):
     assert "June 2026" in result.trace.citations[0].excerpt
     assert result.loop_report.run.final_decision == LoopDecision.SUPPORTED
     assert result.loop_report.run.final_answer == result.answer
-    assert [
-        step.phase for step in result.loop_report.run.steps
-    ] == [
+    assert phase_sequence(result) == [
         LoopPhase.CONTEXT_SELECT,
         LoopPhase.RETRIEVE,
         LoopPhase.DRAFT,
@@ -127,6 +139,19 @@ def test_golden_document_supported_answer_is_cited_and_verified(tmp_path):
         LoopPhase.VERIFY,
         LoopPhase.FINAL,
     ]
+    assert only_step(result, LoopPhase.RETRIEVE).decision == LoopDecision.CONTINUE
+    assert only_step(result, LoopPhase.DRAFT).decision == LoopDecision.CONTINUE
+    mechanical_step = only_step(result, LoopPhase.MECHANICAL_CHECK)
+    verify_step = only_step(result, LoopPhase.VERIFY)
+    assert mechanical_step.decision == LoopDecision.CONTINUE
+    assert mechanical_step.metadata["reasons"] == ["mechanical_checks_passed"]
+    assert verify_step.decision == LoopDecision.SUPPORTED
+    assert verify_step.verification.outcome.value == "supported"
+    assert verify_step.verification.reasons == (
+        "mechanical_checks_passed",
+        "llm_verifier_supported",
+    )
+    assert only_step(result, LoopPhase.FINAL).decision == LoopDecision.SUPPORTED
     assert qa.chat_history[-1]["self_check"]["outcome"] == "supported"
 
 
@@ -141,7 +166,23 @@ def test_golden_document_unsupported_answer_fails_closed(tmp_path):
     assert result.trace.self_check.retry_attempted is False
     assert result.trace.retrieved_chunk_count == len(result.trace.citations) == 1
     assert result.loop_report.run.final_decision == LoopDecision.REFUSE
-    assert LoopPhase.REFUSE in [step.phase for step in result.loop_report.run.steps]
+    assert phase_sequence(result) == [
+        LoopPhase.CONTEXT_SELECT,
+        LoopPhase.RETRIEVE,
+        LoopPhase.DRAFT,
+        LoopPhase.MECHANICAL_CHECK,
+        LoopPhase.VERIFY,
+        LoopPhase.REFUSE,
+        LoopPhase.FINAL,
+    ]
+    verify_step = only_step(result, LoopPhase.VERIFY)
+    refuse_step = only_step(result, LoopPhase.REFUSE)
+    assert verify_step.decision == LoopDecision.REFUSE
+    assert verify_step.verification.outcome.value == "insufficient"
+    assert verify_step.metadata["reasons"] == ["llm_verifier_insufficient"]
+    assert refuse_step.decision == LoopDecision.REFUSE
+    assert refuse_step.metadata["reasons"] == ["llm_verifier_insufficient"]
+    assert only_step(result, LoopPhase.FINAL).decision == LoopDecision.REFUSE
     assert qa.chat_history[-1]["answer"] == SELF_CHECK_REFUSAL_ANSWER
 
 
@@ -156,7 +197,33 @@ def test_golden_document_missing_citation_retries_then_passes(tmp_path):
     assert result.trace.self_check.outcome == "supported"
     assert result.trace.self_check.retry_attempted is True
     assert result.loop_report.run.final_decision == LoopDecision.SUPPORTED
-    assert LoopPhase.RETRY in [step.phase for step in result.loop_report.run.steps]
+    assert phase_sequence(result) == [
+        LoopPhase.CONTEXT_SELECT,
+        LoopPhase.RETRIEVE,
+        LoopPhase.DRAFT,
+        LoopPhase.MECHANICAL_CHECK,
+        LoopPhase.RETRY,
+        LoopPhase.DRAFT,
+        LoopPhase.MECHANICAL_CHECK,
+        LoopPhase.VERIFY,
+        LoopPhase.FINAL,
+    ]
+    draft_steps = steps_for_phase(result, LoopPhase.DRAFT)
+    mechanical_steps = steps_for_phase(result, LoopPhase.MECHANICAL_CHECK)
+    retry_step = only_step(result, LoopPhase.RETRY)
+    verify_step = only_step(result, LoopPhase.VERIFY)
+    assert len(draft_steps) == 2
+    assert draft_steps[0].retry_count == 0
+    assert draft_steps[1].retry_count == 1
+    assert mechanical_steps[0].decision == LoopDecision.RETRY
+    assert mechanical_steps[0].metadata["reasons"] == ["missing_inline_citation"]
+    assert retry_step.decision == LoopDecision.RETRY
+    assert retry_step.metadata["reasons"] == ["missing_inline_citation"]
+    assert mechanical_steps[1].decision == LoopDecision.CONTINUE
+    assert mechanical_steps[1].metadata["retry_attempted"] is True
+    assert verify_step.decision == LoopDecision.SUPPORTED
+    assert verify_step.retry_count == 1
+    assert verify_step.verification.outcome.value == "supported"
     assert any("missing_inline_citation" in call for call in qa.llm.calls)
     answer_calls = [
         call for call in qa.llm.calls if "You are a helpful AI assistant" in call
