@@ -10,6 +10,7 @@ from langchain_core.documents import Document
 
 import src.DocumentQA as document_qa_module
 import src.ai_loop_runtime as ai_loop_runtime_module
+import src.model_adapters as model_adapters_module
 import src.runtime_config as runtime_config_module
 from src.ai_loop_engine import AILoopEngine, DocumentQA as PublicDocumentQA
 from src.DocumentQA import (
@@ -79,6 +80,19 @@ def test_ai_loop_engine_is_canonical_runtime_alias():
     assert (
         normalize_openai_compatible_base_url
         is runtime_config_module.normalize_openai_compatible_base_url
+    )
+    assert MockLLM is model_adapters_module.MockLLM
+    assert OllamaEmbeddings is model_adapters_module.OllamaEmbeddings
+    assert OllamaLLM is model_adapters_module.OllamaLLM
+    assert OpenAICompatibleEmbeddings is model_adapters_module.OpenAICompatibleEmbeddings
+    assert OpenAICompatibleLLM is model_adapters_module.OpenAICompatibleLLM
+    assert (
+        document_qa_module.open_ollama_request_no_proxy
+        is model_adapters_module.open_ollama_request_no_proxy
+    )
+    assert (
+        document_qa_module.open_openai_compatible_request
+        is model_adapters_module.open_openai_compatible_request
     )
 
 
