@@ -11,7 +11,9 @@ from langchain_core.documents import Document
 import src.DocumentQA as document_qa_module
 import src.ai_loop_runtime as ai_loop_runtime_module
 import src.context_providers as context_providers_module
+import src.document_config as document_config_module
 import src.document_ingestion as document_ingestion_module
+import src.document_text as document_text_module
 import src.model_adapters as model_adapters_module
 import src.runtime_config as runtime_config_module
 from src.ai_loop_engine import AILoopEngine, DocumentQA as PublicDocumentQA
@@ -90,22 +92,28 @@ def test_ai_loop_engine_is_canonical_runtime_alias():
     assert OpenAICompatibleLLM is model_adapters_module.OpenAICompatibleLLM
     assert DocumentContextProvider is context_providers_module.DocumentContextProvider
     assert ai_loop_runtime_module.MAX_DOCUMENT_BYTES == (
-        document_ingestion_module.MAX_DOCUMENT_BYTES
+        document_config_module.MAX_DOCUMENT_BYTES
     )
     assert ai_loop_runtime_module.MAX_DOCUMENT_CHUNKS == (
-        document_ingestion_module.MAX_DOCUMENT_CHUNKS
+        document_config_module.MAX_DOCUMENT_CHUNKS
+    )
+    assert document_ingestion_module.MAX_DOCUMENT_BYTES == (
+        document_config_module.MAX_DOCUMENT_BYTES
     )
     assert (
         document_qa_module.SUPPORTED_EXTENSIONS
-        == document_ingestion_module.SUPPORTED_EXTENSIONS
+        == document_config_module.SUPPORTED_EXTENSIONS
     )
     assert (
         document_qa_module.TEXT_ENCODING_FALLBACKS
-        == document_ingestion_module.TEXT_ENCODING_FALLBACKS
+        == document_config_module.TEXT_ENCODING_FALLBACKS
     )
     assert (
         document_qa_module.normalize_encoding_name
-        is document_ingestion_module.normalize_encoding_name
+        is document_config_module.normalize_encoding_name
+    )
+    assert document_qa_module.decode_supported_text(b"ok", "utf-8") == (
+        document_text_module.decode_supported_text(b"ok", "utf-8")
     )
     assert (
         document_qa_module.open_ollama_request_no_proxy

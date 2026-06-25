@@ -41,10 +41,7 @@ except ImportError:
     )
 
 try:
-    from .document_ingestion import (
-        MAX_DOCUMENT_BYTES,
-        MAX_DOCUMENT_CHUNKS,
-        SUPPORTED_EXTENSIONS,
+    from .document_config import (
         ALLOWED_TEXT_CONTROL_CHARACTERS,
         COMMON_WESTERN_PUNCTUATION,
         COMMON_WESTERN_SYMBOLS,
@@ -52,36 +49,25 @@ try:
         DETECTED_ENCODING_CHAOS_GAP,
         DETECTED_ENCODING_MAX_CHAOS,
         DETECTED_ENCODING_MIN_COHERENCE,
+        MAX_DOCUMENT_BYTES,
+        MAX_DOCUMENT_CHUNKS,
         MAX_SHORT_WESTERN_FALLBACK_BYTES,
+        SUPPORTED_EXTENSIONS,
         TEXT_ENCODING_ALIASES,
         TEXT_ENCODING_BOMS,
         TEXT_ENCODING_FALLBACKS,
         UTF_NUL_FAMILY_ENCODINGS,
         UTF_NUL_PATTERN_THRESHOLD,
-        DefaultTextDecoder,
-        decode_confident_detected_text,
-        decode_nul_pattern_text,
-        decode_supported_text,
-        decode_text_file,
-        decode_utf8_or_western_text,
-        detected_encoding_is_confident,
-        fallback_encoding_is_plausible,
         has_binary_control_characters,
         is_latin_letter,
-        load_documents,
         latin_token_is_suspicious,
         normalize_encoding_name,
         nul_ratio,
-        nul_pattern_encodings,
-        split_document_chunks,
         validate_document,
         western_text_penalty,
     )
 except ImportError:
-    from document_ingestion import (
-        MAX_DOCUMENT_BYTES,
-        MAX_DOCUMENT_CHUNKS,
-        SUPPORTED_EXTENSIONS,
+    from document_config import (
         ALLOWED_TEXT_CONTROL_CHARACTERS,
         COMMON_WESTERN_PUNCTUATION,
         COMMON_WESTERN_SYMBOLS,
@@ -89,28 +75,20 @@ except ImportError:
         DETECTED_ENCODING_CHAOS_GAP,
         DETECTED_ENCODING_MAX_CHAOS,
         DETECTED_ENCODING_MIN_COHERENCE,
+        MAX_DOCUMENT_BYTES,
+        MAX_DOCUMENT_CHUNKS,
         MAX_SHORT_WESTERN_FALLBACK_BYTES,
+        SUPPORTED_EXTENSIONS,
         TEXT_ENCODING_ALIASES,
         TEXT_ENCODING_BOMS,
         TEXT_ENCODING_FALLBACKS,
         UTF_NUL_FAMILY_ENCODINGS,
         UTF_NUL_PATTERN_THRESHOLD,
-        DefaultTextDecoder,
-        decode_confident_detected_text,
-        decode_nul_pattern_text,
-        decode_supported_text,
-        decode_text_file,
-        decode_utf8_or_western_text,
-        detected_encoding_is_confident,
-        fallback_encoding_is_plausible,
         has_binary_control_characters,
         is_latin_letter,
-        load_documents,
         latin_token_is_suspicious,
         normalize_encoding_name,
         nul_ratio,
-        nul_pattern_encodings,
-        split_document_chunks,
         validate_document,
         western_text_penalty,
     )
@@ -341,6 +319,62 @@ ANSWER_SUPPORT_STOPWORDS = {
     "why",
     "with",
 }
+
+
+def _document_ingestion_module():
+    try:
+        from . import document_ingestion
+    except ImportError:
+        import document_ingestion
+
+    return document_ingestion
+
+
+def _document_text_module():
+    try:
+        from . import document_text
+    except ImportError:
+        import document_text
+
+    return document_text
+
+
+def decode_text_file(
+    document_path: str, text_encoding: Optional[str] = None
+) -> str:
+    return _document_text_module().decode_text_file(document_path, text_encoding)
+
+
+def decode_supported_text(raw_content: bytes, encoding: str) -> str:
+    return _document_text_module().decode_supported_text(raw_content, encoding)
+
+
+def decode_utf8_or_western_text(raw_content: bytes) -> str:
+    return _document_text_module().decode_utf8_or_western_text(raw_content)
+
+
+def decode_confident_detected_text(raw_content: bytes, matches) -> Optional[str]:
+    return _document_text_module().decode_confident_detected_text(raw_content, matches)
+
+
+def fallback_encoding_is_plausible(
+    raw_content: bytes, matches, encoding: str, fallback_text: str
+) -> bool:
+    return _document_text_module().fallback_encoding_is_plausible(
+        raw_content, matches, encoding, fallback_text
+    )
+
+
+def detected_encoding_is_confident(matches, index: int) -> bool:
+    return _document_text_module().detected_encoding_is_confident(matches, index)
+
+
+def decode_nul_pattern_text(raw_content: bytes) -> Optional[str]:
+    return _document_text_module().decode_nul_pattern_text(raw_content)
+
+
+def nul_pattern_encodings(raw_content: bytes) -> List[str]:
+    return _document_text_module().nul_pattern_encodings(raw_content)
 
 
 @dataclass(frozen=True)
@@ -728,7 +762,7 @@ class LocalHashingEmbeddings(Embeddings):
         return [value / norm for value in vector]
 
 
-class EngineTextDecoder(DefaultTextDecoder):
+class EngineTextDecoder:
     def __init__(self, engine: "AILoopEngine"):
         self.engine = engine
 
@@ -1359,7 +1393,7 @@ class AILoopEngine:
         file_extension: str,
         text_encoding: Optional[str] = None,
     ) -> List[Document]:
-        return load_documents(
+        return _document_ingestion_module().load_documents(
             document_path,
             file_extension,
             text_encoding=text_encoding,
@@ -1369,27 +1403,29 @@ class AILoopEngine:
     def _decode_text_file(
         self, document_path: str, text_encoding: Optional[str] = None
     ) -> str:
-        return EngineTextDecoder(self).decode_text_file(document_path, text_encoding)
+        return _document_text_module().DefaultTextDecoder.decode_text_file(
+            EngineTextDecoder(self), document_path, text_encoding
+        )
 
     def _decode_supported_text(self, raw_content: bytes, encoding: str) -> str:
         return decode_supported_text(raw_content, encoding)
 
     def _decode_utf8_or_western_text(self, raw_content: bytes) -> str:
-        return DefaultTextDecoder.decode_utf8_or_western_text(
+        return _document_text_module().DefaultTextDecoder.decode_utf8_or_western_text(
             EngineTextDecoder(self), raw_content
         )
 
     def _decode_confident_detected_text(
         self, raw_content: bytes, matches
     ) -> Optional[str]:
-        return DefaultTextDecoder.decode_confident_detected_text(
+        return _document_text_module().DefaultTextDecoder.decode_confident_detected_text(
             EngineTextDecoder(self), raw_content, matches
         )
 
     def _fallback_encoding_is_plausible(
         self, raw_content: bytes, matches, encoding: str, fallback_text: str
     ) -> bool:
-        return DefaultTextDecoder.fallback_encoding_is_plausible(
+        return _document_text_module().DefaultTextDecoder.fallback_encoding_is_plausible(
             EngineTextDecoder(self), raw_content, matches, encoding, fallback_text
         )
 
@@ -1397,7 +1433,7 @@ class AILoopEngine:
         return detected_encoding_is_confident(matches, index)
 
     def _decode_nul_pattern_text(self, raw_content: bytes) -> Optional[str]:
-        return DefaultTextDecoder.decode_nul_pattern_text(
+        return _document_text_module().DefaultTextDecoder.decode_nul_pattern_text(
             EngineTextDecoder(self), raw_content
         )
 
@@ -1448,7 +1484,7 @@ class AILoopEngine:
                     raise ValueError("No readable content found in the uploaded document.")
 
                 phase = "split"
-                split_result = split_document_chunks(
+                split_result = _document_ingestion_module().split_document_chunks(
                     documents,
                     self.profile,
                     self.max_document_chunks,

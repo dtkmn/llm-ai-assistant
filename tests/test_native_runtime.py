@@ -187,3 +187,46 @@ print(json.dumps({
 
     assert observed.pop("module") in {None, "numpy", "torch"}
     assert observed == EXPECTED_NATIVE_DEFAULTS
+
+
+def test_ai_loop_runtime_does_not_eagerly_import_document_ingestion_stack():
+    code = """
+import json
+import sys
+
+import src.ai_loop_runtime
+
+qa = src.ai_loop_runtime.AILoopEngine(fast_mode=True, llm_backend="mock")
+try:
+    qa._validate_document("/definitely/missing.txt")
+except ValueError:
+    pass
+
+watched_modules = [
+    "docx2txt",
+    "langchain_text_splitters",
+    "pypdf",
+    "src.document_ingestion",
+    "src.document_text",
+]
+print(json.dumps({
+    name: name in sys.modules
+    for name in watched_modules
+}, sort_keys=True))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    observed = json.loads(result.stdout)
+
+    assert observed == {
+        "docx2txt": False,
+        "langchain_text_splitters": False,
+        "pypdf": False,
+        "src.document_ingestion": False,
+        "src.document_text": False,
+    }
