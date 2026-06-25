@@ -651,6 +651,7 @@ def _redact_public_step(step: Mapping[str, Any]) -> Dict[str, Any]:
     verification = redacted.get("verification")
     if verification:
         redacted_verification = dict(verification)
+        redacted_verification["reasons"] = [PUBLIC_REDACTION_TEXT]
         redacted_verification["raw_response"] = None
         redacted_verification["metadata"] = {
             "redacted": True,

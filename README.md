@@ -13,7 +13,8 @@ loop: making agent behavior visible, testable, and harder to fake.
 - **Vector Search:** Uses FAISS for efficient similarity search with
   provider-backed embedding models through Ollama or OpenAI-compatible gateways
 - **Gradio Interface:** Web interface for local loop sessions, context indexing,
-  runtime status, compact loop summaries, and answer traces
+  runtime status, a readable loop timeline, compact loop summaries, and answer
+  traces
 - **External Model Runtime:** Uses Ollama or an OpenAI-compatible gateway for
   generation so Python document indexing stays lightweight and stable
 
@@ -166,9 +167,11 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 2. Upload document context (PDF, DOCX, TXT, or MD; max 25 MB)
 3. Click "Index Context" to make it available to the loop
 4. Ask questions in the chat interface
-5. Inspect the loop summary for the provider, draft count, checks, verifier,
+5. Inspect the Loop Timeline to see retrieve, draft, check, verify, retry,
+   refusal, and final-decision steps in order
+6. Inspect the loop summary for the provider, draft count, checks, verifier,
    retry/refusal state, final decision, and last error
-6. Open the answer trace when you need the detailed redacted `LoopReport`
+7. Open the answer trace when you need the detailed redacted `LoopReport`
 
 ## Technical Details
 
@@ -184,8 +187,9 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   `LoopSession` objects keyed by `session_id`
 - **Replay artifacts:** local JSONL export writes one raw `LoopReport` per line,
   suitable for future replay and diff tooling
-- **Public trace surface:** the Gradio UI shows a compact loop summary plus a
-  redacted public loop report; raw reports remain internal diagnostics
+- **Public trace surface:** the Gradio UI shows a readable Loop Timeline,
+  compact loop summary, and redacted public loop report; raw reports remain
+  internal diagnostics
 - **Middleware boundary:** loop middleware can observe runs/steps, block unsafe progress, request retry/refusal, or mark a human-review pending state without introducing autonomous tool use
 - **Framework posture:** OpenAI Agents SDK and LangGraph are dependency-free
   export targets today; Microsoft Agent Framework remains a future export

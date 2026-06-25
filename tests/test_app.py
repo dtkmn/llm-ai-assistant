@@ -255,6 +255,7 @@ def test_app_copy_frames_document_as_context():
     assert app.file_upload.label == "Upload Document Context"
     assert app.upload_button.value == "Index Context"
     assert app.upload_status.label == "Context Status"
+    assert app.loop_timeline.label == "Loop Timeline"
     assert app.loop_summary.label == "Loop Summary"
     assert app.answer_trace.label == "Loop Trace"
 
@@ -524,6 +525,13 @@ def test_format_loop_summary_empty_state():
     }
 
 
+def test_format_loop_timeline_empty_state():
+    timeline = app.format_loop_timeline(None)
+
+    assert "Loop Timeline" in timeline
+    assert "No loop run yet." in timeline
+
+
 def test_format_loop_summary_shows_compact_loop_fields():
     loop_report = LoopReport(
         run=LoopRun(
@@ -618,6 +626,171 @@ def test_format_loop_summary_shows_compact_loop_fields():
     assert summary["last_error"] is None
 
 
+def test_format_loop_timeline_shows_readable_steps():
+    loop_report = LoopReport(
+        run=LoopRun(
+            run_id="run_timeline",
+            user_input="When does it launch?",
+            context_provider="document",
+            backend="ollama",
+            model_label="Ollama (nemotron-3-nano:4b)",
+            steps=(
+                LoopStep(
+                    phase=LoopPhase.RETRIEVE,
+                    decision=LoopDecision.CONTINUE,
+                    name="Retrieve prompt evidence",
+                    output_summary="1 prompt chunks",
+                    metadata={"retrieved_chunk_count": 1, "citation_ids": [1]},
+                ),
+                LoopStep(
+                    phase=LoopPhase.DRAFT,
+                    decision=LoopDecision.CONTINUE,
+                    name="Draft answer",
+                    output_summary="Project Phoenix launches in June 2026 [1].",
+                ),
+                LoopStep(
+                    phase=LoopPhase.RETRY,
+                    decision=LoopDecision.RETRY,
+                    name="Retry answer",
+                    output_summary="retrying after self-check failure",
+                    metadata={"reasons": ["missing_inline_citation"]},
+                ),
+                LoopStep(
+                    phase=LoopPhase.VERIFY,
+                    decision=LoopDecision.SUPPORTED,
+                    name="Answer verifier",
+                    output_summary="supported",
+                    verification=VerificationResult(
+                        outcome=VerificationOutcome.SUPPORTED,
+                        reasons=("llm_verifier_supported",),
+                        verifier="ollama",
+                    ),
+                ),
+            ),
+            final_decision=LoopDecision.SUPPORTED,
+            final_answer="Project Phoenix launches in June 2026 [1].",
+        )
+    )
+    result = QueryResult(
+        answer="Project Phoenix launches in June 2026 [1].",
+        trace=AnswerTrace(
+            question="When does it launch?",
+            document_name="phoenix.txt",
+            backend="ollama",
+            model_label="Ollama (nemotron-3-nano:4b)",
+            retrieved_chunk_count=1,
+            citations=[],
+            self_check=AnswerSelfCheck(
+                outcome="supported",
+                reasons=["mechanical_checks_passed", "llm_verifier_supported"],
+                retry_attempted=True,
+            ),
+        ),
+        loop_report=loop_report,
+    )
+
+    timeline = app.format_loop_timeline(result)
+
+    assert "| # | Phase | Decision | Step | Signals |" in timeline
+    assert "Retrieve prompt evidence" in timeline
+    assert "chunks: 1" in timeline
+    assert "citations: 1" in timeline
+    assert "Retry answer" in timeline
+    assert r"missing\_inline\_citation" in timeline
+    assert "verifier: supported" in timeline
+    assert "Final decision: `supported`" in timeline
+
+
+def test_format_loop_timeline_falls_back_to_trace_without_loop_report():
+    result = QueryResult(
+        answer="Project Phoenix is described in the uploaded document.",
+        trace=AnswerTrace(
+            question="What is Project Phoenix?",
+            document_name="demo.txt",
+            backend="mock",
+            model_label="MockLLM (explicit demo)",
+            retrieved_chunk_count=1,
+            citations=[],
+            self_check=AnswerSelfCheck(
+                outcome="not_verified",
+                reasons=[
+                    "mechanical_checks_passed",
+                    "verifier_unavailable_mock_backend",
+                ],
+            ),
+        ),
+    )
+
+    timeline = app.format_loop_timeline(result)
+
+    assert r"demo\.txt" in timeline
+    assert "1 chunks" in timeline
+    assert r"not\_verified" in timeline
+    assert r"verifier\_unavailable\_mock\_backend" in timeline
+
+
+def test_format_loop_timeline_escapes_markdown_payloads():
+    markdown_payload = "![x](https://example.com/pixel)"
+    link_payload = "[x](javascript:alert(1))"
+    loop_report = LoopReport(
+        run=LoopRun(
+            run_id="run_markdown_payload",
+            user_input="Show payloads",
+            context_provider="document",
+            backend="mock",
+            model_label="MockLLM (explicit demo)",
+            steps=(
+                LoopStep(
+                    phase=LoopPhase.DRAFT,
+                    decision=LoopDecision.CONTINUE,
+                    name=markdown_payload,
+                    output_summary=link_payload,
+                    metadata={"reasons": [markdown_payload]},
+                ),
+            ),
+        )
+    )
+    result = QueryResult(
+        answer="ok",
+        trace=AnswerTrace(
+            question="Show payloads",
+            document_name="payload.md",
+            backend="mock",
+            model_label="MockLLM (explicit demo)",
+            retrieved_chunk_count=0,
+            citations=[],
+        ),
+        loop_report=loop_report,
+    )
+
+    timeline = app.format_loop_timeline(result)
+
+    assert markdown_payload not in timeline
+    assert link_payload not in timeline
+    assert r"\!\[x\]\(https://example\.com/pixel\)" in timeline
+    assert r"\[x\]\(javascript:alert\(1\)\)" in timeline
+
+
+def test_format_loop_timeline_fallback_error_rows_are_sequential():
+    result = QueryResult(
+        answer="A query error occurred.",
+        trace=AnswerTrace(
+            question="What failed?",
+            document_name="demo.txt",
+            backend="mock",
+            model_label="MockLLM (explicit demo)",
+            retrieved_chunk_count=0,
+            citations=[],
+            error_message="backend unavailable",
+        ),
+    )
+
+    timeline = app.format_loop_timeline(result)
+
+    assert "| 3 | Error | error | Query error | backend unavailable |" in timeline
+    assert "| 4 | Error" not in timeline
+
+
 def test_format_answer_trace_redacts_guardrail_blocked_draft():
     blocked_draft = "Sensitive blocked draft should not be public."
     loop_report = LoopReport(
@@ -634,6 +807,13 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
                     name="Draft answer",
                     input_summary="Generate unsafe content",
                     output_summary=blocked_draft,
+                    verification=VerificationResult(
+                        outcome=VerificationOutcome.UNSUPPORTED,
+                        reasons=(blocked_draft,),
+                        verifier="mock",
+                        raw_response=blocked_draft,
+                        metadata={"debug": blocked_draft},
+                    ),
                     metadata={"draft_preview": blocked_draft},
                 ),
                 LoopStep(
@@ -678,6 +858,7 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
 
     trace_json = app.format_answer_trace(result)
     summary_json = app.format_loop_summary(result)
+    timeline = app.format_loop_timeline(result)
     trace = json.loads(trace_json)
     summary = json.loads(summary_json)
     redacted_step = trace["loop_report"]["run"]["steps"][0]
@@ -685,6 +866,8 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
 
     assert blocked_draft not in trace_json
     assert blocked_draft not in summary_json
+    assert blocked_draft not in timeline
+    assert r"\[redacted: terminal guardrail decision\]" in timeline
     assert summary["last_error"] == "terminal_guardrail_decision"
     assert summary["final_decision"] == "block"
     assert trace["error"] == "terminal_guardrail_decision"
@@ -695,6 +878,11 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
     assert redacted_step["output_summary"] == (
         "[redacted: terminal guardrail decision]"
     )
+    assert redacted_step["verification"]["reasons"] == [
+        "[redacted: terminal guardrail decision]"
+    ]
+    assert redacted_step["verification"]["raw_response"] is None
+    assert redacted_step["verification"]["metadata"]["redacted"] is True
     assert redacted_step["metadata"]["redacted"] is True
     assert guardrail_step["output_summary"] == (
         "[redacted: terminal guardrail decision]"
@@ -708,13 +896,16 @@ def test_chat_returns_answer_and_trace(monkeypatch):
     fake_qa.current_document_name = "demo.txt"
     monkeypatch.setattr(app, "qa_system", fake_qa)
 
-    history, message, loop_summary, answer_trace = app.chat(
+    history, message, loop_timeline, loop_summary, answer_trace = app.chat(
         "What is Project Phoenix?", []
     )
 
     assert message == ""
     assert history[-1]["role"] == "assistant"
     assert "Project Phoenix" in history[-1]["content"]
+    assert "Loop Timeline" in loop_timeline
+    assert r"demo\.txt" in loop_timeline
+    assert r"not\_verified" in loop_timeline
     summary = json.loads(loop_summary)
     assert summary["document"] == "demo.txt"
     assert summary["retrieved_chunk_count"] == 1
@@ -733,10 +924,11 @@ def test_clear_chat_resets_answer_trace(monkeypatch):
     fake_qa.chat_history = [{"question": "old"}]
     monkeypatch.setattr(app, "qa_system", fake_qa)
 
-    history, loop_summary, answer_trace = app.clear_chat()
+    history, loop_timeline, loop_summary, answer_trace = app.clear_chat()
 
     assert history == []
     assert fake_qa.chat_history == []
     assert fake_qa.cleared_loop_session_id == "default"
+    assert "No loop run yet." in loop_timeline
     assert json.loads(loop_summary)["draft_attempt_count"] == 0
     assert json.loads(answer_trace)["citations"] == []

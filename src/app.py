@@ -246,6 +246,171 @@ def format_loop_summary(query_result: Optional[QueryResult]) -> str:
     return json.dumps(summary, indent=2)
 
 
+def markdown_cell(value) -> str:
+    text = "" if value is None else str(value)
+    text = " ".join(text.split())
+    if len(text) > 140:
+        text = f"{text[:137]}..."
+    markdown_escapes = {
+        "\\": "\\\\",
+        "`": "\\`",
+        "*": "\\*",
+        "_": "\\_",
+        "{": "\\{",
+        "}": "\\}",
+        "[": "\\[",
+        "]": "\\]",
+        "(": "\\(",
+        ")": "\\)",
+        "#": "\\#",
+        "+": "\\+",
+        "-": "\\-",
+        ".": "\\.",
+        "!": "\\!",
+        "|": "\\|",
+        "<": "&lt;",
+        ">": "&gt;",
+    }
+    escaped = "".join(markdown_escapes.get(char, char) for char in text)
+    return (
+        escaped.replace("\n", " ")
+        or "-"
+    )
+
+
+def markdown_code(value) -> str:
+    text = "" if value is None else str(value)
+    text = " ".join(text.split())
+    if len(text) > 140:
+        text = f"{text[:137]}..."
+    safe_text = (text or "-").replace("`", "'")
+    return f"`{safe_text}`"
+
+
+def loop_phase_label(phase: Optional[str]) -> str:
+    labels = {
+        "input": "Input",
+        "context_select": "Context",
+        "retrieve": "Retrieve",
+        "draft": "Draft",
+        "mechanical_check": "Check",
+        "verify": "Verify",
+        "retry": "Retry",
+        "refuse": "Refuse",
+        "final": "Final",
+        "error": "Error",
+    }
+    return labels.get(
+        str(phase or ""),
+        str(phase or "step").replace("_", " ").title(),
+    )
+
+
+def loop_step_detail(step: dict) -> str:
+    parts = []
+    output_summary = step.get("output_summary")
+    if output_summary:
+        parts.append(output_summary)
+    error_message = step.get("error_message")
+    if error_message and error_message != output_summary:
+        parts.append(f"error: {error_message}")
+
+    metadata = step.get("metadata") or {}
+    reasons = metadata.get("reasons") or []
+    if reasons:
+        parts.append(f"reasons: {', '.join(str(reason) for reason in reasons)}")
+    if metadata.get("retrieved_chunk_count") is not None:
+        parts.append(f"chunks: {metadata.get('retrieved_chunk_count')}")
+    citation_ids = metadata.get("citation_ids") or []
+    if citation_ids:
+        parts.append(f"citations: {', '.join(str(value) for value in citation_ids)}")
+    inline_ids = metadata.get("inline_citation_ids") or []
+    if inline_ids:
+        parts.append(
+            f"inline citations: {', '.join(str(value) for value in inline_ids)}"
+        )
+
+    verification = step.get("verification") or {}
+    if verification.get("outcome"):
+        parts.append(f"verifier: {verification.get('outcome')}")
+    verification_reasons = verification.get("reasons") or []
+    if verification_reasons and not reasons:
+        parts.append(
+            "reasons: "
+            + ", ".join(str(reason) for reason in verification_reasons)
+        )
+
+    retry_count = step.get("retry_count") or 0
+    if retry_count:
+        parts.append(f"retry #{retry_count}")
+
+    return "; ".join(parts) or "-"
+
+
+def format_loop_timeline(query_result: Optional[QueryResult]) -> str:
+    if query_result is None:
+        return "### Loop Timeline\n\nNo loop run yet."
+
+    public_loop_report = public_loop_report_dict(query_result)
+    run = (public_loop_report or {}).get("run") or {}
+    steps = run.get("steps") or []
+    trace = query_result.trace
+
+    lines = [
+        "### Loop Timeline",
+        "",
+        "| # | Phase | Decision | Step | Signals |",
+        "|---:|---|---|---|---|",
+    ]
+
+    if steps:
+        for index, step in enumerate(steps, start=1):
+            step_name = step.get("name") or loop_phase_label(step.get("phase"))
+            lines.append(
+                "| "
+                f"{index} | "
+                f"{markdown_cell(loop_phase_label(step.get('phase')))} | "
+                f"{markdown_cell(step.get('decision'))} | "
+                f"{markdown_cell(step_name)} | "
+                f"{markdown_cell(loop_step_detail(step))} |"
+            )
+    else:
+        fallback_row = 1
+        lines.append(
+            f"| {fallback_row} | Context | continue | "
+            f"{markdown_cell(trace.document_name or 'No active context')} | "
+            f"{markdown_cell(trace.backend)} |"
+        )
+        fallback_row += 1
+        lines.append(
+            f"| {fallback_row} | Retrieve | continue | Prompt evidence | "
+            f"{markdown_cell(f'{trace.retrieved_chunk_count} chunks')} |"
+        )
+        fallback_row += 1
+        if trace.self_check:
+            lines.append(
+                f"| {fallback_row} | Check | "
+                f"{markdown_cell(trace.self_check.outcome)} | Self-check | "
+                f"{markdown_cell(', '.join(trace.self_check.reasons))} |"
+            )
+            fallback_row += 1
+        if trace.error_message:
+            lines.append(
+                f"| {fallback_row} | Error | error | Query error | "
+                f"{markdown_cell(trace.error_message)} |"
+            )
+
+    final_decision = run.get("final_decision")
+    if final_decision:
+        lines.extend(["", f"Final decision: {markdown_code(final_decision)}"])
+
+    error = public_trace_error(query_result, public_loop_report)
+    if error:
+        lines.append(f"Last error: {markdown_code(error)}")
+
+    return "\n".join(lines)
+
+
 def format_answer_trace(query_result: Optional[QueryResult]) -> str:
     if query_result is None:
         return json.dumps(
@@ -347,10 +512,17 @@ def chat(message, history):
         return (
             history,
             "",
+            format_loop_timeline(query_result),
             format_loop_summary(query_result),
             format_answer_trace(query_result),
         )
-    return history, "", format_loop_summary(None), format_answer_trace(None)
+    return (
+        history,
+        "",
+        format_loop_timeline(None),
+        format_loop_summary(None),
+        format_answer_trace(None),
+    )
 
 
 def clear_chat():
@@ -358,7 +530,12 @@ def clear_chat():
     qa_system.chat_history.clear()
     if hasattr(qa_system, "clear_loop_session"):
         qa_system.clear_loop_session("default")
-    return [], format_loop_summary(None), format_answer_trace(None)
+    return (
+        [],
+        format_loop_timeline(None),
+        format_loop_summary(None),
+        format_answer_trace(None),
+    )
 
 
 # Create the Gradio interface
@@ -385,6 +562,10 @@ with gr.Blocks() as demo:
         with gr.Column():
             chatbot = gr.Chatbot()
             msg = gr.Textbox(label="Ask a question")
+            loop_timeline = gr.Markdown(
+                value=format_loop_timeline(None),
+                label="Loop Timeline",
+            )
             loop_summary = gr.Textbox(
                 label="Loop Summary",
                 value=format_loop_summary(None),
@@ -404,8 +585,17 @@ with gr.Blocks() as demo:
         inputs=[file_upload, text_encoding],
         outputs=[upload_status, runtime_status],
     )
-    msg.submit(chat, [msg, chatbot], [chatbot, msg, loop_summary, answer_trace])
-    clear.click(clear_chat, None, [chatbot, loop_summary, answer_trace], queue=False)
+    msg.submit(
+        chat,
+        [msg, chatbot],
+        [chatbot, msg, loop_timeline, loop_summary, answer_trace],
+    )
+    clear.click(
+        clear_chat,
+        None,
+        [chatbot, loop_timeline, loop_summary, answer_trace],
+        queue=False,
+    )
 
 
 def main() -> None:
