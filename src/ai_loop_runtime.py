@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import os
@@ -98,7 +97,6 @@ try:
         LoopRun,
         LoopSession,
         LoopStep,
-        VerificationOutcome,
         VerificationResult,
     )
 except ImportError:
@@ -112,7 +110,6 @@ except ImportError:
         LoopRun,
         LoopSession,
         LoopStep,
-        VerificationOutcome,
         VerificationResult,
     )
 
@@ -175,6 +172,25 @@ except ImportError:
         normalize_openai_compatible_base_url,
         safe_ollama_base_url_for_error,
         safe_openai_compatible_base_url_for_error,
+    )
+
+try:
+    from . import answer_loop as _answer_loop
+    from .answer_loop import (
+        ANSWER_SUPPORT_STOPWORDS,
+        SELF_CHECK_PASS_OUTCOMES,
+        SELF_CHECK_REFUSAL_ANSWER,
+        VERIFIER_OUTCOMES,
+        AnswerSelfCheck,
+    )
+except ImportError:
+    import answer_loop as _answer_loop
+    from answer_loop import (
+        ANSWER_SUPPORT_STOPWORDS,
+        SELF_CHECK_PASS_OUTCOMES,
+        SELF_CHECK_REFUSAL_ANSWER,
+        VERIFIER_OUTCOMES,
+        AnswerSelfCheck,
     )
 
 try:
@@ -261,69 +277,7 @@ DOCUMENT_IDENTITY_QUESTION_HINTS = (
     "what file",
     "which file",
 )
-SELF_CHECK_REFUSAL_ANSWER = (
-    "I could not find enough relevant information in the document to answer that."
-)
-SELF_CHECK_PASS_OUTCOMES = {"supported", "not_verified"}
-VERIFIER_OUTCOMES = {"supported", "unsupported", "insufficient"}
-
-
-ANSWER_SUPPORT_STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "based",
-    "be",
-    "because",
-    "by",
-    "can",
-    "configured",
-    "context",
-    "currently",
-    "demonstration",
-    "did",
-    "do",
-    "does",
-    "document",
-    "for",
-    "from",
-    "has",
-    "have",
-    "how",
-    "i",
-    "identify",
-    "in",
-    "information",
-    "is",
-    "it",
-    "language",
-    "model",
-    "no",
-    "of",
-    "on",
-    "or",
-    "provided",
-    "real",
-    "related",
-    "response",
-    "that",
-    "the",
-    "this",
-    "to",
-    "using",
-    "was",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "who",
-    "why",
-    "with",
-}
+SELF_CHECK_REFUSAL_ANSWER = _answer_loop.SELF_CHECK_REFUSAL_ANSWER
 
 
 def _document_ingestion_module():
@@ -458,13 +412,6 @@ class QueryResult:
     answer: str
     trace: AnswerTrace
     loop_report: Optional[LoopReport] = None
-
-
-@dataclass(frozen=True)
-class AnswerSelfCheck:
-    outcome: str
-    reasons: List[str]
-    retry_attempted: bool = False
 
 
 class DocumentProcessingError(RuntimeError):
@@ -1267,69 +1214,29 @@ class AILoopEngine:
         return any(hint in lowered for hint in DOCUMENT_IDENTITY_QUESTION_HINTS)
 
     def _answer_is_refusal(self, answer: str) -> bool:
-        lowered = answer.lower()
-        refusal_markers = (
-            "could not find",
-            "not in the context",
-            "not enough relevant information",
-            "not provided in the context",
-            "cannot answer",
-            "can't answer",
-            "insufficient information",
-        )
-        return any(marker in lowered for marker in refusal_markers)
+        return _answer_loop.answer_is_refusal(answer)
 
     def _inline_citation_ids(self, answer: str) -> List[int]:
-        citation_ids = []
-        for match in re.findall(r"\[(\d+)\]", answer):
-            try:
-                citation_ids.append(int(match))
-            except ValueError:
-                continue
-        return citation_ids
+        return _answer_loop.inline_citation_ids(answer)
 
     def _citation_ids_are_valid(
         self, inline_citation_ids: List[int], citations: List[AnswerCitation]
     ) -> bool:
-        valid_citation_ids = {citation.citation_id for citation in citations}
-        return set(inline_citation_ids).issubset(valid_citation_ids)
+        return _answer_loop.citation_ids_are_valid(inline_citation_ids, citations)
 
     def _cited_citations_for_answer(
         self, answer: str, citations: List[AnswerCitation]
     ) -> List[AnswerCitation]:
-        inline_citation_ids = set(self._inline_citation_ids(answer))
-        return [
-            citation for citation in citations if citation.citation_id in inline_citation_ids
-        ]
+        return _answer_loop.cited_citations_for_answer(answer, citations)
 
     def _support_token(self, token: str) -> str:
-        if len(token) > 4 and token.endswith("ies"):
-            return f"{token[:-3]}y"
-        if len(token) > 4 and token.endswith("es"):
-            return token[:-2]
-        if len(token) > 3 and token.endswith("s"):
-            return token[:-1]
-        return token
+        return _answer_loop.support_token(token)
 
     def _support_tokens(self, text: str) -> set:
-        normalized_text = re.sub(r"\[\d+\]", " ", text.lower())
-        tokens = re.findall(r"\w+", normalized_text, flags=re.UNICODE)
-        return {
-            self._support_token(token)
-            for token in tokens
-            if (not token.isascii() or len(token) > 2)
-            and token not in ANSWER_SUPPORT_STOPWORDS
-        }
+        return _answer_loop.support_tokens(text)
 
     def _normalize_support_text(self, text: str) -> str:
-        without_citations = re.sub(r"\[\d+\]", " ", text.lower())
-        normalized_chars = []
-        for char in without_citations:
-            if char.isalnum():
-                normalized_chars.append(char)
-            else:
-                normalized_chars.append(" ")
-        return " ".join("".join(normalized_chars).split())
+        return _answer_loop.normalize_support_text(text)
 
     def _matched_claim_is_denied(
         self,
@@ -1337,282 +1244,14 @@ class AILoopEngine:
         normalized_evidence: str,
         raw_evidence: str = "",
     ) -> bool:
-        if not normalized_answer:
-            return False
-
-        match_starts = []
-        search_start = 0
-        while True:
-            start = normalized_evidence.find(normalized_answer, search_start)
-            if start < 0:
-                break
-            match_starts.append(start)
-            search_start = start + len(normalized_answer)
-
-        if not match_starts:
-            return False
-
-        if raw_evidence:
-            claim_pattern = r"\b" + r"\W+".join(
-                re.escape(token) for token in normalized_answer.split()
-            )
-            qa_denial_pattern = (
-                rf"{claim_pattern}\b\s*(?:\?|\:|[-–—])\s*"
-                r"(?:no|nope)\b(?=\s*(?:[.!?,;:]|$))"
-            )
-            if re.search(qa_denial_pattern, raw_evidence, flags=re.IGNORECASE):
-                return True
-
-        prefix_denial_markers = (
-            "it is false that",
-            "it is not true that",
-            "it is incorrect that",
-            "it is wrong that",
-            "it was false that",
-            "it was not true that",
-            "it was incorrect that",
-            "it was wrong that",
-            "false that",
-            "not true that",
-            "incorrect that",
-            "wrong that",
-            "denied that",
-            "refuted that",
+        return _answer_loop.matched_claim_is_denied(
+            normalized_answer, normalized_evidence, raw_evidence
         )
-
-        denial_markers = (
-            "is false",
-            "is not true",
-            "is incorrect",
-            "is wrong",
-            "is denied",
-            "is refuted",
-            "is rejected",
-            "is debunked",
-            "is contradicted",
-            "is untrue",
-            "is unsupported",
-            "is not supported",
-            "is disputed",
-            "is inaccurate",
-            "is baseless",
-            "is unfounded",
-            "is disproven",
-            "is disproved",
-            "has been denied",
-            "has been refuted",
-            "has been rejected",
-            "has been debunked",
-            "has been contradicted",
-            "has been unsupported",
-            "has been disputed",
-            "has been disproven",
-            "has been disproved",
-            "have been denied",
-            "have been refuted",
-            "have been rejected",
-            "have been debunked",
-            "have been contradicted",
-            "have been unsupported",
-            "have been disputed",
-            "have been disproven",
-            "have been disproved",
-            "had been denied",
-            "had been refuted",
-            "had been rejected",
-            "had been debunked",
-            "had been contradicted",
-            "had been unsupported",
-            "had been disputed",
-            "had been disproven",
-            "had been disproved",
-            "was false",
-            "was not true",
-            "was incorrect",
-            "was wrong",
-            "was denied",
-            "was refuted",
-            "was rejected",
-            "was debunked",
-            "was contradicted",
-            "was untrue",
-            "was unsupported",
-            "was not supported",
-            "was disputed",
-            "was inaccurate",
-            "was baseless",
-            "was unfounded",
-            "was disproven",
-            "was disproved",
-            "are false",
-            "are not true",
-            "are incorrect",
-            "are wrong",
-            "are denied",
-            "are refuted",
-            "are rejected",
-            "are debunked",
-            "are contradicted",
-            "are untrue",
-            "are unsupported",
-            "are not supported",
-            "are disputed",
-            "are inaccurate",
-            "are baseless",
-            "are unfounded",
-            "are disproven",
-            "are disproved",
-            "were false",
-            "were not true",
-            "were incorrect",
-            "were wrong",
-            "were denied",
-            "were refuted",
-            "were rejected",
-            "were debunked",
-            "were contradicted",
-            "were untrue",
-            "were unsupported",
-            "were not supported",
-            "were disputed",
-            "were inaccurate",
-            "were baseless",
-            "were unfounded",
-            "were disproven",
-            "were disproved",
-            "not true",
-            "not supported",
-            "false",
-            "incorrect",
-            "wrong",
-            "denied",
-            "refuted",
-            "rejected",
-            "debunked",
-            "contradicted",
-            "untrue",
-            "unsupported",
-            "disputed",
-            "inaccurate",
-            "baseless",
-            "unfounded",
-            "disproven",
-            "disproved",
-        )
-
-        def has_denial_marker(tokens: List[str]) -> bool:
-            text = " ".join(tokens[:8])
-            return any(
-                text == marker or text.startswith(f"{marker} ")
-                for marker in denial_markers
-            )
-
-        referent_tokens = {"it", "that", "this", "they", "these", "those"}
-        referential_determiners = {"a", "an", "the"}
-        referential_nouns = {
-            "answer",
-            "assertion",
-            "assertions",
-            "claim",
-            "claims",
-            "idea",
-            "ideas",
-            "premise",
-            "premises",
-            "report",
-            "reports",
-            "statement",
-            "statements",
-        }
-        referential_modifiers = {"above", "previous", "prior", "same"}
-
-        def has_referential_denial_marker(tokens: List[str]) -> bool:
-            if has_denial_marker(tokens):
-                return True
-
-            if tokens and tokens[0] in referent_tokens:
-                if has_denial_marker(tokens[1:]):
-                    return True
-                if len(tokens) > 1 and tokens[1] in referential_nouns:
-                    return has_denial_marker(tokens[2:])
-
-            if tokens and tokens[0] in referential_determiners:
-                noun_tokens = tokens[1:]
-                if noun_tokens and noun_tokens[0] in referential_modifiers:
-                    noun_tokens = noun_tokens[1:]
-                if noun_tokens and noun_tokens[0] in referential_nouns:
-                    return has_denial_marker(noun_tokens[1:])
-
-            return False
-
-        discourse_connectors = {
-            "although",
-            "but",
-            "however",
-            "that",
-            "this",
-            "though",
-            "which",
-            "yet",
-        }
-
-        for start in match_starts:
-            before_match = normalized_evidence[:start]
-            previous_tokens = before_match.split()[-6:]
-            previous_text = " ".join(previous_tokens)
-            if any(
-                previous_text == marker or previous_text.endswith(f" {marker}")
-                for marker in prefix_denial_markers
-            ):
-                return True
-
-            after_match = normalized_evidence[start + len(normalized_answer) :]
-            following_tokens = after_match.split()[:8]
-            following_text = " ".join(following_tokens)
-            if following_tokens and following_tokens[0] in {"no", "nope"}:
-                if len(following_tokens) == 1:
-                    return True
-                if following_tokens[1] in {"it", "this", "that", "instead", "rather"}:
-                    return True
-                if following_text.startswith(
-                    ("no not true", "no false", "no incorrect")
-                ):
-                    return True
-
-            if has_referential_denial_marker(following_tokens):
-                return True
-
-            if following_tokens and following_tokens[0] in discourse_connectors:
-                connector_tail = following_tokens[1:]
-                if has_referential_denial_marker(connector_tail):
-                    return True
-
-        return False
 
     def _citation_text_refutes_answer(
         self, answer: str, citations: List[AnswerCitation], question: str
     ) -> bool:
-        cited_citations = self._cited_citations_for_answer(answer, citations)
-        if not cited_citations:
-            return False
-
-        evidence_text_parts = []
-        for citation in cited_citations:
-            evidence_text_parts.append(citation.excerpt)
-
-        answer_tokens = self._support_tokens(answer)
-        if not answer_tokens:
-            return False
-
-        normalized_answer = self._normalize_support_text(answer)
-        normalized_evidence = self._normalize_support_text(" ".join(evidence_text_parts))
-        if not normalized_answer or normalized_answer not in normalized_evidence:
-            return False
-        return self._matched_claim_is_denied(
-            normalized_answer,
-            normalized_evidence,
-            " ".join(evidence_text_parts),
-        )
+        return _answer_loop.citation_text_refutes_answer(answer, citations, question)
 
     def _mechanical_self_check_answer(
         self,
@@ -1622,101 +1261,21 @@ class AILoopEngine:
         question: str = "",
         retry_attempted: bool = False,
     ) -> AnswerSelfCheck:
-        clean_answer = answer.strip()
-        if len(clean_answer) < 3:
-            return AnswerSelfCheck(
-                outcome="needs_retry",
-                reasons=["answer_too_short"],
-                retry_attempted=retry_attempted,
-            )
-
-        if not citations:
-            if self._answer_is_refusal(clean_answer):
-                return AnswerSelfCheck(
-                    outcome="not_verified",
-                    reasons=["refused_without_prompt_evidence"],
-                    retry_attempted=retry_attempted,
-                )
-            return AnswerSelfCheck(
-                outcome="needs_refusal",
-                reasons=["no_prompt_evidence"],
-                retry_attempted=retry_attempted,
-            )
-
-        if self._answer_is_refusal(clean_answer):
-            return AnswerSelfCheck(
-                outcome="needs_retry",
-                reasons=["answer_refused_despite_prompt_evidence"],
-                retry_attempted=retry_attempted,
-            )
-
-        inline_citation_ids = self._inline_citation_ids(clean_answer)
-        if not inline_citation_ids:
-            return AnswerSelfCheck(
-                outcome="needs_retry",
-                reasons=["missing_inline_citation"],
-                retry_attempted=retry_attempted,
-            )
-
-        if not self._citation_ids_are_valid(inline_citation_ids, citations):
-            return AnswerSelfCheck(
-                outcome="needs_retry",
-                reasons=["invalid_inline_citation"],
-                retry_attempted=retry_attempted,
-            )
-
-        if self._citation_text_refutes_answer(clean_answer, citations, question):
-            return AnswerSelfCheck(
-                outcome="needs_refusal",
-                reasons=[
-                    "citation_text_does_not_support_answer",
-                    "deterministic_refutation_detected",
-                ],
-                retry_attempted=retry_attempted,
-            )
-
-        return AnswerSelfCheck(
-            outcome="mechanical_checks_passed",
-            reasons=["mechanical_checks_passed"],
+        return _answer_loop.mechanical_self_check_answer(
+            answer,
+            citations,
+            question=question,
             retry_attempted=retry_attempted,
         )
 
     def _loop_decision_for_self_check(self, self_check: AnswerSelfCheck) -> LoopDecision:
-        if self_check.outcome == "mechanical_checks_passed":
-            return LoopDecision.CONTINUE
-        if self_check.outcome == "supported":
-            return LoopDecision.SUPPORTED
-        if self_check.outcome == "not_verified":
-            return LoopDecision.NOT_VERIFIED
-        if self_check.outcome == "needs_retry":
-            return LoopDecision.RETRY
-        if self_check.outcome == "needs_refusal":
-            return LoopDecision.REFUSE
-        return LoopDecision.ERROR
+        return _answer_loop.loop_decision_for_self_check(self_check)
 
     def _verification_result_for_self_check(
         self, self_check: AnswerSelfCheck
     ) -> VerificationResult:
-        reasons = tuple(self_check.reasons)
-        if self_check.outcome == "supported":
-            outcome = VerificationOutcome.SUPPORTED
-        elif self_check.outcome == "not_verified":
-            outcome = VerificationOutcome.NOT_VERIFIED
-        elif "llm_verifier_unsupported" in reasons:
-            outcome = VerificationOutcome.UNSUPPORTED
-        elif "llm_verifier_insufficient" in reasons:
-            outcome = VerificationOutcome.INSUFFICIENT
-        else:
-            outcome = VerificationOutcome.ERROR
-
-        return VerificationResult(
-            outcome=outcome,
-            reasons=reasons,
-            verifier=self._active_backend(),
-            metadata={
-                "retry_attempted": self_check.retry_attempted,
-                "self_check_outcome": self_check.outcome,
-            },
+        return _answer_loop.verification_result_for_self_check(
+            self_check, verifier=self._active_backend()
         )
 
     def _loop_step(
@@ -1856,39 +1415,12 @@ class AILoopEngine:
     def _verifier_prompt(
         self, *, question: str, answer: str, citations: List[AnswerCitation]
     ) -> str:
-        cited_citations = self._cited_citations_for_answer(answer, citations)
-        cited_excerpts = "\n\n".join(
-            f"[{citation.citation_id}] {citation.excerpt.strip()}"
-            for citation in cited_citations
-        )
-        return (
-            "You are a strict citation verifier for a document QA system.\n"
-            "Use only the cited excerpts. Do not use outside knowledge.\n"
-            "Decide whether every factual claim in the answer is directly supported "
-            "by the cited excerpts.\n"
-            "Return only JSON with this schema: "
-            '{"outcome":"supported|unsupported|insufficient","reason":"short reason"}.\n'
-            "Use unsupported when the cited excerpts contradict any answer claim.\n"
-            "Use insufficient when the cited excerpts do not contain enough evidence.\n\n"
-            f"Question:\n{question}\n\n"
-            f"Answer:\n{answer}\n\n"
-            f"Cited excerpts:\n{cited_excerpts}"
+        return _answer_loop.verifier_prompt(
+            question=question, answer=answer, citations=citations
         )
 
     def _parse_verifier_response(self, raw_response: str) -> Tuple[Optional[str], str]:
-        json_match = re.search(r"\{.*\}", raw_response, flags=re.DOTALL)
-        if not json_match:
-            return None, "missing_json"
-        try:
-            payload = json.loads(json_match.group(0))
-        except json.JSONDecodeError:
-            return None, "invalid_json"
-
-        outcome = str(payload.get("outcome", "")).strip().lower()
-        if outcome not in VERIFIER_OUTCOMES:
-            return None, "invalid_outcome"
-        reason = str(payload.get("reason", "")).strip()
-        return outcome, reason
+        return _answer_loop.parse_verifier_response(raw_response)
 
     def _verify_answer_with_llm(
         self,
@@ -1898,67 +1430,20 @@ class AILoopEngine:
         citations: List[AnswerCitation],
         retry_attempted: bool,
     ) -> AnswerSelfCheck:
-        if self.llm is None:
-            return AnswerSelfCheck(
-                outcome="needs_refusal",
-                reasons=["llm_verifier_unavailable"],
-                retry_attempted=retry_attempted,
-            )
-
-        prompt = self._verifier_prompt(
+        return _answer_loop.verify_answer_with_llm(
+            llm=self.llm,
             question=question,
             answer=answer,
             citations=citations,
-        )
-        try:
-            raw_response = str(self.llm.invoke(prompt)).strip()
-        except Exception as exc:
-            LOGGER.warning("LLM verifier failed: %s", exc)
-            return AnswerSelfCheck(
-                outcome="needs_refusal",
-                reasons=["llm_verifier_error"],
-                retry_attempted=retry_attempted,
-            )
-
-        verifier_outcome, parse_reason = self._parse_verifier_response(raw_response)
-        if verifier_outcome is None:
-            return AnswerSelfCheck(
-                outcome="needs_refusal",
-                reasons=["llm_verifier_parse_failed", parse_reason],
-                retry_attempted=retry_attempted,
-            )
-
-        if verifier_outcome == "supported":
-            return AnswerSelfCheck(
-                outcome="supported",
-                reasons=["mechanical_checks_passed", "llm_verifier_supported"],
-                retry_attempted=retry_attempted,
-            )
-
-        return AnswerSelfCheck(
-            outcome="needs_refusal",
-            reasons=[f"llm_verifier_{verifier_outcome}"],
             retry_attempted=retry_attempted,
+            logger=LOGGER,
         )
 
     def _fail_closed_self_check(self, self_check: AnswerSelfCheck) -> AnswerSelfCheck:
-        reasons = list(self_check.reasons)
-        if "self_check_failed_closed" not in reasons:
-            reasons.insert(0, "self_check_failed_closed")
-        return AnswerSelfCheck(
-            outcome="needs_refusal",
-            reasons=reasons,
-            retry_attempted=self_check.retry_attempted,
-        )
+        return _answer_loop.fail_closed_self_check(self_check)
 
     def _self_check_retry_instruction(self, self_check: AnswerSelfCheck) -> str:
-        reasons = ", ".join(self_check.reasons)
-        return (
-            "Self-check retry instruction: the previous answer failed checks "
-            f"({reasons}). Answer again using only the context above. Include at least "
-            "one bracketed citation like [1] for supported claims. If the context does "
-            "not contain the answer, say that clearly."
-        )
+        return _answer_loop.self_check_retry_instruction(self_check)
 
     def _query_result(
         self,

@@ -189,6 +189,45 @@ print(json.dumps({
     assert observed == EXPECTED_NATIVE_DEFAULTS
 
 
+def test_answer_loop_import_is_native_light():
+    code = """
+import json
+import sys
+
+import src.answer_loop
+
+watched_modules = [
+    "faiss",
+    "numpy",
+    "src.retrieval",
+    "docx2txt",
+    "langchain_text_splitters",
+    "pypdf",
+]
+print(json.dumps({
+    name: name in sys.modules
+    for name in watched_modules
+}, sort_keys=True))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    observed = json.loads(result.stdout)
+
+    assert observed == {
+        "faiss": False,
+        "numpy": False,
+        "src.retrieval": False,
+        "docx2txt": False,
+        "langchain_text_splitters": False,
+        "pypdf": False,
+    }
+
+
 def test_ai_loop_runtime_does_not_eagerly_import_document_ingestion_stack():
     code = """
 import json

@@ -80,6 +80,9 @@ first context provider, not the product boundary.
 - Answer traces and citations must come from the same retrieved chunks used in
   the prompt. Keep `query()` string-compatible and expose richer evidence
   through structured APIs such as `query_with_trace()`.
+- Answer-loop policy belongs in `src.answer_loop`; runtime should orchestrate
+  loop state and middleware, not re-own mechanical citation validation,
+  verifier parsing, retry instructions, or fail-closed self-check decisions.
 - Answer self-checking should inspect the generated answer and trace. Cheap
   mechanical checks and deterministic refutation prefilters may reject bad
   answers, but only a real backend verifier may label an answer `supported`.
@@ -128,6 +131,7 @@ first context provider, not the product boundary.
 - `src/document_ingestion.py`
 - `src/runtime_config.py`
 - `src/model_adapters.py`
+- `src/answer_loop.py`
 - `src/DocumentQA.py`
 - `src/loop_engine.py`
 - `src/app.py`

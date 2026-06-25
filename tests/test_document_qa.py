@@ -9,6 +9,7 @@ import pytest
 from langchain_core.embeddings import Embeddings
 from langchain_core.documents import Document
 
+import src.answer_loop as answer_loop_module
 import src.DocumentQA as document_qa_module
 import src.ai_loop_runtime as ai_loop_runtime_module
 import src.context_providers as context_providers_module
@@ -24,6 +25,7 @@ from src.DocumentQA import (
     DEFAULT_OLLAMA_EMBEDDINGS_MODEL,
     DEFAULT_OLLAMA_MODEL,
     AnswerCitation,
+    AnswerSelfCheck,
     DocumentContextProvider,
     DocumentQA,
     FaissVectorStore,
@@ -97,6 +99,15 @@ def test_ai_loop_engine_is_canonical_runtime_alias():
     assert AnswerCitation is retrieval_types_module.AnswerCitation
     assert retrieval_module.AnswerCitation is retrieval_types_module.AnswerCitation
     assert FaissVectorStore is retrieval_module.FaissVectorStore
+    assert AnswerSelfCheck is answer_loop_module.AnswerSelfCheck
+    assert (
+        document_qa_module.SELF_CHECK_REFUSAL_ANSWER
+        == answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
+    )
+    assert (
+        document_qa_module.SELF_CHECK_PASS_OUTCOMES
+        == answer_loop_module.SELF_CHECK_PASS_OUTCOMES
+    )
     assert ai_loop_runtime_module.MAX_DOCUMENT_BYTES == (
         document_config_module.MAX_DOCUMENT_BYTES
     )
@@ -136,6 +147,7 @@ def test_legacy_star_import_and_type_hints_include_retrieval_exports():
     exec("from src.DocumentQA import *", {}, namespace)
 
     assert namespace["AnswerCitation"] is retrieval_types_module.AnswerCitation
+    assert namespace["AnswerSelfCheck"] is answer_loop_module.AnswerSelfCheck
     assert namespace["FaissVectorStore"] is retrieval_module.FaissVectorStore
     hints = typing.get_type_hints(document_qa_module.AnswerTrace)
     assert typing.get_args(hints["citations"])[0] is retrieval_types_module.AnswerCitation
