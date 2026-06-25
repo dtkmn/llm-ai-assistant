@@ -118,6 +118,8 @@ first context provider, not the product boundary.
 
 - `src/ai_loop_engine.py`
 - `src/ai_loop_runtime.py`
+- `src/context_providers.py`
+- `src/document_ingestion.py`
 - `src/runtime_config.py`
 - `src/model_adapters.py`
 - `src/DocumentQA.py`

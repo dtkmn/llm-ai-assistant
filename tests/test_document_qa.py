@@ -10,6 +10,8 @@ from langchain_core.documents import Document
 
 import src.DocumentQA as document_qa_module
 import src.ai_loop_runtime as ai_loop_runtime_module
+import src.context_providers as context_providers_module
+import src.document_ingestion as document_ingestion_module
 import src.model_adapters as model_adapters_module
 import src.runtime_config as runtime_config_module
 from src.ai_loop_engine import AILoopEngine, DocumentQA as PublicDocumentQA
@@ -86,6 +88,25 @@ def test_ai_loop_engine_is_canonical_runtime_alias():
     assert OllamaLLM is model_adapters_module.OllamaLLM
     assert OpenAICompatibleEmbeddings is model_adapters_module.OpenAICompatibleEmbeddings
     assert OpenAICompatibleLLM is model_adapters_module.OpenAICompatibleLLM
+    assert DocumentContextProvider is context_providers_module.DocumentContextProvider
+    assert ai_loop_runtime_module.MAX_DOCUMENT_BYTES == (
+        document_ingestion_module.MAX_DOCUMENT_BYTES
+    )
+    assert ai_loop_runtime_module.MAX_DOCUMENT_CHUNKS == (
+        document_ingestion_module.MAX_DOCUMENT_CHUNKS
+    )
+    assert (
+        document_qa_module.SUPPORTED_EXTENSIONS
+        == document_ingestion_module.SUPPORTED_EXTENSIONS
+    )
+    assert (
+        document_qa_module.TEXT_ENCODING_FALLBACKS
+        == document_ingestion_module.TEXT_ENCODING_FALLBACKS
+    )
+    assert (
+        document_qa_module.normalize_encoding_name
+        is document_ingestion_module.normalize_encoding_name
+    )
     assert (
         document_qa_module.open_ollama_request_no_proxy
         is model_adapters_module.open_ollama_request_no_proxy
@@ -2403,6 +2424,48 @@ def test_text_loader_sets_source_metadata(tmp_path):
     assert len(loaded_documents) == 1
     assert loaded_documents[0].page_content.startswith("# Notes")
     assert loaded_documents[0].metadata["source"] == str(document)
+
+
+def test_load_documents_uses_decode_text_file_override(monkeypatch, tmp_path):
+    document = tmp_path / "notes.txt"
+    document.write_bytes(b"not used by override")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+
+    def fake_decode_text_file(self, document_path, text_encoding=None):
+        assert document_path == str(document)
+        assert text_encoding == "auto"
+        return "decoded through compatibility seam"
+
+    monkeypatch.setattr(DocumentQA, "_decode_text_file", fake_decode_text_file)
+
+    loaded_documents = qa._load_documents(
+        str(document),
+        ".txt",
+        text_encoding="auto",
+    )
+
+    assert loaded_documents[0].page_content == "decoded through compatibility seam"
+    assert loaded_documents[0].metadata["source"] == str(document)
+
+
+def test_decode_text_file_uses_decode_supported_text_override(tmp_path):
+    document = tmp_path / "notes.txt"
+    document.write_bytes(b"override target")
+    seen_encodings = []
+
+    class CustomDecodeQA(DocumentQA):
+        def _decode_supported_text(self, raw_content, encoding):
+            assert raw_content == b"override target"
+            seen_encodings.append(encoding)
+            return "decoded through supported override"
+
+    qa = CustomDecodeQA(fast_mode=True, llm_backend="mock")
+
+    assert (
+        qa._decode_text_file(str(document), text_encoding="utf-8-or-western")
+        == "decoded through supported override"
+    )
+    assert seen_encodings == ["utf-8"]
 
 
 @pytest.mark.parametrize(
