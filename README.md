@@ -1,18 +1,19 @@
 # AI Loop Engine
 AI Loop Engine is a local-first engine for inspecting and hardening AI answer
-loops: context retrieval, drafting, citation checks, claim verification, retries,
-refusals, middleware guardrails, and evals. The current built-in capability is
-document context: upload PDF, DOCX, TXT, or MD files, index them with FAISS, and
-talk to an agent whose loop is visible and testable.
+loops: context selection, retrieval, drafting, citation checks, claim
+verification, retries, refusals, middleware guardrails, evals, and replay. The
+current built-in context source is document upload, but the product focus is the
+loop: making agent behavior visible, testable, and harder to fake.
 
 ## Features
 - **Loop Engineering Core:** Treats retrieval, drafting, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
-- **Document Context Provider:** Supports PDF, DOCX, and text documents with safe decoding, chunking, and transactional replacement
+- **Observable Runtime Reports:** Emits structured loop evidence for context selection, prompt evidence, drafts, verifier decisions, retries, refusals, and replay
 - **Local-first LLM Backend:** Recommended local path is Ollama; cloud or
   gateway deployment uses a generic OpenAI-compatible chat-completions backend
 - **Vector Search:** Uses FAISS for efficient similarity search with
   provider-backed embedding models through Ollama or OpenAI-compatible gateways
-- **Gradio Interface:** Web interface for document context upload, agent chat, runtime status, compact loop summaries, and answer traces
+- **Gradio Interface:** Web interface for local loop sessions, context indexing,
+  runtime status, compact loop summaries, and answer traces
 - **External Model Runtime:** Uses Ollama or an OpenAI-compatible gateway for
   generation so Python document indexing stays lightweight and stable
 
