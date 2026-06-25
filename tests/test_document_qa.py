@@ -1,6 +1,7 @@
 import json
 import logging
 import threading
+import typing
 import urllib.error
 from types import SimpleNamespace
 
@@ -15,6 +16,8 @@ import src.document_config as document_config_module
 import src.document_ingestion as document_ingestion_module
 import src.document_text as document_text_module
 import src.model_adapters as model_adapters_module
+import src.retrieval as retrieval_module
+import src.retrieval_types as retrieval_types_module
 import src.runtime_config as runtime_config_module
 from src.ai_loop_engine import AILoopEngine, DocumentQA as PublicDocumentQA
 from src.DocumentQA import (
@@ -91,6 +94,9 @@ def test_ai_loop_engine_is_canonical_runtime_alias():
     assert OpenAICompatibleEmbeddings is model_adapters_module.OpenAICompatibleEmbeddings
     assert OpenAICompatibleLLM is model_adapters_module.OpenAICompatibleLLM
     assert DocumentContextProvider is context_providers_module.DocumentContextProvider
+    assert AnswerCitation is retrieval_types_module.AnswerCitation
+    assert retrieval_module.AnswerCitation is retrieval_types_module.AnswerCitation
+    assert FaissVectorStore is retrieval_module.FaissVectorStore
     assert ai_loop_runtime_module.MAX_DOCUMENT_BYTES == (
         document_config_module.MAX_DOCUMENT_BYTES
     )
@@ -123,6 +129,80 @@ def test_ai_loop_engine_is_canonical_runtime_alias():
         document_qa_module.open_openai_compatible_request
         is model_adapters_module.open_openai_compatible_request
     )
+
+
+def test_legacy_star_import_and_type_hints_include_retrieval_exports():
+    namespace = {}
+    exec("from src.DocumentQA import *", {}, namespace)
+
+    assert namespace["AnswerCitation"] is retrieval_types_module.AnswerCitation
+    assert namespace["FaissVectorStore"] is retrieval_module.FaissVectorStore
+    hints = typing.get_type_hints(document_qa_module.AnswerTrace)
+    assert typing.get_args(hints["citations"])[0] is retrieval_types_module.AnswerCitation
+    typing.get_type_hints(document_qa_module.AILoopEngine._commit_active_document_state)
+    typing.get_type_hints(document_qa_module.AILoopEngine._build_retrieval_chain)
+    typing.get_type_hints(document_qa_module.AILoopEngine._load_documents)
+
+
+def test_legacy_vector_store_module_reassignment_intercepts_index(
+    monkeypatch, tmp_path
+):
+    document = tmp_path / "phoenix.txt"
+    document.write_text("Project Phoenix launches in June 2026.", encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.embeddings = FakeEmbeddings()
+    calls = []
+
+    class PatchedVectorStore:
+        @classmethod
+        def from_documents(cls, documents, embedding):
+            calls.append(len(documents))
+            raise ValueError("patched index boom")
+
+    monkeypatch.setattr(document_qa_module, "FaissVectorStore", PatchedVectorStore)
+
+    with pytest.raises(RuntimeError, match="patched index boom"):
+        qa.process_document(str(document))
+
+    assert calls
+    assert qa.vector_store is None
+    assert qa.retrieval_chain is None
+
+
+def test_legacy_retrieval_factory_module_reassignment_intercepts_chain(
+    monkeypatch, tmp_path
+):
+    document = tmp_path / "phoenix.txt"
+    document.write_text("Project Phoenix launches in June 2026.", encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.embeddings = FakeEmbeddings()
+    calls = []
+
+    def patched_build_document_retrieval_chain(
+        *, vector_store, llm, document_name, profile
+    ):
+        calls.append(
+            {
+                "vector_store": vector_store,
+                "llm": llm,
+                "document_name": document_name,
+                "profile": profile,
+            }
+        )
+        return SimpleNamespace(invoke=lambda question: "patched answer")
+
+    monkeypatch.setattr(
+        document_qa_module,
+        "build_document_retrieval_chain",
+        patched_build_document_retrieval_chain,
+    )
+
+    status = qa.process_document(str(document))
+
+    assert status.ready_for_queries is True
+    assert calls
+    assert calls[0]["document_name"] == "phoenix.txt"
+    assert qa.retrieval_chain.invoke("anything") == "patched answer"
 
 
 def create_processed_mock_qa(tmp_path):

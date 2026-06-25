@@ -40,7 +40,7 @@ def test_native_runtime_defaults_respect_existing_overrides(monkeypatch):
     assert os.environ["TOKENIZERS_PARALLELISM"] == "false"
 
 
-def test_document_qa_bootstraps_native_defaults_before_native_imports():
+def test_retrieval_bootstraps_native_defaults_before_native_imports():
     env = os.environ.copy()
     for name in NATIVE_THREAD_ENV_VARS:
         env.pop(name, None)
@@ -68,8 +68,8 @@ def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):
     return real_import(name, globals, locals, fromlist, level)
 
 builtins.__import__ = tracking_import
-import src.DocumentQA
-raise SystemExit("src.DocumentQA did not import a tracked native module")
+import src.retrieval
+raise SystemExit("src.retrieval did not import a tracked native module")
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -203,11 +203,13 @@ except ValueError:
     pass
 
 watched_modules = [
+    "faiss",
     "docx2txt",
     "langchain_text_splitters",
     "pypdf",
     "src.document_ingestion",
     "src.document_text",
+    "src.retrieval",
 ]
 print(json.dumps({
     name: name in sys.modules
@@ -224,9 +226,11 @@ print(json.dumps({
     observed = json.loads(result.stdout)
 
     assert observed == {
+        "faiss": False,
         "docx2txt": False,
         "langchain_text_splitters": False,
         "pypdf": False,
         "src.document_ingestion": False,
         "src.document_text": False,
+        "src.retrieval": False,
     }

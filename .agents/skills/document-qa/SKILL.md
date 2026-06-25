@@ -47,6 +47,8 @@ first context provider, not the product boundary.
 - Native runtime defaults must be installed before Gradio, NumPy, FAISS,
   or other native-heavy imports in app entrypoints. Use `src.native_runtime`
   instead of duplicating env setup in modules that may be imported too late.
+- Runtime imports must not eagerly load FAISS or `src.retrieval`; keep retrieval
+  lazy to indexing/search paths or explicit compatibility imports.
 - Embedding runtime follows the selected provider. Ollama uses `/api/embed`;
   OpenAI-compatible gateways use `/embeddings`; mock mode uses built-in local
   hashing for deterministic demos/tests.
@@ -119,6 +121,8 @@ first context provider, not the product boundary.
 - `src/ai_loop_engine.py`
 - `src/ai_loop_runtime.py`
 - `src/context_providers.py`
+- `src/retrieval.py`
+- `src/retrieval_types.py`
 - `src/document_config.py`
 - `src/document_text.py`
 - `src/document_ingestion.py`
