@@ -175,6 +175,11 @@ Primary runtime files:
   `LoopSession` state keyed by `session_id`. Local replay JSONL export writes
   raw loop reports for developer diagnostics; public UI traces must keep using
   the redacted report surface.
+- Web/API threads must pass an explicit validated `session_id` into
+  `AILoopEngine.query_with_trace()`. The current browser UI stores thread
+  messages locally and the runtime stores loop reports in memory; do not imply
+  authenticated, cross-device, or database-backed thread persistence until that
+  architecture exists.
 - Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
   or request human review, but it must not introduce autonomous tools by itself.
 - Framework adapters must export `LoopReport`/`LoopSession` surfaces before they

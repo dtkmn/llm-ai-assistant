@@ -577,6 +577,12 @@ class AILoopEngine:
         self.latest_processing_report: Optional[DocumentProcessingReport] = None
         self.chat_history: List[Dict[str, str]] = []
         self.loop_sessions: Dict[str, LoopSession] = {}
+        self.loop_session_revisions: Dict[str, int] = {}
+        self._loop_session_global_revision = 0
+        self._loop_report_recording_guards: Dict[
+            str,
+            Tuple[str, Tuple[int, int]],
+        ] = {}
         self.loop_middlewares = tuple(loop_middlewares or ())
 
     def _default_embeddings_device(self) -> str:
@@ -853,11 +859,41 @@ class AILoopEngine:
     def _normalize_session_id(self, session_id: Optional[str]) -> str:
         return str(session_id or "default").strip() or "default"
 
+    def _loop_session_revision(self, session_id: str) -> Tuple[int, int]:
+        with self._session_lock:
+            return (
+                int(self.loop_session_revisions.get(session_id, 0)),
+                self._loop_session_global_revision,
+            )
+
+    def _bump_loop_session_revision(self, session_id: str) -> None:
+        self.loop_session_revisions[session_id] = (
+            int(self.loop_session_revisions.get(session_id, 0)) + 1
+        )
+
+    def _session_revision_matches(
+        self, session_id: str, revision: Tuple[int, int]
+    ) -> bool:
+        with self._session_lock:
+            return self._loop_session_revision(session_id) == revision
+
+    def _guard_loop_report_recording(
+        self, run_id: str, session_id: str, revision: Tuple[int, int]
+    ) -> None:
+        with self._session_lock:
+            self._loop_report_recording_guards[run_id] = (session_id, revision)
+
     def _record_loop_report(self, loop_report: Optional[LoopReport]) -> None:
         if loop_report is None:
             return
         session_id = self._normalize_session_id(loop_report.run.session_id)
         with self._session_lock:
+            guard = self._loop_report_recording_guards.pop(
+                loop_report.run.run_id,
+                None,
+            )
+            if guard and not self._session_revision_matches(guard[0], guard[1]):
+                return
             session = self.loop_sessions.get(
                 session_id, LoopSession(session_id=session_id)
             )
@@ -882,8 +918,12 @@ class AILoopEngine:
         with self._session_lock:
             if session_id is None:
                 self.loop_sessions.clear()
+                self.loop_session_revisions.clear()
+                self._loop_session_global_revision += 1
                 return
-            self.loop_sessions.pop(self._normalize_session_id(session_id), None)
+            normalized_session_id = self._normalize_session_id(session_id)
+            self.loop_sessions.pop(normalized_session_id, None)
+            self._bump_loop_session_revision(normalized_session_id)
 
     def export_loop_session_jsonl(
         self,
@@ -1559,34 +1599,47 @@ class AILoopEngine:
         )
 
     def _record_chat_history_entry(
-        self, *, session_id: str, question: str, result: QueryResult
+        self,
+        *,
+        session_id: str,
+        question: str,
+        result: QueryResult,
+        expected_session_revision: Optional[Tuple[int, int]] = None,
     ) -> None:
-        self.chat_history.append(
-            {
-                "session_id": session_id,
-                "question": question,
-                "answer": result.answer,
-                "citations": [
-                    {
-                        "id": citation.citation_id,
-                        "source_name": citation.source_name,
-                        "page": citation.page,
-                        "chunk_index": citation.chunk_index,
-                        "excerpt": citation.excerpt,
-                    }
-                    for citation in result.trace.citations
-                ],
-                "self_check": (
-                    {
-                        "outcome": result.trace.self_check.outcome,
-                        "reasons": result.trace.self_check.reasons,
-                        "retry_attempted": result.trace.self_check.retry_attempted,
-                    }
-                    if result.trace.self_check
-                    else None
-                ),
-            }
-        )
+        with self._session_lock:
+            if expected_session_revision is not None:
+                current_revision = (
+                    int(self.loop_session_revisions.get(session_id, 0)),
+                    self._loop_session_global_revision,
+                )
+                if current_revision != expected_session_revision:
+                    return
+            self.chat_history.append(
+                {
+                    "session_id": session_id,
+                    "question": question,
+                    "answer": result.answer,
+                    "citations": [
+                        {
+                            "id": citation.citation_id,
+                            "source_name": citation.source_name,
+                            "page": citation.page,
+                            "chunk_index": citation.chunk_index,
+                            "excerpt": citation.excerpt,
+                        }
+                        for citation in result.trace.citations
+                    ],
+                    "self_check": (
+                        {
+                            "outcome": result.trace.self_check.outcome,
+                            "reasons": result.trace.self_check.reasons,
+                            "retry_attempted": result.trace.self_check.retry_attempted,
+                        }
+                        if result.trace.self_check
+                        else None
+                    ),
+                }
+            )
 
     def _start_loop_run(
         self,
@@ -1944,11 +1997,17 @@ class AILoopEngine:
         """Answer a user query and return the retrieved evidence used."""
         active_state = self._snapshot_active_document_state()
         session_id = self._normalize_session_id(session_id)
+        session_revision = self._loop_session_revision(session_id)
         clean_prompt = (prompt or "").strip()
         run = self._start_loop_run(
             prompt=clean_prompt,
             session_id=session_id,
             active_state=active_state,
+        )
+        self._guard_loop_report_recording(
+            run.run_id,
+            session_id,
+            session_revision,
         )
 
         guardrail_decision = self._run_loop_middleware("before_run", run)
@@ -2584,6 +2643,7 @@ class AILoopEngine:
                 session_id=session_id,
                 question=clean_prompt,
                 result=result,
+                expected_session_revision=session_revision,
             )
             return result
         except Exception as exc:

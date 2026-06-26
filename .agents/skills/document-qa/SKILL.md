@@ -76,6 +76,10 @@ first context provider, not the product boundary.
 - Completed query reports should be retained in bounded in-memory `LoopSession`
   state. Local JSONL export may write raw reports for developer replay/debug
   artifacts; public UI traces must continue using the redacted report surface.
+- Web/API threads must pass an explicit validated `session_id` into the runtime.
+  The current browser UI stores thread messages locally and the runtime stores
+  loop reports in memory; do not imply authenticated, cross-device, or
+  database-backed thread persistence until that architecture exists.
 - Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
   or request human review, but it must not introduce autonomous tools by itself.
 - Upload status must say `indexed` for real backends, because endpoint readiness

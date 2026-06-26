@@ -13,7 +13,7 @@ loop: making agent behavior visible, testable, and harder to fake.
 - **Vector Search:** Uses FAISS for efficient similarity search with
   provider-backed embedding models through Ollama or OpenAI-compatible gateways
 - **FastAPI Web App:** Real backend API plus a static browser UI for local loop
-  sessions, context indexing, runtime status, a readable loop timeline, compact
+  threads, context indexing, runtime status, a readable loop timeline, compact
   loop summaries, and answer traces
 - **Model Thinking in Chat:** Shows Ollama model-emitted thinking inline under
   assistant messages and in the loop detail panel when the model supports it,
@@ -174,15 +174,18 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 
 ## Usage
 1. Open your browser and go to `http://localhost:7860`
-2. Ask a question directly to run the loop without external context
-3. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
+2. Start a new thread or use the default thread, then ask directly to run the
+   loop without external context
+3. Switch threads from the sidebar when you want separate local conversations
+   and loop traces
+4. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
    you want grounded retrieval, citations, and verifier-backed support checks
-4. Click "Index Context" to make the uploaded document available to the loop
-5. Inspect the Loop Timeline to see context selection, retrieve, draft, check,
+5. Click "Index Context" to make the uploaded document available to the loop
+6. Inspect the Loop Timeline to see context selection, retrieve, draft, check,
    verify, retry, refusal, and final-decision steps in order
-6. Inspect the loop summary for the provider, draft count, checks, verifier,
+7. Inspect the loop summary for the provider, draft count, checks, verifier,
    retry/refusal state, final decision, and last error
-7. Open the answer trace when you need the detailed redacted `LoopReport`
+8. Open the answer trace when you need the detailed redacted `LoopReport`
 
 ## Technical Details
 

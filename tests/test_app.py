@@ -107,7 +107,8 @@ class FakeQA:
             processing_report=self.latest_processing_report,
         )
 
-    def query_with_trace(self, message):
+    def query_with_trace(self, message, session_id="default"):
+        self.last_query_session_id = session_id
         active_backend = self.active_llm_backend or self.llm_backend
         active_model_label = (
             self.loaded_model_label
@@ -118,6 +119,7 @@ class FakeQA:
         loop_report = LoopReport(
             run=LoopRun(
                 run_id="run_fake",
+                session_id=session_id,
                 user_input=message,
                 context_provider="document",
                 backend=active_backend,
@@ -325,6 +327,7 @@ def test_static_frontend_is_served():
 
     assert response.status_code == 200
     assert "AI Loop Engine" in response.text
+    assert "Threads" in response.text
     assert "Optional Context" in response.text
     assert "You can still run the loop without documents" in response.text
     assert "Model Thinking" in response.text
@@ -333,10 +336,13 @@ def test_static_frontend_is_served():
     assert "Ask a question, or add context" in script.text
     assert "direct mode" in script.text
     assert "renderMessageThinking" in script.text
+    assert "session_id" in script.text
+    assert "switchThread" in script.text
     assert "result.trace?.model_thinking" in script.text
     assert "message-thinking" in script.text
     assert "innerHTML" not in script.text
     assert styles.status_code == 200
+    assert ".thread-button" in styles.text
     assert ".message-thinking" in styles.text
 
 
@@ -407,6 +413,8 @@ class Element {
     await listener({ preventDefault() {} });
   }
 
+  focus() {}
+
   querySelector(selector) {
     if (selector === "summary span") {
       const summary = findNode(this, (node) => node.tagName === "SUMMARY");
@@ -436,7 +444,26 @@ function findNode(root, predicate) {
   return null;
 }
 
+function createMemoryStorage() {
+  const values = new Map();
+  return {
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null;
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+  };
+}
+
 function createDom() {
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: createMemoryStorage(),
+  });
   const ids = [
     "backend-pill",
     "model-pill",
@@ -446,6 +473,9 @@ function createDom() {
     "upload-status",
     "document-file",
     "text-encoding",
+    "new-thread",
+    "thread-list",
+    "active-thread-title",
     "refresh-status",
     "runtime-grid",
     "query-form",
@@ -502,9 +532,18 @@ function jsonResponse(payload) {
   };
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 async function runCase(modelThinking) {
   const dom = createDom();
-  globalThis.fetch = async (url) => {
+  const queryBodies = [];
+  globalThis.fetch = async (url, options = {}) => {
     if (url === "/api/config") {
       return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
     }
@@ -518,6 +557,7 @@ async function runCase(modelThinking) {
       });
     }
     if (url === "/api/query") {
+      queryBodies.push(JSON.parse(options.body));
       return jsonResponse({
         answer: "Loop answer",
         timeline: { rows: [], final_decision: "not_verified" },
@@ -539,16 +579,19 @@ async function runCase(modelThinking) {
   await new Promise((resolve) => setTimeout(resolve, 0));
   dom["query-input"].value = "What happened?";
   await dom["query-form"].dispatch("submit");
-  return dom;
+  return { dom, queryBodies };
 }
 
-const capturedDom = await runCase({
+const capturedCase = await runCase({
   available: true,
   redacted: false,
   label: "Model Thinking (unverified)",
   content: "Captured thinking from model.",
   note: "Model-emitted thinking is useful for debugging the loop.",
 });
+const capturedDom = capturedCase.dom;
+assert.equal(capturedCase.queryBodies.length, 1);
+assert.ok(capturedCase.queryBodies[0].session_id.startsWith("thread_"));
 const capturedThinking = findNode(
   capturedDom.messages,
   (node) => node.className === "message-thinking",
@@ -557,18 +600,81 @@ assert.ok(capturedThinking, "assistant message should include thinking details")
 const capturedPre = findNode(capturedThinking, (node) => node.tagName === "PRE");
 assert.equal(capturedPre.textContent, "Captured thinking from model.");
 
-const emptyDom = await runCase({
+const emptyCase = await runCase({
   available: false,
   redacted: false,
   label: "Model Thinking (unverified)",
   content: null,
   note: "Model-emitted thinking is useful for debugging the loop.",
 });
+const emptyDom = emptyCase.dom;
 const emptyThinking = findNode(
   emptyDom.messages,
   (node) => node.className === "message-thinking",
 );
 assert.equal(emptyThinking, null);
+
+const threadCase = await runCase({
+  available: false,
+  redacted: false,
+  label: "Model Thinking (unverified)",
+  content: null,
+  note: "Model-emitted thinking is useful for debugging the loop.",
+});
+const firstThreadId = threadCase.queryBodies[0].session_id;
+await threadCase.dom["new-thread"].dispatch("click");
+threadCase.dom["query-input"].value = "Second thread question";
+await threadCase.dom["query-form"].dispatch("submit");
+assert.equal(threadCase.queryBodies.length, 2);
+assert.notEqual(threadCase.queryBodies[1].session_id, firstThreadId);
+assert.equal(threadCase.dom["thread-list"].children.length, 2);
+
+const staleDom = createDom();
+const staleQuery = deferred();
+globalThis.fetch = async (url, options = {}) => {
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({
+      backend: "ollama",
+      model: "thinking-model",
+      ready_for_queries: false,
+      query_mode: "direct",
+      chunk_count: 0,
+    });
+  }
+  if (url === "/api/query") {
+    await staleQuery.promise;
+    return jsonResponse({
+      answer: "Stale answer should not reappear",
+      timeline: { rows: [], final_decision: "not_verified" },
+      summary: {},
+      trace: { model_thinking: null },
+    });
+  }
+  if (url === "/api/chat/clear") {
+    return jsonResponse({
+      timeline: { rows: [], final_decision: null },
+      summary: {},
+      trace: {},
+    });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await import(`${pathToFileURL(process.env.APP_JS_PATH).href}?case=${Math.random()}`);
+await new Promise((resolve) => setTimeout(resolve, 0));
+staleDom["query-input"].value = "Question that will be cleared";
+const pendingSubmit = staleDom["query-form"].dispatch("submit");
+await new Promise((resolve) => setTimeout(resolve, 0));
+await staleDom["clear-chat"].dispatch("click");
+staleQuery.resolve();
+await pendingSubmit;
+const staleAssistant = findNode(
+  staleDom.messages,
+  (node) => node.className === "message assistant",
+);
+assert.equal(staleAssistant, null);
 """
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -888,6 +994,34 @@ def test_query_endpoint_returns_visible_loop_payload():
     }
 
 
+def test_query_endpoint_passes_session_id_to_loop_runtime():
+    fake_qa = FakeQA()
+    client = TestClient(web_app.create_app(fake_qa))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "What is Project Phoenix?", "session_id": "thread_alpha"},
+    )
+
+    assert response.status_code == 200
+    assert fake_qa.last_query_session_id == "thread_alpha"
+    assert response.json()["trace"]["loop_report"]["run"]["session_id"] == (
+        "thread_alpha"
+    )
+
+
+def test_query_endpoint_rejects_invalid_session_id():
+    client = TestClient(web_app.create_app(FakeQA()))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "What is Project Phoenix?", "session_id": "../bad"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid session id."
+
+
 def test_query_endpoint_allows_no_context_loop():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
     client = TestClient(web_app.create_app(qa))
@@ -932,6 +1066,40 @@ def test_clear_chat_resets_session_state():
     assert fake_qa.chat_history == []
     assert fake_qa.cleared_loop_session_id == "default"
     assert response.json()["timeline"]["empty"] is True
+
+
+def test_clear_chat_resets_requested_session_state():
+    class StaleAppendDuringClearQA(FakeQA):
+        def clear_loop_session(self, session_id="default"):
+            super().clear_loop_session(session_id)
+            self.chat_history.append(
+                {"session_id": session_id, "question": "stale in-flight"}
+            )
+
+    fake_qa = StaleAppendDuringClearQA()
+    fake_qa.chat_history = [
+        {"session_id": "thread_beta", "question": "old"},
+        {"session_id": "thread_other", "question": "keep"},
+    ]
+    client = TestClient(web_app.create_app(fake_qa))
+
+    response = client.post("/api/chat/clear", json={"session_id": "thread_beta"})
+
+    assert response.status_code == 200
+    assert fake_qa.chat_history == [
+        {"session_id": "thread_other", "question": "keep"}
+    ]
+    assert fake_qa.cleared_loop_session_id == "thread_beta"
+    assert response.json()["timeline"]["empty"] is True
+
+
+def test_clear_chat_rejects_invalid_session_id():
+    client = TestClient(web_app.create_app(FakeQA()))
+
+    response = client.post("/api/chat/clear", json={"session_id": "bad/session"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid session id."
 
 
 def test_loop_contract_redacts_guardrail_blocked_draft_everywhere():

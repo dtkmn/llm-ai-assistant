@@ -587,6 +587,34 @@ def test_no_context_query_is_recorded_for_replay(tmp_path):
     assert session.reports[0].run.error_message is None
 
 
+def test_cleared_session_does_not_record_in_flight_query_result():
+    class ClearSessionDuringDraftMiddleware:
+        def __init__(self):
+            self.qa = None
+            self.cleared = False
+
+        def before_step(self, run, step):
+            if step.phase == LoopPhase.DRAFT and not self.cleared:
+                self.cleared = True
+                self.qa.clear_loop_session(run.session_id)
+            return None
+
+    middleware = ClearSessionDuringDraftMiddleware()
+    qa = DocumentQA(
+        fast_mode=True,
+        llm_backend="mock",
+        loop_middlewares=(middleware,),
+    )
+    middleware.qa = qa
+
+    result = qa.query_with_trace("What is this?", session_id="stale")
+
+    assert result.loop_report.run.session_id == "stale"
+    assert middleware.cleared is True
+    assert qa.loop_session("stale").report_count == 0
+    assert qa.chat_history == []
+
+
 def test_processed_document_is_wrapped_as_context_provider(tmp_path):
     qa, document = create_processed_mock_qa(tmp_path)
 

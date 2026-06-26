@@ -151,6 +151,63 @@ section {
   margin-bottom: 16px;
 }
 
+.panel-heading > div {
+  min-width: 0;
+}
+
+.active-thread-title {
+  color: var(--subtle);
+  font-size: 0.82rem;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-divider {
+  border-top: 1px solid var(--line);
+  margin: 16px 0;
+}
+
+.thread-list {
+  display: grid;
+  gap: 8px;
+  max-height: 230px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.thread-button {
+  align-items: start;
+  background: rgb(255 255 255 / 2%);
+  border: 1px solid var(--line);
+  color: var(--text);
+  display: grid;
+  gap: 5px;
+  min-height: auto;
+  padding: 0.7rem 0.75rem;
+  text-align: left;
+  width: 100%;
+}
+
+.thread-button[data-active="true"] {
+  background: rgb(117 167 255 / 12%);
+  border-color: rgb(117 167 255 / 55%);
+}
+
+.thread-button span {
+  display: block;
+  font-weight: 750;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-button small {
+  color: var(--subtle);
+  font-size: 0.74rem;
+}
+
 .upload-form,
 .query-form {
   display: grid;

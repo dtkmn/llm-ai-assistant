@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Optional
@@ -20,7 +21,7 @@ except ImportError:
 load_local_env_files()
 apply_native_runtime_defaults()
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -64,11 +65,18 @@ LOGGER = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "web_static"
 MAX_UPLOAD_FILENAME_LENGTH = 180
 MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+MAX_SESSION_ID_LENGTH = 96
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 qa_system: Optional[AILoopEngine] = None
 
 
 class QueryRequest(BaseModel):
     message: str
+    session_id: Optional[str] = None
+
+
+class ClearChatRequest(BaseModel):
+    session_id: Optional[str] = None
 
 
 def get_engine() -> AILoopEngine:
@@ -91,6 +99,32 @@ def safe_upload_name(filename: str | None) -> str:
     if len(name.encode("utf-8")) > MAX_UPLOAD_FILENAME_LENGTH:
         raise HTTPException(status_code=400, detail="Invalid upload filename.")
     return name or "upload"
+
+
+def safe_session_id(session_id: str | None) -> str:
+    value = str(session_id or "default").strip()
+    if not value:
+        return "default"
+    if len(value.encode("utf-8")) > MAX_SESSION_ID_LENGTH:
+        raise HTTPException(status_code=400, detail="Invalid session id.")
+    if not SESSION_ID_PATTERN.fullmatch(value):
+        raise HTTPException(status_code=400, detail="Invalid session id.")
+    return value
+
+
+def clear_chat_history_for_session(engine: AILoopEngine, session_id: str) -> None:
+    history = getattr(engine, "chat_history", None)
+    if not isinstance(history, list):
+        return
+
+    def entry_session_id(entry: object) -> str:
+        if isinstance(entry, dict):
+            return str(entry.get("session_id") or "default").strip() or "default"
+        return "default"
+
+    history[:] = [
+        entry for entry in history if entry_session_id(entry) != session_id
+    ]
 
 
 async def write_upload_file(upload: UploadFile, upload_path: Path) -> None:
@@ -215,14 +249,18 @@ def create_app(engine: Optional[AILoopEngine] = None) -> FastAPI:
         message = request.message.strip()
         if not message:
             raise HTTPException(status_code=400, detail="Message is required.")
-        return query_response_dict(runtime().query_with_trace(message))
+        session_id = safe_session_id(request.session_id)
+        return query_response_dict(
+            runtime().query_with_trace(message, session_id=session_id)
+        )
 
     @api.post("/api/chat/clear")
-    def clear_chat() -> dict:
+    def clear_chat(request: Optional[ClearChatRequest] = Body(default=None)) -> dict:
+        session_id = safe_session_id(request.session_id if request else None)
         current_engine = runtime()
-        current_engine.chat_history.clear()
         if hasattr(current_engine, "clear_loop_session"):
-            current_engine.clear_loop_session("default")
+            current_engine.clear_loop_session(session_id)
+        clear_chat_history_for_session(current_engine, session_id)
         return empty_query_response_dict()
 
     return api
