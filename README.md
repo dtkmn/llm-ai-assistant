@@ -8,6 +8,11 @@ loop: making agent behavior visible, testable, and harder to fake.
 ## Features
 - **Loop Engineering Core:** Treats retrieval, drafting, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
 - **Observable Runtime Reports:** Emits structured loop evidence for context selection, prompt evidence, drafts, verifier decisions, retries, refusals, and replay
+- **Durable Local Runs:** Stores public loop-run summaries and reports in the
+  local thread database so completed runs remain inspectable after restart
+- **Loop Recipes / Skills:** Provides saved loop recipes for goal, instructions,
+  success criteria, stop condition, context provider, model profile, and verifier
+  metadata
 - **Local-first LLM Backend:** Recommended local path is Ollama; cloud or
   gateway deployment uses a generic OpenAI-compatible chat-completions backend
 - **Vector Search:** Uses FAISS for efficient similarity search with
@@ -188,16 +193,19 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
    semantic thread memories are supplied to the model as bounded conversation
    context, and threads/messages are restored after app restart from the local
    SQLite store.
-3. Switch threads from the sidebar when you want separate local conversations
-   and loop traces
-4. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
+3. Pick a Loop Recipe when you want a saved goal/instruction/checking profile.
+   The default recipe is selected automatically.
+4. Switch threads from the sidebar when you want separate local conversations,
+   durable run history, and loop traces.
+5. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
    you want grounded retrieval, citations, and verifier-backed support checks
-5. Click "Index Context" to make the uploaded document available to the loop
-6. Inspect the Loop Timeline to see context selection, retrieve, draft, check,
+6. Click "Index Context" to make the uploaded document available to the loop
+7. Inspect the Loop Timeline to see recipe selection, context selection, retrieve, draft, check,
    verify, retry, refusal, and final-decision steps in order
-7. Inspect the loop summary for the provider, draft count, checks, verifier,
+8. Inspect Durable Runs to see persisted run evidence for the active thread
+9. Inspect the loop summary for the provider, recipe, draft count, checks, verifier,
    retry/refusal state, final decision, and last error
-8. Open the answer trace when you need the detailed redacted `LoopReport`
+10. Open the answer trace when you need the detailed redacted `LoopReport`
 
 ## Technical Details
 
@@ -210,14 +218,18 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 - **Context provider boundary:** `DocumentContextProvider` wraps the current
   document vector store and retrieval chain so later providers can plug into the
   loop without changing the product identity again
-- **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopSession`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
+- **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRecipe`, `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopSession`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
 - **Runtime reports:** `AILoopEngine.query_with_trace()` returns a `QueryResult` with both the legacy answer trace and a first-class `LoopReport`
 - **Thread state:** browser threads are backed by a local SQLite store for
-  thread metadata, messages, and the latest public loop payload. Recent
-  same-thread messages are passed into the runtime as bounded conversation
-  context. Older same-thread messages may also be retrieved by local embedding
-  similarity as semantic thread memory; browser storage is only used to remember
-  the selected thread.
+  thread metadata, messages, durable public loop-run records, and the latest
+  public loop payload. Recent same-thread messages are passed into the runtime
+  as bounded conversation context. Older same-thread messages may also be
+  retrieved by local embedding similarity as semantic thread memory; browser
+  storage is only used to remember the selected thread and recipe.
+- **Loop recipes:** saved local recipes provide reusable goal, instruction,
+  success-criteria, stop-condition, context-provider, profile, and verifier
+  metadata. They guide the run and are recorded in loop metadata, but they do
+  not grant tool permissions or scheduling by themselves.
 - **Runtime session state:** completed loop reports are also retained in bounded
   in-memory `LoopSession` objects keyed by `session_id` for local replay/export
   during the running process.

@@ -1,6 +1,41 @@
 import pytest
 
+from src.loop_engine import (
+    DEFAULT_LOOP_RECIPE_ID,
+    LoopDecision,
+    LoopPhase,
+    LoopReport,
+    LoopRun,
+    LoopStep,
+)
 from src.thread_store import DEFAULT_THREAD_TITLE, ThreadStore
+
+
+def sample_loop_report(*, run_id="run_sample", thread_id="thread_local"):
+    return LoopReport(
+        run=LoopRun(
+            run_id=run_id,
+            session_id=thread_id,
+            user_input="What is Project Phoenix?",
+            context_provider="none",
+            backend="mock",
+            model_label="MockLLM",
+            steps=(
+                LoopStep(
+                    phase=LoopPhase.DRAFT,
+                    decision=LoopDecision.CONTINUE,
+                    name="Draft direct answer",
+                    output_summary="drafted",
+                ),
+            ),
+            final_decision=LoopDecision.NOT_VERIFIED,
+            final_answer="Project Phoenix is a loop workbench.",
+            metadata={
+                "recipe_id": DEFAULT_LOOP_RECIPE_ID,
+                "recipe_name": "General assistant loop",
+            },
+        )
+    )
 
 
 def test_thread_store_persists_threads_messages_and_latest_payload(tmp_path):
@@ -35,6 +70,76 @@ def test_thread_store_persists_threads_messages_and_latest_payload(tmp_path):
     assert restored_thread.latest == {
         "summary": {"final_decision": "not_verified"}
     }
+
+
+def test_thread_store_persists_loop_runs_with_public_report(tmp_path):
+    db_path = tmp_path / "threads.sqlite3"
+    report = sample_loop_report(thread_id="thread_local")
+    public_report = report.to_public_dict()
+    store = ThreadStore(db_path)
+    store.create_thread(thread_id="thread_local")
+
+    store.append_turn(
+        "thread_local",
+        user_content="What is Project Phoenix?",
+        assistant_content="Project Phoenix is a loop workbench.",
+        loop_payload={"summary": {"final_decision": "not_verified"}},
+        raw_loop_report=report.to_dict(),
+        public_loop_report=public_report,
+    )
+    store.close()
+
+    restored = ThreadStore(db_path)
+    thread = restored.get_thread("thread_local")
+    runs = restored.list_loop_runs("thread_local")
+    run = restored.get_loop_run("thread_local", "run_sample")
+
+    assert thread.loop_run_count == 1
+    assert thread.loop_runs[0].run_id == "run_sample"
+    assert len(runs) == 1
+    assert run is not None
+    assert run.summary_dict()["recipe_id"] == DEFAULT_LOOP_RECIPE_ID
+    assert run.detail_dict()["report"] == public_report
+
+
+def test_thread_store_rejects_raw_loop_report_without_public_report():
+    store = ThreadStore.in_memory()
+    report = sample_loop_report(thread_id="thread_local")
+    raw_report = report.to_dict()
+    raw_report["run"]["user_input"] = "SECRET_USER_INPUT"
+    raw_report["run"]["final_answer"] = "SECRET_FINAL_ANSWER"
+    store.create_thread(thread_id="thread_local")
+
+    with pytest.raises(ValueError, match="public_loop_report"):
+        store.append_turn(
+            "thread_local",
+            user_content="What is Project Phoenix?",
+            assistant_content="Project Phoenix is a loop workbench.",
+            raw_loop_report=raw_report,
+        )
+
+    thread = store.get_thread("thread_local")
+    assert thread.message_count == 0
+    assert thread.loop_run_count == 0
+    assert store.list_loop_runs("thread_local") == ()
+
+
+def test_thread_store_clear_removes_loop_runs():
+    store = ThreadStore.in_memory()
+    report = sample_loop_report(thread_id="thread_local")
+    store.create_thread(thread_id="thread_local")
+    store.append_turn(
+        "thread_local",
+        user_content="hello",
+        assistant_content="answer",
+        raw_loop_report=report.to_dict(),
+        public_loop_report=report.to_public_dict(),
+    )
+
+    store.clear_thread("thread_local")
+
+    assert store.get_thread("thread_local").loop_run_count == 0
+    assert store.list_loop_runs("thread_local") == ()
 
 
 def test_thread_store_ensures_and_clears_thread():
@@ -238,6 +343,27 @@ def test_thread_store_append_turn_skips_recreated_thread_with_same_id():
     assert store.get_thread("thread_aba").messages == ()
 
 
+def test_thread_store_append_turn_skips_loop_run_when_generation_changed():
+    store = ThreadStore.in_memory()
+    thread = store.create_thread(thread_id="thread_local")
+    report = sample_loop_report(thread_id="thread_local")
+
+    store.clear_thread("thread_local")
+    result = store.append_turn(
+        "thread_local",
+        user_content="stale",
+        assistant_content="stale answer",
+        raw_loop_report=report.to_dict(),
+        public_loop_report=report.to_public_dict(),
+        expected_generation=thread.generation,
+        expected_instance_id=thread.instance_id,
+    )
+
+    assert result is None
+    assert store.get_thread("thread_local").messages == ()
+    assert store.list_loop_runs("thread_local") == ()
+
+
 def test_thread_store_append_turn_requires_complete_guard():
     store = ThreadStore.in_memory()
     thread = store.create_thread(thread_id="thread_guard")
@@ -249,3 +375,62 @@ def test_thread_store_append_turn_requires_complete_guard():
             assistant_content="stale answer",
             expected_generation=thread.generation,
         )
+
+
+def test_thread_store_persists_loop_recipes(tmp_path):
+    db_path = tmp_path / "threads.sqlite3"
+    store = ThreadStore(db_path)
+
+    default_recipe = store.ensure_default_recipe()
+    custom = store.create_recipe(
+        recipe_id="recipe_weekly_review",
+        name="Weekly review",
+        description="Summarize the week.",
+        goal="Produce a concise weekly review.",
+        instructions="Be direct and list risks first.",
+        success_criteria=("Risks are listed.", "Next actions are clear."),
+        stop_condition="Stop after one accepted summary.",
+        context_provider="thread",
+        model_profile="quality",
+        verifier="human_review",
+    )
+    store.close()
+
+    restored = ThreadStore(db_path)
+    recipes = restored.list_recipes()
+    restored_custom = restored.get_recipe("recipe_weekly_review")
+
+    assert recipes[0].recipe_id == DEFAULT_LOOP_RECIPE_ID
+    assert default_recipe.recipe_id == DEFAULT_LOOP_RECIPE_ID
+    assert restored_custom.recipe_id == custom.recipe_id
+    assert restored_custom.name == custom.name
+    assert restored_custom.goal == custom.goal
+    assert restored_custom.success_criteria == (
+        "Risks are listed.",
+        "Next actions are clear.",
+    )
+
+
+def test_thread_store_updates_and_deletes_custom_recipes_only():
+    store = ThreadStore.in_memory()
+    store.ensure_default_recipe()
+    store.create_recipe(
+        recipe_id="recipe_custom",
+        name="Custom",
+        goal="Do a custom loop.",
+    )
+
+    updated = store.update_recipe(
+        "recipe_custom",
+        name="Sharper custom",
+        success_criteria=("Passes review.",),
+    )
+    deleted_default = store.delete_recipe(DEFAULT_LOOP_RECIPE_ID)
+    deleted_custom = store.delete_recipe("recipe_custom")
+
+    assert updated.name == "Sharper custom"
+    assert updated.success_criteria == ("Passes review.",)
+    assert deleted_default is False
+    assert deleted_custom is True
+    assert store.get_recipe("recipe_custom") is None
+    assert store.get_recipe(DEFAULT_LOOP_RECIPE_ID) is not None

@@ -69,10 +69,10 @@ first context provider, not the product boundary.
   zero citations, and `not_verified`; do not run document verifier support
   claims without prompt evidence.
 - Typed loop records are the contract surface for future agent work. Add or
-  update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,
-  `LoopSession`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
-  `HumanReviewRequest` before adding planner, multi-agent, tool, replay, or
-  framework-adapter behavior.
+  update `LoopRecipe`, `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`,
+  `LoopPolicy`, `LoopSession`, `GuardrailDecision`, `LoopMiddleware`,
+  `VerificationResult`, and `HumanReviewRequest` before adding planner,
+  multi-agent, tool, replay, or framework-adapter behavior.
 - `AILoopEngine.query_with_trace()` must expose a `LoopReport` that matches the
   actual query path: prompt evidence, draft, mechanical check, verifier outcome,
   retry/refusal state, and final answer.
@@ -80,14 +80,20 @@ first context provider, not the product boundary.
   state. Local JSONL export may write raw reports for developer replay/debug
   artifacts; public UI traces must continue using the redacted report surface.
 - Web/API threads must pass an explicit validated `session_id` into the runtime.
-  FastAPI owns local SQLite persistence for thread metadata, messages, and
-  latest public loop payloads. Recent same-thread messages should be passed as
-  bounded conversation context so follow-up questions can resolve references
-  without leaking across threads. Older same-thread messages may be retrieved by
-  embedding similarity as semantic thread memory, but public loop traces should
-  expose only memory counts/status, not raw memory text. Browser storage is only
-  a selected-thread hint. Do not imply authenticated, cross-device, or
+  FastAPI owns local SQLite persistence for thread metadata, messages, durable
+  public loop-run records, recipes, and latest public loop payloads. Recent
+  same-thread messages should be passed as bounded conversation context so
+  follow-up questions can resolve references without leaking across threads.
+  Older same-thread messages may be retrieved by embedding similarity as
+  semantic thread memory, but public loop traces should expose only memory
+  counts/status, not raw memory text. Browser storage is only a
+  selected-thread/recipe hint. Do not imply authenticated, cross-device, or
   account-backed history until that architecture exists.
+- Loop recipes are reusable local skill definitions: goal, instructions,
+  success criteria, stop condition, context provider, model profile, and
+  verifier metadata. They may guide drafting and must be recorded in loop
+  metadata, but they must not grant tool access, scheduling, or autonomous
+  action by themselves.
 - Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
   or request human review, but it must not introduce autonomous tools by itself.
 - Upload status must say `indexed` for real backends, because endpoint readiness
@@ -108,8 +114,8 @@ first context provider, not the product boundary.
   Mock/demo mode must report mechanically valid answers as `not_verified`.
 - Ollama model thinking is model-emitted debug signal. Show it only when the
   provider exposes it, label it as unverified, keep it out of final answer text,
-  and drop/redact it for refused, blocked, or terminal-guardrail-redacted
-  results. GPT-OSS thinking must use `OLLAMA_THINK_LEVEL` with `low`, `medium`,
+  and drop/redact it for refused, blocked, or terminal-public-redacted results.
+  GPT-OSS thinking must use `OLLAMA_THINK_LEVEL` with `low`, `medium`,
   or `high`; boolean `think` values are ignored by that model family.
 - Golden document evals must exercise the full provider-free QA loop: upload,
   retrieval, cited answer, self-check, retry, and fail-closed refusal. Do not

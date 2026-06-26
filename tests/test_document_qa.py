@@ -362,6 +362,46 @@ def test_semantic_memory_status_is_sanitized_in_public_loop_metadata():
     assert memory_step.metadata["semantic_memory_status"] == "unavailable"
 
 
+def test_no_context_query_applies_loop_recipe_to_prompt_and_report():
+    captured_prompts = []
+    recipe = {
+        "recipe_id": "recipe_explainer",
+        "name": "Plain-language explainer",
+        "goal": "Explain technical ideas in simple language.",
+        "instructions": "Avoid jargon unless you define it.",
+        "success_criteria": ["Uses an analogy.", "Names uncertainty."],
+        "stop_condition": "Stop after the answer is clear.",
+        "context_provider": "none",
+        "model_profile": "quality",
+        "verifier": "default",
+    }
+    qa = DocumentQA(fast_mode=False, llm_backend="mock")
+    qa.llm = SimpleNamespace(
+        invoke=lambda prompt: captured_prompts.append(prompt)
+        or "Dynamic programming is like keeping a notebook of solved subproblems.",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace(
+        "Explain dynamic programming.",
+        session_id="recipe_runtime",
+        loop_recipe=recipe,
+    )
+
+    prompt = captured_prompts[0]
+    assert "Loop recipe guidance" in prompt
+    assert "Plain-language explainer" in prompt
+    assert "Avoid jargon unless you define it." in prompt
+    assert "Uses an analogy." in prompt
+    run = result.loop_report.run
+    assert run.metadata["recipe_id"] == "recipe_explainer"
+    assert run.metadata["recipe_name"] == "Plain-language explainer"
+    recipe_step = run.steps[0]
+    assert recipe_step.phase == LoopPhase.INPUT
+    assert recipe_step.name == "Apply loop recipe"
+    assert recipe_step.metadata["success_criteria_count"] == 2
+
+
 def test_no_context_query_strips_inline_citation_markers():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.llm = SimpleNamespace(

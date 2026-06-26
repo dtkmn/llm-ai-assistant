@@ -244,6 +244,8 @@ MAX_MAX_OUTPUT_TOKENS = 8192
 MAX_CONVERSATION_CONTEXT_MESSAGES = 12
 MAX_CONVERSATION_CONTEXT_CHARS = 6000
 MAX_CONVERSATION_CONTEXT_MESSAGE_CHARS = 1200
+MAX_LOOP_RECIPE_FIELD_CHARS = 1600
+MAX_LOOP_RECIPE_CRITERIA = 8
 SEMANTIC_MEMORY_STATUSES = {"not_requested", "retrieved", "empty", "unavailable"}
 _RETRIEVAL_EXPORTS = {
     "DocumentRetrievalChain",
@@ -1674,6 +1676,66 @@ class AILoopEngine:
         value = str(status or "not_requested").strip().lower()
         return value if value in SEMANTIC_MEMORY_STATUSES else "unavailable"
 
+    def _normalize_loop_recipe(
+        self,
+        loop_recipe: Optional[Mapping[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(loop_recipe, Mapping):
+            return None
+
+        def field(name: str, default: str = "") -> str:
+            return str(loop_recipe.get(name) or default).strip()[
+                :MAX_LOOP_RECIPE_FIELD_CHARS
+            ]
+
+        success_criteria = []
+        for criterion in loop_recipe.get("success_criteria") or ():
+            text = str(criterion or "").strip()[:MAX_LOOP_RECIPE_FIELD_CHARS]
+            if text:
+                success_criteria.append(text)
+            if len(success_criteria) >= MAX_LOOP_RECIPE_CRITERIA:
+                break
+
+        recipe_id = field("recipe_id")
+        name = field("name")
+        goal = field("goal")
+        if not recipe_id or not name or not goal:
+            return None
+        return {
+            "recipe_id": recipe_id,
+            "name": name,
+            "goal": goal,
+            "instructions": field("instructions"),
+            "success_criteria": success_criteria,
+            "stop_condition": field("stop_condition"),
+            "context_provider": field("context_provider", "auto"),
+            "model_profile": field("model_profile", "quality"),
+            "verifier": field("verifier", "default"),
+        }
+
+    def _format_loop_recipe_guidance(
+        self,
+        loop_recipe: Optional[Mapping[str, Any]],
+    ) -> str:
+        recipe = self._normalize_loop_recipe(loop_recipe)
+        if not recipe:
+            return ""
+        lines = [
+            "Loop recipe guidance "
+            "(trusted runtime configuration; not user-provided context):",
+            f"Recipe: {recipe['name']}",
+            f"Goal: {recipe['goal']}",
+        ]
+        if recipe["instructions"]:
+            lines.append(f"Instructions: {recipe['instructions']}")
+        if recipe["success_criteria"]:
+            lines.append("Success criteria:")
+            for criterion in recipe["success_criteria"]:
+                lines.append(f"- {criterion}")
+        if recipe["stop_condition"]:
+            lines.append(f"Stop condition: {recipe['stop_condition']}")
+        return "\n".join(lines)
+
     def _format_conversation_context(
         self,
         conversation_history: Sequence[Mapping[str, str]],
@@ -1724,16 +1786,36 @@ class AILoopEngine:
             f"Current question: {question}"
         )
 
+    def _question_with_loop_recipe(
+        self,
+        question: str,
+        loop_recipe: Optional[Mapping[str, Any]],
+    ) -> str:
+        recipe_guidance = self._format_loop_recipe_guidance(loop_recipe)
+        if not recipe_guidance:
+            return question
+        return (
+            f"{recipe_guidance}\n\n"
+            "Apply the recipe to the current task without treating recipe text "
+            "as evidence.\n\n"
+            f"Current task: {question}"
+        )
+
     def _direct_answer_prompt(
         self,
         question: str,
         conversation_history: Optional[Sequence[Mapping[str, str]]] = None,
         semantic_memory: Optional[Sequence[Mapping[str, str]]] = None,
+        loop_recipe: Optional[Mapping[str, Any]] = None,
     ) -> str:
         effective_question = self._question_with_conversation_context(
             question,
             conversation_history or (),
             semantic_memory or (),
+        )
+        effective_question = self._question_with_loop_recipe(
+            effective_question,
+            loop_recipe,
         )
         return (
             "You are AI Loop Engine running without an external context provider. "
@@ -1827,9 +1909,11 @@ class AILoopEngine:
         conversation_context_turns: int = 0,
         semantic_memory_turns: int = 0,
         semantic_memory_status: str = "not_requested",
+        loop_recipe: Optional[Mapping[str, Any]] = None,
     ) -> LoopRun:
         context_provider = self._active_context_provider_for_run(active_state)
         context_provider_type = self._context_provider_type_for_run(active_state)
+        recipe = self._normalize_loop_recipe(loop_recipe)
         untrusted_inputs = ["model_output", "future_tool_output"]
         if context_provider_type == "document":
             untrusted_inputs = ["document_text", "retrieved_chunks", *untrusted_inputs]
@@ -1849,6 +1933,10 @@ class AILoopEngine:
                 "conversation_context_turns": conversation_context_turns,
                 "semantic_memory_turns": semantic_memory_turns,
                 "semantic_memory_status": semantic_memory_status,
+                "recipe_id": recipe["recipe_id"] if recipe else None,
+                "recipe_name": recipe["name"] if recipe else None,
+                "recipe_goal": recipe["goal"] if recipe else None,
+                "recipe_verifier": recipe["verifier"] if recipe else None,
                 "profile": "FAST" if self.fast_mode else "QUALITY",
                 "allow_tool_calls": False,
                 "untrusted_inputs": untrusted_inputs,
@@ -2183,6 +2271,7 @@ class AILoopEngine:
         conversation_history: Optional[Sequence[object]] = None,
         semantic_memory: Optional[Sequence[object]] = None,
         semantic_memory_status: str = "not_requested",
+        loop_recipe: Optional[Mapping[str, Any]] = None,
     ) -> QueryResult:
         """Answer a user query and return the retrieved evidence used."""
         active_state = self._snapshot_active_document_state()
@@ -2196,10 +2285,15 @@ class AILoopEngine:
         semantic_memory_status = self._normalize_semantic_memory_status(
             semantic_memory_status
         )
+        loop_recipe_context = self._normalize_loop_recipe(loop_recipe)
         effective_prompt = self._question_with_conversation_context(
             clean_prompt,
             conversation_context,
             semantic_memory_context,
+        )
+        draft_prompt = self._question_with_loop_recipe(
+            effective_prompt,
+            loop_recipe_context,
         )
         run = self._start_loop_run(
             prompt=clean_prompt,
@@ -2208,6 +2302,7 @@ class AILoopEngine:
             conversation_context_turns=len(conversation_context),
             semantic_memory_turns=len(semantic_memory_context),
             semantic_memory_status=semantic_memory_status,
+            loop_recipe=loop_recipe_context,
         )
         self._guard_loop_report_recording(
             run.run_id,
@@ -2250,6 +2345,33 @@ class AILoopEngine:
                 final_decision=LoopDecision.BLOCK,
                 error_message="empty_question",
             )
+
+        if loop_recipe_context:
+            run, guardrail_decision = self._append_loop_step(
+                run,
+                self._loop_step(
+                    LoopPhase.INPUT,
+                    decision=LoopDecision.CONTINUE,
+                    name="Apply loop recipe",
+                    output_summary=loop_recipe_context["name"],
+                    metadata={
+                        "recipe_id": loop_recipe_context["recipe_id"],
+                        "recipe_name": loop_recipe_context["name"],
+                        "recipe_goal": loop_recipe_context["goal"],
+                        "success_criteria_count": len(
+                            loop_recipe_context["success_criteria"]
+                        ),
+                        "stop_condition": loop_recipe_context["stop_condition"],
+                    },
+                ),
+            )
+            if guardrail_decision:
+                return self._finish_guardrail_query_result(
+                    decision=guardrail_decision,
+                    question=clean_prompt,
+                    active_state=active_state,
+                    run=run,
+                )
 
         if not self.llm:
             try:
@@ -2408,6 +2530,7 @@ class AILoopEngine:
                             clean_prompt,
                             conversation_history=conversation_context,
                             semantic_memory=semantic_memory_context,
+                            loop_recipe=loop_recipe_context,
                         )
                     )
                 ).strip()
@@ -2579,7 +2702,7 @@ class AILoopEngine:
                             run=run,
                         )
                     chain_result = active_state.retrieval_chain.draft_with_trace(
-                        effective_prompt,
+                        draft_prompt,
                         retrieved_context,
                     )
                 else:
@@ -2701,7 +2824,7 @@ class AILoopEngine:
                             run=run,
                         )
                     retry_result = active_state.retrieval_chain.retry_with_trace(
-                        effective_prompt,
+                        draft_prompt,
                         chain_result,
                         self_check_instruction=self._self_check_retry_instruction(
                             self_check
@@ -2874,6 +2997,12 @@ class AILoopEngine:
                     "self_check_outcome": self_check.outcome if self_check else None,
                     "retry_attempted": (
                         self_check.retry_attempted if self_check else False
+                    ),
+                    "recipe_id": (
+                        loop_recipe_context["recipe_id"] if loop_recipe_context else None
+                    ),
+                    "recipe_name": (
+                        loop_recipe_context["name"] if loop_recipe_context else None
                     ),
                 },
             )

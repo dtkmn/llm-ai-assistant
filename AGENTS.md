@@ -46,8 +46,8 @@ Primary runtime files:
   verification result mapping. Keep it free of native-heavy imports.
 - `src/DocumentQA.py`: legacy compatibility module for old imports and
   monkeypatch targets. Do not add new implementation code here.
-- `src/loop_engine.py`: provider-neutral loop primitives for typed run, step,
-  policy, verifier, human-review, session, and report records.
+- `src/loop_engine.py`: provider-neutral loop primitives for typed recipe, run,
+  step, policy, verifier, human-review, session, and report records.
 - `src/loop_eval.py`: unified provider-free and optional live Ollama loop eval
   CLI with JSON artifacts containing scored `LoopReport` evidence.
 - `src/adapters/`: dependency-free framework-shaped exports from loop reports.
@@ -58,9 +58,9 @@ Primary runtime files:
   LangGraph manifest artifacts.
 - `src/app.py`: FastAPI backend, static frontend serving, upload/query routes,
   and user-facing status messages.
-- `src/thread_store.py`: local SQLite thread metadata, message, and latest
-  public loop payload persistence. Browser storage must remain only a
-  selected-thread hint.
+- `src/thread_store.py`: local SQLite thread metadata, message, durable
+  loop-run, recipe, semantic-memory, and latest public loop payload
+  persistence. Browser storage must remain only a selected-thread/recipe hint.
 - `src/web_contract.py`: shared API/frontend response shaping for runtime
   status, upload messages, loop timeline, loop summary, and redacted trace
   payloads.
@@ -110,7 +110,7 @@ Primary runtime files:
 - Ollama model-emitted thinking is a UI/debugging signal, not evidence. Keep it
   separate from the final answer, label it as unverified, never synthesize it in
   mock mode, and redact/drop it whenever the final answer is refused, blocked,
-  or hidden by terminal guardrail redaction. GPT-OSS thinking must use a
+  or hidden by terminal public redaction. GPT-OSS thinking must use a
   validated `OLLAMA_THINK_LEVEL` of `low`, `medium`, or `high`; do not send
   boolean `think` values to GPT-OSS models.
 - Golden document evals must remain provider-free and deterministic. They should
@@ -170,10 +170,10 @@ Primary runtime files:
 - Product identity is AI Loop Engine. Document answering is now a
   document context provider capability, not the repo's strategic identity.
 - Typed loop records are the contract surface for future agent work. Add or
-  update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,
-  `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
-  `HumanReviewRequest` before adding planner, multi-agent, tool, replay, or
-  framework-adapter behavior.
+  update `LoopRecipe`, `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`,
+  `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`,
+  and `HumanReviewRequest` before adding planner, multi-agent, tool, replay,
+  or framework-adapter behavior.
 - `AILoopEngine.query_with_trace()` must expose a `LoopReport` that matches the
   actual query path: prompt evidence, draft, mechanical check, verifier outcome,
   retry/refusal state, and final answer.
@@ -183,14 +183,19 @@ Primary runtime files:
   the redacted report surface.
 - Web/API threads must pass an explicit validated `session_id` into
   `AILoopEngine.query_with_trace()`. FastAPI owns local SQLite persistence for
-  thread metadata, messages, and latest public loop payloads. Recent
-  same-thread messages should be passed as bounded conversation context so
-  follow-up questions can resolve references without leaking across threads.
-  Older same-thread messages may be retrieved by embedding similarity as
-  semantic thread memory, but public loop traces should expose only memory
-  counts/status, not raw memory text. Browser storage is only a selected-thread
-  hint. Do not imply authenticated, cross-device, or account-backed history
-  until that architecture exists.
+  thread metadata, messages, durable public loop-run records, recipes, and
+  latest public loop payloads. Recent same-thread messages should be passed as
+  bounded conversation context so follow-up questions can resolve references
+  without leaking across threads. Older same-thread messages may be retrieved
+  by embedding similarity as semantic thread memory, but public loop traces
+  should expose only memory counts/status, not raw memory text. Browser storage
+  is only a selected-thread/recipe hint. Do not imply authenticated,
+  cross-device, or account-backed history until that architecture exists.
+- Loop recipes are reusable local skill definitions: goal, instructions,
+  success criteria, stop condition, context provider, model profile, and
+  verifier metadata. They may guide drafting and must be recorded in loop
+  metadata, but they must not grant tool access, scheduling, or autonomous
+  action by themselves.
 - Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
   or request human review, but it must not introduce autonomous tools by itself.
 - Framework adapters must export `LoopReport`/`LoopSession` surfaces before they

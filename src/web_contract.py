@@ -12,6 +12,7 @@ try:
         DocumentQAStatus,
         QueryResult,
     )
+    from .loop_engine import PUBLIC_REDACTION_REASON, PUBLIC_REDACTION_TEXT
 except ImportError:
     from ai_loop_engine import (
         MAX_DOCUMENT_CHUNKS,
@@ -19,10 +20,11 @@ except ImportError:
         DocumentQAStatus,
         QueryResult,
     )
+    from loop_engine import PUBLIC_REDACTION_REASON, PUBLIC_REDACTION_TEXT
 
 
 APP_TITLE = "AI Loop Engine"
-TERMINAL_GUARDRAIL_REDACTION = "[redacted: terminal guardrail decision]"
+TERMINAL_PUBLIC_REDACTION = PUBLIC_REDACTION_TEXT
 MODEL_THINKING_REDACTION = "[redacted: terminal loop decision]"
 MODEL_THINKING_LABEL = "Model Thinking (unverified)"
 MODEL_THINKING_NOTE = (
@@ -172,7 +174,7 @@ def public_trace_error(
 ) -> Optional[str]:
     redaction = (public_loop_report or {}).get("public_redaction") or {}
     if redaction.get("applied"):
-        return "terminal_guardrail_decision"
+        return PUBLIC_REDACTION_REASON
     return query_result.trace.error_message
 
 
@@ -184,7 +186,7 @@ def public_loop_report_dict(query_result: QueryResult) -> Optional[dict]:
     )
 
 
-def terminal_guardrail_redaction_applied(public_loop_report: Optional[dict]) -> bool:
+def terminal_public_redaction_applied(public_loop_report: Optional[dict]) -> bool:
     redaction = (public_loop_report or {}).get("public_redaction") or {}
     return bool(redaction.get("applied"))
 
@@ -284,6 +286,8 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
             "retrieved_chunk_count": 0,
             "semantic_memory_count": 0,
             "semantic_memory_status": None,
+            "recipe_id": None,
+            "recipe_name": None,
             "draft_attempt_count": 0,
             "mechanical_check": None,
             "verifier": None,
@@ -331,6 +335,8 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
         "semantic_memory_status": run.get("metadata", {}).get(
             "semantic_memory_status"
         ),
+        "recipe_id": run.get("metadata", {}).get("recipe_id"),
+        "recipe_name": run.get("metadata", {}).get("recipe_name"),
         "draft_attempt_count": sum(
             1 for step in steps if step.get("phase") == "draft"
         ),
@@ -449,7 +455,7 @@ def answer_trace_dict(query_result: Optional[QueryResult]) -> dict:
     trace = query_result.trace
     self_check = trace.self_check
     public_loop_report = public_loop_report_dict(query_result)
-    terminal_redaction = terminal_guardrail_redaction_applied(public_loop_report)
+    terminal_redaction = terminal_public_redaction_applied(public_loop_report)
     final_decision = ((public_loop_report or {}).get("run") or {}).get(
         "final_decision"
     )
@@ -460,11 +466,11 @@ def answer_trace_dict(query_result: Optional[QueryResult]) -> dict:
         "requires_review",
     }
     question = (
-        TERMINAL_GUARDRAIL_REDACTION
+        TERMINAL_PUBLIC_REDACTION
         if terminal_redaction
         else trace.question
     )
-    answer = TERMINAL_GUARDRAIL_REDACTION if terminal_redaction else query_result.answer
+    answer = TERMINAL_PUBLIC_REDACTION if terminal_redaction else query_result.answer
     return {
         "question": question,
         "answer": answer,
@@ -507,8 +513,8 @@ def answer_trace_dict(query_result: Optional[QueryResult]) -> dict:
 def query_response_dict(query_result: QueryResult) -> dict:
     public_loop_report = public_loop_report_dict(query_result)
     answer = (
-        TERMINAL_GUARDRAIL_REDACTION
-        if terminal_guardrail_redaction_applied(public_loop_report)
+        TERMINAL_PUBLIC_REDACTION
+        if terminal_public_redaction_applied(public_loop_report)
         else query_result.answer
     )
     return {

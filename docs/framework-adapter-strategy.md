@@ -44,7 +44,7 @@ The useful internal adapter boundary is already mostly present:
   JSONL export for local replay/debug artifacts.
 - `LoopPolicy`: explicit guardrail policy, including no autonomous tools by
   default.
-- Public trace redaction: user-facing traces can redact terminal guardrail
+- Public trace redaction: user-facing traces can redact terminal-decision
   content; raw local replay artifacts are developer diagnostics.
 
 The adapter strategy should export these surfaces. It should not replace them.

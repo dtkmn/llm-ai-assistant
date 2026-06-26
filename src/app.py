@@ -35,6 +35,7 @@ try:
         ThreadStore,
         safe_title,
     )
+    from .loop_engine import DEFAULT_LOOP_RECIPE_ID
     from .web_contract import (
         APP_TITLE,
         TEXT_ENCODING_OPTIONS,
@@ -54,6 +55,7 @@ except ImportError:
         ThreadStore,
         safe_title,
     )
+    from loop_engine import DEFAULT_LOOP_RECIPE_ID
     from web_contract import (
         APP_TITLE,
         TEXT_ENCODING_OPTIONS,
@@ -87,6 +89,7 @@ thread_store_system: Optional[ThreadStore] = None
 class QueryRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+    recipe_id: Optional[str] = None
 
 
 class ClearChatRequest(BaseModel):
@@ -99,6 +102,32 @@ class ThreadCreateRequest(BaseModel):
 
 class ThreadUpdateRequest(BaseModel):
     title: Optional[str] = None
+
+
+class RecipeWriteRequest(BaseModel):
+    name: str
+    goal: str
+    description: Optional[str] = None
+    instructions: Optional[str] = None
+    success_criteria: Optional[list[str]] = None
+    stop_condition: Optional[str] = None
+    context_provider: Optional[str] = None
+    model_profile: Optional[str] = None
+    verifier: Optional[str] = None
+    metadata: Optional[dict] = None
+
+
+class RecipePatchRequest(BaseModel):
+    name: Optional[str] = None
+    goal: Optional[str] = None
+    description: Optional[str] = None
+    instructions: Optional[str] = None
+    success_criteria: Optional[list[str]] = None
+    stop_condition: Optional[str] = None
+    context_provider: Optional[str] = None
+    model_profile: Optional[str] = None
+    verifier: Optional[str] = None
+    metadata: Optional[dict] = None
 
 
 def get_engine() -> AILoopEngine:
@@ -148,6 +177,17 @@ def safe_session_id(session_id: str | None) -> str:
     return value
 
 
+def safe_path_id(value: str | None, *, label: str) -> str:
+    record_id = str(value or "").strip()
+    if (
+        not record_id
+        or len(record_id.encode("utf-8")) > MAX_SESSION_ID_LENGTH
+        or not SESSION_ID_PATTERN.fullmatch(record_id)
+    ):
+        raise HTTPException(status_code=400, detail=f"Invalid {label}.")
+    return record_id
+
+
 def title_from_message(message: str) -> str:
     return safe_title(message)
 
@@ -158,6 +198,22 @@ def thread_detail_response(thread) -> dict:
 
 def thread_summary_response(thread) -> dict:
     return thread.summary_dict()
+
+
+def loop_run_summary_response(run) -> dict:
+    return run.summary_dict()
+
+
+def loop_run_detail_response(run) -> dict:
+    return run.detail_dict(public=True)
+
+
+def recipe_summary_response(recipe) -> dict:
+    return recipe.summary_dict()
+
+
+def recipe_detail_response(recipe) -> dict:
+    return recipe.to_dict()
 
 
 def conversation_history_from_messages(messages) -> list[dict[str, str]]:
@@ -314,6 +370,7 @@ def create_app(
     def config() -> dict:
         return {
             "title": APP_TITLE,
+            "default_recipe_id": DEFAULT_LOOP_RECIPE_ID,
             "text_encodings": [
                 {"label": label, "value": value}
                 for label, value in TEXT_ENCODING_OPTIONS.items()
@@ -367,6 +424,99 @@ def create_app(
                 current_engine.clear_loop_session(safe_id)
             clear_chat_history_for_session(current_engine, safe_id)
         return {"deleted": True, "thread_id": safe_id}
+
+    @api.get("/api/threads/{thread_id}/runs")
+    def list_thread_runs(thread_id: str) -> dict:
+        safe_id = safe_session_id(thread_id)
+        if threads().get_thread(safe_id) is None:
+            raise HTTPException(status_code=404, detail="Thread not found.")
+        return {
+            "thread_id": safe_id,
+            "runs": [
+                loop_run_summary_response(run)
+                for run in threads().list_loop_runs(safe_id)
+            ],
+        }
+
+    @api.get("/api/threads/{thread_id}/runs/{run_id}")
+    def get_thread_run(thread_id: str, run_id: str) -> dict:
+        safe_id = safe_session_id(thread_id)
+        safe_run_id = safe_path_id(run_id, label="run id")
+        run = threads().get_loop_run(safe_id, safe_run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Loop run not found.")
+        return loop_run_detail_response(run)
+
+    @api.get("/api/recipes")
+    def list_recipes() -> dict:
+        store = threads()
+        recipes = store.list_recipes()
+        return {
+            "default_recipe_id": DEFAULT_LOOP_RECIPE_ID,
+            "recipes": [recipe_summary_response(recipe) for recipe in recipes],
+        }
+
+    @api.post("/api/recipes")
+    def create_recipe(request: RecipeWriteRequest) -> dict:
+        try:
+            recipe = threads().create_recipe(
+                name=request.name,
+                description=request.description or "",
+                goal=request.goal,
+                instructions=request.instructions or "",
+                success_criteria=tuple(request.success_criteria or ()),
+                stop_condition=request.stop_condition or "",
+                context_provider=request.context_provider or "auto",
+                model_profile=request.model_profile or "quality",
+                verifier=request.verifier or "default",
+                metadata=request.metadata or {},
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return recipe_detail_response(recipe)
+
+    @api.get("/api/recipes/{recipe_id}")
+    def get_recipe(recipe_id: str) -> dict:
+        safe_recipe_id = safe_path_id(recipe_id, label="recipe id")
+        recipe = threads().get_recipe(safe_recipe_id)
+        if recipe is None:
+            raise HTTPException(status_code=404, detail="Recipe not found.")
+        return recipe_detail_response(recipe)
+
+    @api.patch("/api/recipes/{recipe_id}")
+    def update_recipe(recipe_id: str, request: RecipePatchRequest) -> dict:
+        safe_recipe_id = safe_path_id(recipe_id, label="recipe id")
+        try:
+            recipe = threads().update_recipe(
+                safe_recipe_id,
+                name=request.name,
+                description=request.description,
+                goal=request.goal,
+                instructions=request.instructions,
+                success_criteria=(
+                    tuple(request.success_criteria)
+                    if request.success_criteria is not None
+                    else None
+                ),
+                stop_condition=request.stop_condition,
+                context_provider=request.context_provider,
+                model_profile=request.model_profile,
+                verifier=request.verifier,
+                metadata=request.metadata,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Recipe not found.") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return recipe_detail_response(recipe)
+
+    @api.delete("/api/recipes/{recipe_id}")
+    def delete_recipe(recipe_id: str) -> dict:
+        safe_recipe_id = safe_path_id(recipe_id, label="recipe id")
+        deleted = threads().delete_recipe(safe_recipe_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Recipe not found.")
+        return {"deleted": True, "recipe_id": safe_recipe_id}
 
     @api.post("/api/documents")
     async def upload_document(
@@ -428,6 +578,16 @@ def create_app(
         session_id = safe_session_id(request.session_id)
         store = threads()
         thread = store.ensure_thread(session_id)
+        recipe_id = (
+            safe_path_id(request.recipe_id, label="recipe id")
+            if request.recipe_id
+            else DEFAULT_LOOP_RECIPE_ID
+        )
+        recipe = store.get_recipe(recipe_id)
+        if recipe is None and recipe_id == DEFAULT_LOOP_RECIPE_ID:
+            recipe = store.ensure_default_recipe()
+        if recipe is None:
+            raise HTTPException(status_code=404, detail="Recipe not found.")
         expected_generation = thread.generation
         recent_messages = store.recent_messages(
             session_id,
@@ -443,13 +603,22 @@ def create_app(
             exclude_message_ids=tuple(message.id for message in recent_messages),
         )
         payload = query_response_dict(
-            current_runtime.query_with_trace(
+            query_result := current_runtime.query_with_trace(
                 message,
                 session_id=session_id,
                 conversation_history=conversation_history,
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
+                loop_recipe=recipe.runtime_dict(),
             )
+        )
+        raw_loop_report = (
+            query_result.loop_report.to_dict() if query_result.loop_report else None
+        )
+        public_loop_report = (
+            query_result.loop_report.to_public_dict()
+            if query_result.loop_report
+            else None
         )
         persisted_turn = store.append_turn(
             session_id,
@@ -457,12 +626,21 @@ def create_app(
             assistant_content=str(payload.get("answer") or ""),
             thinking=(payload.get("trace") or {}).get("model_thinking"),
             loop_payload=payload,
+            raw_loop_report=raw_loop_report,
+            public_loop_report=public_loop_report,
             expected_generation=expected_generation,
             expected_instance_id=thread.instance_id,
             title_if_empty=title_from_message(message),
         )
         if persisted_turn:
             index_thread_memory(current_runtime, store, persisted_turn)
+            if raw_loop_report:
+                run_id = ((raw_loop_report.get("run") or {}).get("run_id"))
+                if run_id:
+                    persisted_run = store.get_loop_run(session_id, str(run_id))
+                    if persisted_run is not None:
+                        payload["run"] = persisted_run.summary_dict()
+        payload["recipe"] = recipe.summary_dict()
         return payload
 
     @api.post("/api/chat/clear")

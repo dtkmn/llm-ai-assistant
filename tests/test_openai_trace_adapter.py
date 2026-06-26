@@ -18,6 +18,8 @@ from src.loop_engine import (
     LoopRun,
     LoopSession,
     LoopStep,
+    PUBLIC_REDACTION_REASON,
+    PUBLIC_REDACTION_TEXT,
     VerificationOutcome,
     VerificationResult,
 )
@@ -272,7 +274,7 @@ def test_export_report_is_json_serializable_and_does_not_mutate_report():
     assert json.loads(json.dumps(payload))["trace"]["trace_id"] == "trace_run_phoenix"
 
 
-def test_public_export_redacts_terminal_guardrail_content_by_default():
+def test_public_export_redacts_terminal_decision_content_by_default():
     secret = "blocked draft should not leak"
     payload = export_report(guardrail_blocked_report(secret))
     serialized = json.dumps(payload)
@@ -281,9 +283,7 @@ def test_public_export_redacts_terminal_guardrail_content_by_default():
     assert secret not in serialized
     assert payload["source_report"]["public_redaction"]["applied"] is True
     assert payload["trace"]["metadata"]["loop_metadata"]["redacted"] is True
-    assert payload["trace"]["spans"][0]["span_data"]["output"] == (
-        "[redacted: terminal guardrail decision]"
-    )
+    assert payload["trace"]["spans"][0]["span_data"]["output"] == PUBLIC_REDACTION_TEXT
 
 
 def test_public_export_redacts_unmarked_terminal_block_content():
@@ -295,15 +295,9 @@ def test_public_export_redacts_unmarked_terminal_block_content():
     assert secret not in serialized
     assert payload["source_report"]["public_redaction"]["applied"] is True
     assert payload["trace"]["metadata"]["loop_metadata"]["redacted"] is True
-    assert payload["trace"]["spans"][0]["span_data"]["input"] == (
-        "[redacted: terminal guardrail decision]"
-    )
-    assert payload["trace"]["spans"][0]["span_data"]["output"] == (
-        "[redacted: terminal guardrail decision]"
-    )
-    assert payload["trace"]["spans"][0]["span_data"]["error"] == (
-        "terminal_guardrail_decision"
-    )
+    assert payload["trace"]["spans"][0]["span_data"]["input"] == PUBLIC_REDACTION_TEXT
+    assert payload["trace"]["spans"][0]["span_data"]["output"] == PUBLIC_REDACTION_TEXT
+    assert payload["trace"]["spans"][0]["span_data"]["error"] == PUBLIC_REDACTION_REASON
 
 
 def test_public_export_redacts_terminal_verifier_reasons():
@@ -314,7 +308,7 @@ def test_public_export_redacts_terminal_verifier_reasons():
 
     assert payload["public"] is True
     assert secret not in serialized
-    assert verification["reasons"] == ["[redacted: terminal guardrail decision]"]
+    assert verification["reasons"] == [PUBLIC_REDACTION_TEXT]
     assert verification["verifier"] is None
     assert verification["raw_response"] is None
     assert verification["metadata"]["redacted"] is True

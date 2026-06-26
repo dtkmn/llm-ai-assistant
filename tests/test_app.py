@@ -27,6 +27,8 @@ from src.loop_engine import (
     LoopReport,
     LoopRun,
     LoopStep,
+    PUBLIC_REDACTION_REASON,
+    PUBLIC_REDACTION_TEXT,
     VerificationOutcome,
     VerificationResult,
 )
@@ -117,11 +119,13 @@ class FakeQA:
         conversation_history=None,
         semantic_memory=None,
         semantic_memory_status="not_requested",
+        loop_recipe=None,
     ):
         self.last_query_session_id = session_id
         self.last_conversation_history = list(conversation_history or [])
         self.last_semantic_memory = list(semantic_memory or [])
         self.last_semantic_memory_status = semantic_memory_status
+        self.last_loop_recipe = dict(loop_recipe or {})
         active_backend = self.active_llm_backend or self.llm_backend
         active_model_label = (
             self.loaded_model_label
@@ -130,6 +134,19 @@ class FakeQA:
         )
         answer = "Project Phoenix is described in the uploaded document."
         steps = []
+        if self.last_loop_recipe:
+            steps.append(
+                LoopStep(
+                    phase=LoopPhase.INPUT,
+                    decision=LoopDecision.CONTINUE,
+                    name="Apply loop recipe",
+                    output_summary=self.last_loop_recipe.get("name"),
+                    metadata={
+                        "recipe_id": self.last_loop_recipe.get("recipe_id"),
+                        "recipe_name": self.last_loop_recipe.get("name"),
+                    },
+                )
+            )
         if semantic_memory_status != "not_requested":
             steps.append(
                 LoopStep(
@@ -178,6 +195,8 @@ class FakeQA:
                 metadata={
                     "semantic_memory_turns": len(self.last_semantic_memory),
                     "semantic_memory_status": semantic_memory_status,
+                    "recipe_id": self.last_loop_recipe.get("recipe_id"),
+                    "recipe_name": self.last_loop_recipe.get("name"),
                 },
             )
         )
@@ -419,6 +438,8 @@ def test_static_frontend_is_served():
     assert response.status_code == 200
     assert "AI Loop Engine" in response.text
     assert "Threads" in response.text
+    assert "Loop Recipe" in response.text
+    assert "Durable Runs" in response.text
     assert "Optional Context" in response.text
     assert "You can still run the loop without documents" in response.text
     assert "Model Thinking" in response.text
@@ -429,6 +450,8 @@ def test_static_frontend_is_served():
     assert "renderMessageThinking" in script.text
     assert "session_id" in script.text
     assert "switchThread" in script.text
+    assert "recipe_id" in script.text
+    assert "renderRuns" in script.text
     assert "result.trace?.model_thinking" in script.text
     assert "message-thinking" in script.text
     assert "innerHTML" not in script.text
@@ -536,6 +559,13 @@ function findNode(root, predicate) {
   return null;
 }
 
+function nodeText(root) {
+  return [
+    root.textContent || "",
+    ...root.children.map((child) => nodeText(child)),
+  ].join(" ");
+}
+
 function createMemoryStorage() {
   const values = new Map();
   return {
@@ -567,6 +597,9 @@ function createDom() {
     "text-encoding",
     "new-thread",
     "thread-list",
+    "recipe-select",
+    "recipe-status",
+    "recipe-state",
     "active-thread-title",
     "refresh-status",
     "runtime-grid",
@@ -576,6 +609,8 @@ function createDom() {
     "clear-chat",
     "messages",
     "timeline",
+    "run-list",
+    "run-count",
     "final-decision",
     "thinking-panel",
     "thinking-state",
@@ -632,16 +667,21 @@ function deferred() {
   return { promise, resolve };
 }
 
-function createThreadPayload(id, messages = [], latest = null) {
-  return {
+function createThreadPayload(id, messages = [], latest = null, options = {}) {
+  const payload = {
     id,
     title: "New thread",
     messages,
     latest,
     message_count: messages.length,
+    loop_run_count: options.loopRunCount || 0,
     created_at: "2026-06-26T00:00:00.000Z",
     updated_at: "2026-06-26T00:00:00.000Z",
   };
+  if (options.includeRuns !== false) {
+    payload.loop_runs = options.loopRuns || [];
+  }
+  return payload;
 }
 
 async function importFreshApp() {
@@ -656,7 +696,22 @@ async function importFreshApp() {
 async function runCase(modelThinking, answer = "Loop answer") {
   const dom = createDom();
   const queryBodies = [];
-  const serverThreads = [createThreadPayload("thread_initial")];
+  const serverThreads = [
+    createThreadPayload("thread_initial"),
+    createThreadPayload("thread_with_runs", [], null, {
+      includeRuns: false,
+      loopRunCount: 2,
+    }),
+  ];
+  const recipes = [{
+    recipe_id: "recipe_general_loop",
+    name: "General assistant loop",
+    goal: "Answer the request clearly.",
+    context_provider: "auto",
+    model_profile: "quality",
+    verifier: "default",
+    is_default: true,
+  }];
   globalThis.fetch = async (url, options = {}) => {
     const method = String(options.method || "GET").toUpperCase();
     if (url === "/api/config") {
@@ -669,6 +724,12 @@ async function runCase(modelThinking, answer = "Loop answer") {
         ready_for_queries: false,
         query_mode: "direct",
         chunk_count: 0,
+      });
+    }
+    if (url === "/api/recipes") {
+      return jsonResponse({
+        default_recipe_id: "recipe_general_loop",
+        recipes,
       });
     }
     if (url === "/api/threads" && method === "GET") {
@@ -690,6 +751,17 @@ async function runCase(modelThinking, answer = "Loop answer") {
       queryBodies.push(JSON.parse(options.body));
       return jsonResponse({
         answer,
+        run: {
+          run_id: "run_frontend",
+          final_decision: "not_verified",
+          context_provider: "none",
+          backend: "mock",
+          model: "MockLLM",
+          recipe_id: "recipe_general_loop",
+          recipe_name: "General assistant loop",
+          step_count: 4,
+          created_at: "2026-06-26T00:00:00.000Z",
+        },
         timeline: { rows: [], final_decision: "not_verified" },
         summary: {},
         trace: { model_thinking: modelThinking },
@@ -731,6 +803,7 @@ const capturedCase = await runCase({
 const capturedDom = capturedCase.dom;
 assert.equal(capturedCase.queryBodies.length, 1);
 assert.ok(capturedCase.queryBodies[0].session_id.startsWith("thread_"));
+assert.equal(capturedCase.queryBodies[0].recipe_id, "recipe_general_loop");
 const capturedAssistantMessage = findNode(
   capturedDom.messages,
   (node) => node.className === "message assistant",
@@ -769,6 +842,15 @@ const capturedThinking = findNode(
 assert.ok(capturedThinking, "assistant message should include thinking details");
 const capturedPre = findNode(capturedThinking, (node) => node.tagName === "PRE");
 assert.equal(capturedPre.textContent, "Captured thinking from model.");
+const capturedRun = findNode(
+  capturedDom["run-list"],
+  (node) => node.className === "run-row",
+);
+assert.ok(capturedRun, "durable run summary should render after query");
+assert.ok(
+  nodeText(capturedDom["thread-list"]).includes("2 runs"),
+  "thread summaries should preserve backend loop_run_count before details load",
+);
 
 const inlineFenceCase = await runCase({
   available: false,
@@ -821,7 +903,7 @@ threadCase.dom["query-input"].value = "Second thread question";
 await threadCase.dom["query-form"].dispatch("submit");
 assert.equal(threadCase.queryBodies.length, 2);
 assert.notEqual(threadCase.queryBodies[1].session_id, firstThreadId);
-assert.equal(threadCase.dom["thread-list"].children.length, 2);
+assert.equal(threadCase.dom["thread-list"].children.length, 3);
 
 const staleDom = createDom();
 const staleQuery = deferred();
@@ -838,6 +920,17 @@ globalThis.fetch = async (url, options = {}) => {
       ready_for_queries: false,
       query_mode: "direct",
       chunk_count: 0,
+    });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({
+      default_recipe_id: "recipe_general_loop",
+      recipes: [{
+        recipe_id: "recipe_general_loop",
+        name: "General assistant loop",
+        goal: "Answer the request clearly.",
+        is_default: true,
+      }],
     });
   }
   if (url === "/api/threads" && method === "GET") {
@@ -1182,10 +1275,15 @@ def test_query_endpoint_returns_visible_loop_payload():
     assert response.status_code == 200
     payload = response.json()
     assert "Project Phoenix" in payload["answer"]
-    assert payload["timeline"]["rows"][0]["phase"] == "Retrieve"
-    assert payload["timeline"]["rows"][0]["signals"] == "1 prompt chunks; chunks: 1; citations: 1"
+    assert payload["timeline"]["rows"][0]["step"] == "Apply loop recipe"
+    assert payload["timeline"]["rows"][0]["signals"] == "General assistant loop"
+    assert payload["timeline"]["rows"][1]["phase"] == "Retrieve"
+    assert payload["timeline"]["rows"][1]["signals"] == "1 prompt chunks; chunks: 1; citations: 1"
     assert payload["summary"]["document"] == "demo.txt"
     assert payload["summary"]["final_decision"] == "not_verified"
+    assert payload["summary"]["recipe_id"] == "recipe_general_loop"
+    assert payload["summary"]["recipe_name"] == "General assistant loop"
+    assert payload["recipe"]["recipe_id"] == "recipe_general_loop"
     assert payload["trace"]["question"] == "What is Project Phoenix?"
     assert payload["trace"]["citations"][0]["source"] == "demo.txt"
     assert payload["trace"]["model_thinking"] == {
@@ -1211,9 +1309,43 @@ def test_query_endpoint_passes_session_id_to_loop_runtime():
 
     assert response.status_code == 200
     assert fake_qa.last_query_session_id == "thread_alpha"
+    assert fake_qa.last_loop_recipe["recipe_id"] == "recipe_general_loop"
     assert response.json()["trace"]["loop_report"]["run"]["session_id"] == (
         "thread_alpha"
     )
+
+
+def test_query_endpoint_applies_selected_loop_recipe():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    recipe = store.create_recipe(
+        recipe_id="recipe_custom",
+        name="Custom recipe",
+        goal="Answer with a custom tone.",
+        instructions="Be direct.",
+        success_criteria=("Uses the selected recipe.",),
+    )
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/query",
+        json={
+            "message": "What is Project Phoenix?",
+            "session_id": "thread_alpha",
+            "recipe_id": recipe.recipe_id,
+        },
+    )
+
+    payload = response.json()
+    thread = client.get("/api/threads/thread_alpha").json()
+    assert response.status_code == 200
+    assert fake_qa.last_loop_recipe["recipe_id"] == "recipe_custom"
+    assert fake_qa.last_loop_recipe["success_criteria"] == [
+        "Uses the selected recipe."
+    ]
+    assert payload["recipe"]["recipe_id"] == "recipe_custom"
+    assert payload["summary"]["recipe_name"] == "Custom recipe"
+    assert thread["loop_runs"][0]["recipe_id"] == "recipe_custom"
 
 
 def test_thread_endpoints_create_list_get_rename_and_delete():
@@ -1253,6 +1385,49 @@ def test_thread_endpoints_create_list_get_rename_and_delete():
     assert client.get(f"/api/threads/{thread_id}").status_code == 404
 
 
+def test_recipe_endpoints_manage_loop_recipes():
+    client = TestClient(web_app.create_app(FakeQA(), thread_store=ThreadStore.in_memory()))
+
+    listed = client.get("/api/recipes")
+    assert listed.status_code == 200
+    assert listed.json()["default_recipe_id"] == "recipe_general_loop"
+    assert listed.json()["recipes"][0]["recipe_id"] == "recipe_general_loop"
+
+    created = client.post(
+        "/api/recipes",
+        json={
+            "name": "Strict reviewer",
+            "description": "Review answers sharply.",
+            "goal": "Find weak assumptions before final answer.",
+            "instructions": "Call out uncertainty.",
+            "success_criteria": ["Risks first.", "No vague praise."],
+            "stop_condition": "Stop after a clear verdict.",
+            "context_provider": "auto",
+            "model_profile": "quality",
+            "verifier": "human_review",
+        },
+    )
+    assert created.status_code == 200
+    recipe_id = created.json()["recipe_id"]
+
+    fetched = client.get(f"/api/recipes/{recipe_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["success_criteria"] == ["Risks first.", "No vague praise."]
+
+    patched = client.patch(
+        f"/api/recipes/{recipe_id}",
+        json={"name": "Sharper reviewer", "success_criteria": ["No soft passes."]},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["name"] == "Sharper reviewer"
+    assert patched.json()["success_criteria"] == ["No soft passes."]
+
+    assert client.delete("/api/recipes/recipe_general_loop").status_code == 404
+    deleted = client.delete(f"/api/recipes/{recipe_id}")
+    assert deleted.status_code == 200
+    assert client.get(f"/api/recipes/{recipe_id}").status_code == 404
+
+
 def test_query_endpoint_persists_thread_messages_and_latest_payload():
     fake_qa = FakeQA()
     store = ThreadStore.in_memory()
@@ -1280,8 +1455,21 @@ def test_query_endpoint_persists_thread_messages_and_latest_payload():
     assert "Project Phoenix" in thread["messages"][1]["content"]
     assert thread["messages"][1]["thinking"]["available"] is True
     assert thread["latest"]["summary"]["final_decision"] == "not_verified"
+    assert thread["loop_run_count"] == 1
+    assert thread["loop_runs"][0]["run_id"] == "run_fake"
+    assert thread["loop_runs"][0]["recipe_id"] == "recipe_general_loop"
+    assert response.json()["run"]["run_id"] == "run_fake"
     assert thread["latest"]["trace"]["loop_report"]["run"]["session_id"] == (
         "thread_alpha"
+    )
+
+    runs = client.get("/api/threads/thread_alpha/runs").json()
+    run_detail = client.get("/api/threads/thread_alpha/runs/run_fake").json()
+    assert runs["runs"][0]["run_id"] == "run_fake"
+    assert run_detail["public"] is True
+    assert run_detail["report"]["run"]["run_id"] == "run_fake"
+    assert run_detail["report"]["run"]["metadata"]["recipe_id"] == (
+        "recipe_general_loop"
     )
 
 
@@ -1425,11 +1613,13 @@ def test_query_endpoint_does_not_persist_partial_turn_on_runtime_failure():
             conversation_history=None,
             semantic_memory=None,
             semantic_memory_status="not_requested",
+            loop_recipe=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
             self.last_semantic_memory = list(semantic_memory or [])
             self.last_semantic_memory_status = semantic_memory_status
+            self.last_loop_recipe = dict(loop_recipe or {})
             raise RuntimeError("backend unavailable")
 
     fake_qa = FailingQA()
@@ -1448,6 +1638,7 @@ def test_query_endpoint_does_not_persist_partial_turn_on_runtime_failure():
     thread = client.get("/api/threads/thread_fail").json()
     assert thread["messages"] == []
     assert thread["message_count"] == 0
+    assert thread["loop_run_count"] == 0
     assert thread["latest"] is None
 
 
@@ -1464,11 +1655,13 @@ def test_clear_chat_blocks_stale_in_flight_query_persistence():
             conversation_history=None,
             semantic_memory=None,
             semantic_memory_status="not_requested",
+            loop_recipe=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
             self.last_semantic_memory = list(semantic_memory or [])
             self.last_semantic_memory_status = semantic_memory_status
+            self.last_loop_recipe = dict(loop_recipe or {})
             self.started.set()
             if not self.release.wait(timeout=5):
                 raise RuntimeError("timed out waiting for test release")
@@ -1478,6 +1671,7 @@ def test_clear_chat_blocks_stale_in_flight_query_persistence():
                 conversation_history=conversation_history,
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
+                loop_recipe=loop_recipe,
             )
 
     fake_qa = BlockingQA()
@@ -1508,6 +1702,8 @@ def test_clear_chat_blocks_stale_in_flight_query_persistence():
     thread = client.get("/api/threads/thread_race").json()
     assert thread["messages"] == []
     assert thread["message_count"] == 0
+    assert thread["loop_run_count"] == 0
+    assert client.get("/api/threads/thread_race/runs").json()["runs"] == []
     assert thread["latest"] is None
 
 
@@ -1524,11 +1720,13 @@ def test_delete_thread_blocks_stale_in_flight_query_resurrection():
             conversation_history=None,
             semantic_memory=None,
             semantic_memory_status="not_requested",
+            loop_recipe=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
             self.last_semantic_memory = list(semantic_memory or [])
             self.last_semantic_memory_status = semantic_memory_status
+            self.last_loop_recipe = dict(loop_recipe or {})
             self.started.set()
             if not self.release.wait(timeout=5):
                 raise RuntimeError("timed out waiting for test release")
@@ -1538,6 +1736,7 @@ def test_delete_thread_blocks_stale_in_flight_query_resurrection():
                 conversation_history=conversation_history,
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
+                loop_recipe=loop_recipe,
             )
 
     fake_qa = BlockingQA()
@@ -1578,11 +1777,13 @@ def test_delete_recreate_blocks_stale_in_flight_query_resurrection():
             conversation_history=None,
             semantic_memory=None,
             semantic_memory_status="not_requested",
+            loop_recipe=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
             self.last_semantic_memory = list(semantic_memory or [])
             self.last_semantic_memory_status = semantic_memory_status
+            self.last_loop_recipe = dict(loop_recipe or {})
             self.started.set()
             if not self.release.wait(timeout=5):
                 raise RuntimeError("timed out waiting for test release")
@@ -1592,6 +1793,7 @@ def test_delete_recreate_blocks_stale_in_flight_query_resurrection():
                 conversation_history=conversation_history,
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
+                loop_recipe=loop_recipe,
             )
 
     fake_qa = BlockingQA()
@@ -1621,6 +1823,7 @@ def test_delete_recreate_blocks_stale_in_flight_query_resurrection():
     assert thread["id"] == recreated.id
     assert thread["messages"] == []
     assert thread["message_count"] == 0
+    assert thread["loop_run_count"] == 0
     assert thread["latest"] is None
 
 
@@ -1654,8 +1857,9 @@ def test_query_endpoint_allows_no_context_loop():
     assert payload["trace"]["retrieved_chunk_count"] == 0
     assert payload["trace"]["citations"] == []
     assert payload["trace"]["self_check"]["outcome"] == "not_verified"
-    assert payload["timeline"]["rows"][0]["phase"] == "Context"
-    assert payload["timeline"]["rows"][0]["signals"] == "no_context_provider"
+    assert payload["timeline"]["rows"][0]["step"] == "Apply loop recipe"
+    assert payload["timeline"]["rows"][1]["phase"] == "Context"
+    assert payload["timeline"]["rows"][1]["signals"] == "no_context_provider"
     assert payload["trace"]["model_thinking"]["available"] is False
     assert payload["trace"]["model_thinking"]["content"] is None
 
@@ -1821,19 +2025,15 @@ def test_loop_contract_redacts_guardrail_blocked_draft_everywhere():
     assert blocked_answer not in public_json
     assert secret_question not in public_json
     assert blocked_thinking not in public_json
-    assert public_payload["summary"]["last_error"] == "terminal_guardrail_decision"
+    assert public_payload["summary"]["last_error"] == PUBLIC_REDACTION_REASON
     assert public_payload["timeline"]["rows"][0]["signals"] == (
-        "[redacted: terminal guardrail decision]; "
+        f"{PUBLIC_REDACTION_TEXT}; "
         "verifier: unsupported; "
-        "reasons: [redacted: terminal guardrail decision]"
+        f"reasons: {PUBLIC_REDACTION_TEXT}"
     )
-    assert public_payload["trace"]["question"] == (
-        "[redacted: terminal guardrail decision]"
-    )
-    assert public_payload["answer"] == "[redacted: terminal guardrail decision]"
-    assert public_payload["trace"]["answer"] == (
-        "[redacted: terminal guardrail decision]"
-    )
+    assert public_payload["trace"]["question"] == PUBLIC_REDACTION_TEXT
+    assert public_payload["answer"] == PUBLIC_REDACTION_TEXT
+    assert public_payload["trace"]["answer"] == PUBLIC_REDACTION_TEXT
     assert public_payload["trace"]["model_thinking"] == {
         "available": False,
         "redacted": True,

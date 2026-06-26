@@ -4,15 +4,18 @@ from datetime import datetime, timezone
 import pytest
 
 from src.loop_engine import (
+    DEFAULT_LOOP_RECIPE_ID,
     GuardrailDecision,
     HumanReviewRequest,
     LoopDecision,
     LoopPhase,
     LoopPolicy,
     LoopReport,
+    LoopRecipe,
     LoopRun,
     LoopSession,
     LoopStep,
+    PUBLIC_REDACTION_REASON,
     PUBLIC_REDACTION_TEXT,
     VerificationOutcome,
     VerificationResult,
@@ -73,6 +76,37 @@ def test_loop_report_round_trips_through_json():
     assert payload["run"]["steps"][0]["phase"] == "verify"
     assert payload["run"]["steps"][0]["duration_ms"] == 1000
     assert payload["run"]["final_decision"] == "supported"
+
+
+def test_loop_recipe_round_trips_and_summarizes():
+    recipe = LoopRecipe(
+        recipe_id=DEFAULT_LOOP_RECIPE_ID,
+        name="General assistant loop",
+        description="Default recipe",
+        goal="Answer clearly.",
+        instructions="Be direct.",
+        success_criteria=("Addresses the request.", "Names uncertainty."),
+        stop_condition="Stop after a safe final answer.",
+        context_provider="auto",
+        model_profile="quality",
+        verifier="default",
+        created_at=utc("2026-06-23T10:00:00"),
+        updated_at=utc("2026-06-23T10:01:00"),
+    )
+
+    restored = LoopRecipe.from_dict(json.loads(json.dumps(recipe.to_dict())))
+
+    assert restored == recipe
+    assert restored.summary_dict()["is_default"] is True
+    assert restored.runtime_dict()["success_criteria"] == [
+        "Addresses the request.",
+        "Names uncertainty.",
+    ]
+
+
+def test_loop_recipe_rejects_missing_goal():
+    with pytest.raises(ValueError, match="goal"):
+        LoopRecipe(recipe_id="recipe_bad", name="Bad", goal="")
 
 
 def test_loop_session_keeps_reports_and_exports_jsonl(tmp_path):
@@ -149,6 +183,7 @@ def test_loop_report_rejects_unknown_schema_version():
 
 def test_public_report_redacts_terminal_verification_reasons():
     secret_reason = "SECRET_VERIFIER_REASON"
+    secret_verifier = "SECRET_GATEWAY_VERIFIER"
     report = LoopReport(
         run=LoopRun(
             run_id="run_terminal_verifier",
@@ -166,7 +201,7 @@ def test_public_report_redacts_terminal_verification_reasons():
                     verification=VerificationResult(
                         outcome=VerificationOutcome.UNSUPPORTED,
                         reasons=(secret_reason,),
-                        verifier="mock",
+                        verifier=secret_verifier,
                         raw_response=secret_reason,
                         metadata={"debug": secret_reason},
                     ),
@@ -178,14 +213,59 @@ def test_public_report_redacts_terminal_verification_reasons():
         )
     )
 
+    raw_json = json.dumps(report.to_dict())
     public_payload = report.to_public_dict()
     public_json = json.dumps(public_payload)
     verification = public_payload["run"]["steps"][0]["verification"]
 
+    assert secret_verifier in raw_json
     assert secret_reason not in public_json
+    assert secret_verifier not in public_json
+    assert public_payload["public_redaction"]["reason"] == PUBLIC_REDACTION_REASON
+    assert public_payload["run"]["error_message"] == PUBLIC_REDACTION_REASON
+    assert verification["verifier"] is None
     assert verification["reasons"] == [PUBLIC_REDACTION_TEXT]
     assert verification["raw_response"] is None
     assert verification["metadata"]["redacted"] is True
+
+
+def test_public_report_redacts_unmarked_terminal_verifier_identity():
+    secret_verifier = "SECRET_OPERATOR_VERIFIER"
+    report = LoopReport(
+        run=LoopRun(
+            run_id="run_terminal_without_guardrail_step",
+            user_input="Sensitive prompt",
+            context_provider="none",
+            backend="openai-compatible",
+            model_label="gateway-model",
+            steps=(
+                LoopStep(
+                    phase=LoopPhase.VERIFY,
+                    decision=LoopDecision.REFUSE,
+                    name="LLM verifier",
+                    output_summary="refused by verifier",
+                    verification=VerificationResult(
+                        outcome=VerificationOutcome.UNSUPPORTED,
+                        reasons=("unsupported_claim",),
+                        verifier=secret_verifier,
+                    ),
+                ),
+            ),
+            final_decision=LoopDecision.REFUSE,
+            final_answer="I cannot verify that.",
+        )
+    )
+
+    raw_json = json.dumps(report.to_dict())
+    public_payload = report.to_public_dict()
+    public_json = json.dumps(public_payload)
+    verification = public_payload["run"]["steps"][0]["verification"]
+
+    assert secret_verifier in raw_json
+    assert secret_verifier not in public_json
+    assert public_payload["public_redaction"]["applied"] is True
+    assert public_payload["public_redaction"]["reason"] == PUBLIC_REDACTION_REASON
+    assert verification["verifier"] is None
 
 
 @pytest.mark.parametrize("field_name", ["allow_tool_calls", "allow_mock_supported"])

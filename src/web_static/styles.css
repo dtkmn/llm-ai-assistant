@@ -151,6 +151,10 @@ section {
   margin-bottom: 16px;
 }
 
+.compact-heading {
+  margin: 16px 0 10px;
+}
+
 .panel-heading > div {
   min-width: 0;
 }
@@ -242,6 +246,21 @@ textarea {
   color: var(--muted);
   margin: 16px 0;
   padding-left: 12px;
+}
+
+.status-message.compact {
+  font-size: 0.82rem;
+  line-height: 1.45;
+  margin: 12px 0 0;
+}
+
+.mini-status {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 0.35rem 0.55rem;
 }
 
 .runtime-grid {
@@ -488,6 +507,41 @@ textarea {
 
 .timeline-error {
   color: var(--danger);
+}
+
+.run-history {
+  border-top: 1px solid var(--line);
+  margin-top: 16px;
+}
+
+.run-list {
+  display: grid;
+  gap: 8px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.run-row {
+  background: rgb(255 255 255 / 2%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+}
+
+.run-row strong {
+  color: var(--text);
+  font-size: 0.84rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-row span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
 }
 
 .thinking-panel {
