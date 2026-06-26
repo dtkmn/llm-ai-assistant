@@ -193,6 +193,7 @@ class FakeQA:
                 final_decision=LoopDecision.NOT_VERIFIED,
                 final_answer=answer,
                 metadata={
+                    "conversation_context_turns": len(self.last_conversation_history),
                     "semantic_memory_turns": len(self.last_semantic_memory),
                     "semantic_memory_status": semantic_memory_status,
                     "recipe_id": self.last_loop_recipe.get("recipe_id"),
@@ -443,6 +444,8 @@ def test_static_frontend_is_served():
     assert "Optional Context" in response.text
     assert "You can still run the loop without documents" in response.text
     assert "Model Thinking" in response.text
+    assert "active-thread-memory" in response.text
+    assert "memory-status" in response.text
     assert "/assets/app.js" in response.text
     assert script.status_code == 200
     assert "Ask a question, or add context" in script.text
@@ -452,11 +455,13 @@ def test_static_frontend_is_served():
     assert "switchThread" in script.text
     assert "recipe_id" in script.text
     assert "renderRuns" in script.text
+    assert "runMemoryLabel" in script.text
     assert "result.trace?.model_thinking" in script.text
     assert "message-thinking" in script.text
     assert "innerHTML" not in script.text
     assert styles.status_code == 200
     assert ".thread-button" in styles.text
+    assert ".memory-status" in styles.text
     assert ".message-thinking" in styles.text
     assert ".message-code-block" in styles.text
 
@@ -550,7 +555,8 @@ globalThis.fetch = async (url, options = {}) => {
     }
   }
   if (url === "/api/query") {
-    queryBodies.push(JSON.parse(options.body));
+    const request = JSON.parse(options.body);
+    queryBodies.push(request);
     return jsonResponse({
       answer: [
         "Here is `dp[0]` safely:",
@@ -574,7 +580,11 @@ globalThis.fetch = async (url, options = {}) => {
         created_at: "2026-06-26T00:00:00.000Z",
       },
       timeline: { rows: [], final_decision: "not_verified" },
-      summary: {},
+      summary: {
+        conversation_context_count: 1,
+        semantic_memory_count: 2,
+        semantic_memory_status: "retrieved",
+      },
       trace: {
         model_thinking: {
           available: true,
@@ -584,6 +594,10 @@ globalThis.fetch = async (url, options = {}) => {
           note: "Model-emitted thinking is useful for debugging the loop.",
         },
       },
+      thread: createThreadPayload(request.session_id, [], null, {
+        memoryCount: 4,
+        loopRunCount: 1,
+      }),
     });
   }
   if (url === "/api/chat/clear") {
@@ -641,6 +655,39 @@ assert.ok(
 assert.ok(
   nodeText(dom["thread-list"]).includes("0 memories"),
   "thread summaries should show indexed memory counts",
+);
+assert.ok(
+  nodeText(dom["thread-list"]).includes("4 memories"),
+  "thread summaries should update indexed memory counts after query",
+);
+assert.ok(
+  nodeText(dom["active-thread-memory"]).includes("4 memories indexed"),
+  "active thread header should show indexed memory count",
+);
+assert.ok(
+  nodeText(dom["active-thread-memory"]).includes(
+    "last run used 1 recent turn + 2 recalled memories",
+  ),
+  "active thread header should show last-run memory usage",
+);
+assert.ok(
+  nodeText(dom["memory-status"]).includes("4 memories indexed"),
+  "loop panel should show indexed memory count",
+);
+assert.ok(
+  nodeText(dom["memory-status"]).includes(
+    "last run used 1 recent turn + 2 recalled memories",
+  ),
+  "loop panel should show last-run memory usage",
+);
+await dom["clear-chat"].dispatch("click");
+assert.ok(
+  nodeText(dom["active-thread-memory"]).includes("0 memories indexed"),
+  "clear should reset visible indexed memory count",
+);
+assert.ok(
+  nodeText(dom["memory-status"]).includes("last run did not use thread memory"),
+  "clear should reset last-run memory status",
 );
 '''
     )
@@ -1369,6 +1416,9 @@ def test_query_endpoint_returns_visible_loop_payload():
     assert payload["timeline"]["rows"][1]["signals"] == "1 prompt chunks; chunks: 1; citations: 1"
     assert payload["summary"]["document"] == "demo.txt"
     assert payload["summary"]["final_decision"] == "not_verified"
+    assert payload["summary"]["conversation_context_count"] == 0
+    assert payload["summary"]["semantic_memory_count"] == 0
+    assert payload["summary"]["semantic_memory_status"] == "not_requested"
     assert payload["summary"]["recipe_id"] == "recipe_general_loop"
     assert payload["summary"]["recipe_name"] == "General assistant loop"
     assert payload["recipe"]["recipe_id"] == "recipe_general_loop"
@@ -1621,6 +1671,7 @@ def test_query_endpoint_passes_recent_same_thread_history_to_runtime():
         "stay out" not in entry["content"]
         for entry in fake_qa.last_conversation_history
     )
+    assert response.json()["summary"]["conversation_context_count"] == 2
 
 
 def test_query_endpoint_retrieves_older_semantic_thread_memory():
@@ -1701,6 +1752,12 @@ def test_query_endpoint_retrieves_older_semantic_thread_memory():
     assert "memory: 1" in memory_rows[0]["signals"]
     assert payload["summary"]["semantic_memory_count"] == 1
     assert payload["summary"]["semantic_memory_status"] == "retrieved"
+    assert payload["summary"]["conversation_context_count"] == (
+        web_app.MAX_QUERY_HISTORY_MESSAGES
+    )
+    public_payload_text = json.dumps(payload)
+    assert "reusing answers to subproblems" not in public_payload_text
+    assert "another thread" not in public_payload_text
     indexed_memories = store.semantic_memories(
         "thread_alpha",
         embedding_model="fake-memory",

@@ -42,6 +42,7 @@ const elements = {
   recipeCriteria: document.querySelector("#recipe-criteria"),
   recipeStop: document.querySelector("#recipe-stop"),
   activeThreadTitle: document.querySelector("#active-thread-title"),
+  activeThreadMemory: document.querySelector("#active-thread-memory"),
   refreshStatus: document.querySelector("#refresh-status"),
   runtimeGrid: document.querySelector("#runtime-grid"),
   queryForm: document.querySelector("#query-form"),
@@ -49,6 +50,7 @@ const elements = {
   queryButton: document.querySelector("#query-button"),
   clearButton: document.querySelector("#clear-chat"),
   messages: document.querySelector("#messages"),
+  memoryStatus: document.querySelector("#memory-status"),
   timeline: document.querySelector("#timeline"),
   runList: document.querySelector("#run-list"),
   runCount: document.querySelector("#run-count"),
@@ -100,6 +102,15 @@ function safeText(value, fallback = "", maxLength = 120) {
 
 function safeField(value, maxLength = 4000) {
   return String(value || "").slice(0, maxLength);
+}
+
+function nonNegativeInteger(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+}
+
+function plural(count, singular, pluralForm = `${singular}s`) {
+  return count === 1 ? singular : pluralForm;
 }
 
 function sanitizeMessage(message) {
@@ -173,8 +184,7 @@ function sanitizeRecipe(rawRecipe) {
 }
 
 function normalizedRevision(value) {
-  const revision = Number(value);
-  return Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
+  return nonNegativeInteger(value);
 }
 
 function bumpThreadRevision(thread) {
@@ -411,8 +421,59 @@ function renderThreads() {
   }
 }
 
+function memoryCountLabel(count) {
+  const value = nonNegativeInteger(count);
+  return `${value} ${plural(value, "memory", "memories")} indexed`;
+}
+
+function runMemoryLabel(summary) {
+  const data = summary && typeof summary === "object" ? summary : {};
+  const recentCount = nonNegativeInteger(data.conversation_context_count);
+  const semanticCount = nonNegativeInteger(data.semantic_memory_count);
+  const semanticStatus = String(data.semantic_memory_status || "not_requested");
+  const parts = [];
+  if (recentCount) {
+    parts.push(`${recentCount} recent ${plural(recentCount, "turn")}`);
+  }
+  if (semanticStatus === "retrieved" && semanticCount) {
+    parts.push(`${semanticCount} recalled ${plural(semanticCount, "memory", "memories")}`);
+  }
+  if (parts.length) {
+    return `last run used ${parts.join(" + ")}`;
+  }
+  if (semanticStatus === "retrieved") {
+    return "last run found no matching memory";
+  }
+  if (semanticStatus === "empty") {
+    return "last run found no matching memory";
+  }
+  if (semanticStatus === "unavailable") {
+    return "last run memory unavailable";
+  }
+  return "last run did not use thread memory";
+}
+
 function renderActiveThreadTitle() {
-  elements.activeThreadTitle.textContent = activeThread().title || DEFAULT_THREAD_TITLE;
+  const thread = activeThread();
+  elements.activeThreadTitle.textContent = thread.title || DEFAULT_THREAD_TITLE;
+  elements.activeThreadMemory.textContent = `${memoryCountLabel(
+    thread.memoryCount,
+  )} · ${runMemoryLabel(thread.latest?.summary)}`;
+}
+
+function renderMemoryStatus(payload) {
+  const thread = activeThread();
+  const summary = payload?.summary || {};
+  elements.memoryStatus.replaceChildren();
+
+  const label = document.createElement("span");
+  label.textContent = "Thread memory";
+  const indexed = document.createElement("strong");
+  indexed.textContent = memoryCountLabel(thread.memoryCount);
+  const lastRun = document.createElement("span");
+  lastRun.textContent = runMemoryLabel(summary);
+
+  elements.memoryStatus.append(label, indexed, lastRun);
 }
 
 async function switchThread(threadId) {
@@ -798,6 +859,8 @@ function renderModelThinking(thinking) {
 
 function renderLoopPayload(payload) {
   state.latest = payload;
+  renderMemoryStatus(payload);
+  renderActiveThreadTitle();
   renderTimeline(payload.timeline);
   renderModelThinking(payload.trace?.model_thinking);
   elements.summaryJson.textContent = JSON.stringify(payload.summary, null, 2);

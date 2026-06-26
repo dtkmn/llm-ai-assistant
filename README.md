@@ -10,6 +10,8 @@ loop: making agent behavior visible, testable, and harder to fake.
 - **Observable Runtime Reports:** Emits structured loop evidence for context selection, prompt evidence, drafts, verifier decisions, retries, refusals, and replay
 - **Durable Local Runs:** Stores public loop-run summaries and reports in the
   local thread database so completed runs remain inspectable after restart
+- **Visible Thread Memory:** Shows per-thread memory counts and last-run use of
+  recent conversation or semantic memory without exposing raw recalled text
 - **Loop Recipes / Skills:** Provides saved loop recipes for goal, instructions,
   success criteria, stop condition, context provider, model profile, and verifier
   metadata
@@ -196,15 +198,15 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 3. Pick a Loop Recipe when you want a saved goal/instruction/checking profile.
    The default recipe is selected automatically.
 4. Switch threads from the sidebar when you want separate local conversations,
-   durable run history, and loop traces.
+   memory counts, durable run history, and loop traces.
 5. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
    you want grounded retrieval, citations, and verifier-backed support checks
 6. Click "Index Context" to make the uploaded document available to the loop
 7. Inspect the Loop Timeline to see recipe selection, context selection, retrieve, draft, check,
    verify, retry, refusal, and final-decision steps in order
 8. Inspect Durable Runs to see persisted run evidence for the active thread
-9. Inspect the loop summary for the provider, recipe, draft count, checks, verifier,
-   retry/refusal state, final decision, and last error
+9. Inspect the loop summary for memory usage, provider, recipe, draft count,
+   checks, verifier, retry/refusal state, final decision, and last error
 10. Open the answer trace when you need the detailed redacted `LoopReport`
 
 ## Technical Details
@@ -225,7 +227,8 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   public loop payload. Recent same-thread messages are passed into the runtime
   as bounded conversation context. Older same-thread messages may also be
   retrieved by local embedding similarity as semantic thread memory; browser
-  storage is only used to remember the selected thread and recipe.
+  storage is only used to remember the selected thread and recipe. Public UI
+  surfaces show memory counts and last-run use, not raw recalled memory text.
 - **Loop recipes:** saved local recipes provide reusable goal, instruction,
   success-criteria, stop-condition, context-provider, profile, and verifier
   metadata. They guide the run and are recorded in loop metadata, but they do
