@@ -174,11 +174,12 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 
 ## Usage
 1. Open your browser and go to `http://localhost:7860`
-2. Upload document context (PDF, DOCX, TXT, or MD; max 25 MB)
-3. Click "Index Context" to make it available to the loop
-4. Ask questions in the chat interface
-5. Inspect the Loop Timeline to see retrieve, draft, check, verify, retry,
-   refusal, and final-decision steps in order
+2. Ask a question directly to run the loop without external context
+3. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
+   you want grounded retrieval, citations, and verifier-backed support checks
+4. Click "Index Context" to make the uploaded document available to the loop
+5. Inspect the Loop Timeline to see context selection, retrieve, draft, check,
+   verify, retry, refusal, and final-decision steps in order
 6. Inspect the loop summary for the provider, draft count, checks, verifier,
    retry/refusal state, final decision, and last error
 7. Open the answer trace when you need the detailed redacted `LoopReport`
@@ -186,8 +187,11 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 ## Technical Details
 
 ### Loop Contract
+- **Context mode:** Direct no-context chat is allowed, but it is reported as
+  `not_verified` with no citations. Document context is optional and upgrades
+  the loop into grounded retrieval plus citation/verifier checks.
 - **Current context provider:** Document context
-- **Current loop shape:** validate/decode -> split -> embed/index -> retrieve -> draft answer -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
+- **Current document loop shape:** validate/decode -> split -> embed/index -> retrieve -> draft answer -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
 - **Context provider boundary:** `DocumentContextProvider` wraps the current
   document vector store and retrieval chain so later providers can plug into the
   loop without changing the product identity again

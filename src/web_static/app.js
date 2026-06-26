@@ -53,11 +53,12 @@ async function requestJson(url, options = {}) {
 function renderRuntimeStatus(status) {
   elements.backendPill.textContent = status.backend || "unconfigured";
   elements.modelPill.textContent = status.model || "model unavailable";
-  elements.readyPill.textContent = status.ready_for_queries ? "indexed" : "not ready";
+  elements.readyPill.textContent = status.ready_for_queries ? "context indexed" : "direct mode";
   elements.readyPill.dataset.ready = String(Boolean(status.ready_for_queries));
 
   const rows = [
-    ["Active context", status.active_document || "none"],
+    ["Indexed context", status.active_document || "none"],
+    ["Query mode", status.query_mode || (status.ready_for_queries ? "contextual" : "direct")],
     ["Last attempt", status.last_attempted_document || "none"],
     ["Profile", status.profile || "unknown"],
     ["Embedding model", status.embeddings_model || "unknown"],
@@ -81,7 +82,7 @@ function renderMessages() {
   if (!state.messages.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = "Ask a question after indexing context.";
+    empty.textContent = "Ask a question, or add context when you need grounded citations.";
     elements.messages.append(empty);
     return;
   }

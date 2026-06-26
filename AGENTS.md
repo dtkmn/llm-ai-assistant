@@ -100,6 +100,10 @@ Primary runtime files:
   deterministic refutation prefilters may reject bad answers, but only a real
   backend verifier may label an answer `supported`. Mock/demo mode must report
   mechanically valid answers as `not_verified`, not `supported`.
+- Document context is optional at query time. A no-context answer may run through
+  the selected LLM backend, but it must be reported as `not_verified`, have zero
+  citations, skip document verifier support claims, and show
+  `context_provider="none"` in the loop report.
 - Ollama model-emitted thinking is a UI/debugging signal, not evidence. Keep it
   separate from the final answer, label it as unverified, never synthesize it in
   mock mode, and redact/drop it whenever the final answer is refused, blocked,

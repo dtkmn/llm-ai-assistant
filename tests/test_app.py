@@ -13,6 +13,7 @@ from src.DocumentQA import (
     AnswerCitation,
     AnswerSelfCheck,
     AnswerTrace,
+    DocumentQA,
     DocumentProcessingError,
     DocumentProcessingReport,
     DocumentQAStatus,
@@ -323,9 +324,13 @@ def test_static_frontend_is_served():
 
     assert response.status_code == 200
     assert "AI Loop Engine" in response.text
+    assert "Optional Context" in response.text
+    assert "You can still run the loop without documents" in response.text
     assert "Model Thinking" in response.text
     assert "/assets/app.js" in response.text
     assert script.status_code == 200
+    assert "Ask a question, or add context" in script.text
+    assert "direct mode" in script.text
     assert "innerHTML" not in script.text
     assert styles.status_code == 200
 
@@ -343,6 +348,9 @@ def test_config_and_status_endpoints_return_runtime_contract():
     assert status["backend"] == "mock"
     assert status["ready_for_queries"] is False
     assert status["readiness_scope"] == "retrieval_pipeline"
+    assert status["direct_query_available"] is True
+    assert status["query_mode"] == "direct"
+    assert status["context_optional"] is True
 
 
 def test_upload_document_indexes_context_and_reports_status():
@@ -628,6 +636,30 @@ def test_query_endpoint_returns_visible_loop_payload():
             "not verified evidence."
         ),
     }
+
+
+def test_query_endpoint_allows_no_context_loop():
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    client = TestClient(web_app.create_app(qa))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "What can you do?"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "mock response" in payload["answer"]
+    assert payload["summary"]["context_provider"] == "none"
+    assert payload["summary"]["document"] is None
+    assert payload["summary"]["final_decision"] == "not_verified"
+    assert payload["trace"]["retrieved_chunk_count"] == 0
+    assert payload["trace"]["citations"] == []
+    assert payload["trace"]["self_check"]["outcome"] == "not_verified"
+    assert payload["timeline"]["rows"][0]["phase"] == "Context"
+    assert payload["timeline"]["rows"][0]["signals"] == "no_context_provider"
+    assert payload["trace"]["model_thinking"]["available"] is False
+    assert payload["trace"]["model_thinking"]["content"] is None
 
 
 def test_query_endpoint_rejects_blank_message():

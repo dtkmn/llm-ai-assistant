@@ -16,14 +16,14 @@
         <div class="status-pills" aria-label="Runtime status">
           <span class="pill" id="backend-pill">backend</span>
           <span class="pill" id="model-pill">model</span>
-          <span class="pill" id="ready-pill">not ready</span>
+          <span class="pill" id="ready-pill">direct mode</span>
         </div>
       </header>
 
       <main class="workspace">
         <section class="context-panel" aria-labelledby="context-title">
           <div class="panel-heading">
-            <h2 id="context-title">Context</h2>
+            <h2 id="context-title">Optional Context</h2>
             <button class="ghost-button" id="refresh-status" type="button">Refresh</button>
           </div>
           <form id="upload-form" class="upload-form">
@@ -37,7 +37,9 @@
             </label>
             <button id="upload-button" type="submit">Index Context</button>
           </form>
-          <p class="status-message" id="upload-status">No document indexed.</p>
+          <p class="status-message" id="upload-status">
+            No context indexed. You can still run the loop without documents.
+          </p>
           <dl class="runtime-grid" id="runtime-grid"></dl>
         </section>
 
@@ -49,7 +51,7 @@
           <div class="messages" id="messages" aria-live="polite"></div>
           <form id="query-form" class="query-form">
             <label class="visually-hidden" for="query-input">Question</label>
-            <textarea id="query-input" rows="3" placeholder="Ask against the active context"></textarea>
+            <textarea id="query-input" rows="3" placeholder="Ask anything, or ask against indexed context"></textarea>
             <button id="query-button" type="submit">Run Loop</button>
           </form>
         </section>

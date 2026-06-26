@@ -6,7 +6,7 @@ import math
 import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -284,6 +284,13 @@ DOCUMENT_IDENTITY_QUESTION_HINTS = (
     "which file",
 )
 SELF_CHECK_REFUSAL_ANSWER = _answer_loop.SELF_CHECK_REFUSAL_ANSWER
+NO_CONTEXT_SELF_CHECK_REASONS = [
+    "no_context_provider",
+    "verifier_requires_prompt_evidence",
+]
+DIRECT_STANDALONE_CITATION_MARKER_PATTERN = re.compile(
+    r"(?<!\S)\[(\d+)\](?=$|[\s.,;:!?)])"
+)
 
 
 def _document_ingestion_module():
@@ -1492,6 +1499,95 @@ class AILoopEngine:
             loop_report=loop_report,
         )
 
+    def _active_context_provider_for_run(
+        self, active_state: ActiveDocumentState
+    ) -> Optional[ContextProvider]:
+        context_provider = active_state.context_provider
+        if (
+            active_state.retrieval_chain
+            and context_provider
+            and getattr(context_provider, "ready", bool(active_state.retrieval_chain))
+        ):
+            return context_provider
+        return None
+
+    def _context_provider_type_for_run(
+        self, active_state: ActiveDocumentState
+    ) -> str:
+        context_provider = self._active_context_provider_for_run(active_state)
+        return context_provider.provider_type if context_provider else "none"
+
+    def _direct_answer_prompt(self, question: str) -> str:
+        return (
+            "You are AI Loop Engine running without an external context provider. "
+            "Answer the user's question directly. Be concise, do not invent "
+            "citations, and say when you are unsure.\n\n"
+            f"Question: {question}\n"
+            "Answer:"
+        )
+
+    def _strip_direct_answer_citations(self, answer: str) -> str:
+        cleaned = DIRECT_STANDALONE_CITATION_MARKER_PATTERN.sub(
+            "", answer or ""
+        )
+        cleaned = cleaned.strip()
+        cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned)
+        return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+    def _direct_citation_marker_ids(self, answer: str) -> List[int]:
+        standalone_ids = [
+            int(match.group(1))
+            for match in DIRECT_STANDALONE_CITATION_MARKER_PATTERN.finditer(
+                answer or ""
+            )
+        ]
+        return standalone_ids
+
+    def _last_model_thinking(self) -> Optional[str]:
+        llm_thinking = getattr(self.llm, "last_thinking", None)
+        return (
+            llm_thinking.strip()
+            if isinstance(llm_thinking, str) and llm_thinking.strip()
+            else None
+        )
+
+    def _refresh_run_model_identity(self, run: LoopRun) -> LoopRun:
+        return replace(
+            run,
+            backend=self._active_backend(),
+            model_label=self._active_model_label(),
+        )
+
+    def _record_chat_history_entry(
+        self, *, session_id: str, question: str, result: QueryResult
+    ) -> None:
+        self.chat_history.append(
+            {
+                "session_id": session_id,
+                "question": question,
+                "answer": result.answer,
+                "citations": [
+                    {
+                        "id": citation.citation_id,
+                        "source_name": citation.source_name,
+                        "page": citation.page,
+                        "chunk_index": citation.chunk_index,
+                        "excerpt": citation.excerpt,
+                    }
+                    for citation in result.trace.citations
+                ],
+                "self_check": (
+                    {
+                        "outcome": result.trace.self_check.outcome,
+                        "reasons": result.trace.self_check.reasons,
+                        "retry_attempted": result.trace.self_check.retry_attempted,
+                    }
+                    if result.trace.self_check
+                    else None
+                ),
+            }
+        )
+
     def _start_loop_run(
         self,
         *,
@@ -1499,10 +1595,11 @@ class AILoopEngine:
         session_id: str,
         active_state: ActiveDocumentState,
     ) -> LoopRun:
-        context_provider = active_state.context_provider
-        context_provider_type = (
-            context_provider.provider_type if context_provider else "document"
-        )
+        context_provider = self._active_context_provider_for_run(active_state)
+        context_provider_type = self._context_provider_type_for_run(active_state)
+        untrusted_inputs = ["model_output", "future_tool_output"]
+        if context_provider_type == "document":
+            untrusted_inputs = ["document_text", "retrieved_chunks", *untrusted_inputs]
         return LoopRun(
             user_input=prompt,
             context_provider=context_provider_type,
@@ -1518,12 +1615,7 @@ class AILoopEngine:
                 ),
                 "profile": "FAST" if self.fast_mode else "QUALITY",
                 "allow_tool_calls": False,
-                "untrusted_inputs": [
-                    "document_text",
-                    "retrieved_chunks",
-                    "model_output",
-                    "future_tool_output",
-                ],
+                "untrusted_inputs": untrusted_inputs,
             },
         )
 
@@ -1895,42 +1987,63 @@ class AILoopEngine:
                 error_message="empty_question",
             )
 
-        if not active_state.retrieval_chain:
-            run, guardrail_decision = self._append_loop_step(
-                run,
-                self._loop_step(
-                    LoopPhase.CONTEXT_SELECT,
-                    decision=LoopDecision.BLOCK,
-                    name="Select document context",
-                    output_summary="document_not_loaded",
-                    error_message="document_not_loaded",
-                    metadata={"document_name": active_state.document_name},
-                ),
-            )
-            if guardrail_decision:
-                return self._finish_guardrail_query_result(
-                    decision=guardrail_decision,
+        if not self.llm:
+            try:
+                self._ensure_llm_initialized()
+            except Exception as exc:
+                LOGGER.exception("LLM initialization failed during query.")
+                run, guardrail_decision = self._append_loop_step(
+                    run,
+                    self._loop_step(
+                        LoopPhase.ERROR,
+                        decision=LoopDecision.ERROR,
+                        name="LLM readiness",
+                        output_summary="llm_initialization_failed",
+                        error_message="llm_initialization_failed",
+                        metadata={"error_type": exc.__class__.__name__},
+                    ),
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                return self._finish_query_result(
+                    answer=(
+                        "Language model could not be initialized. Please check "
+                        "your LLM backend setup."
+                    ),
                     question=clean_prompt,
                     active_state=active_state,
                     run=run,
+                    final_decision=LoopDecision.ERROR,
+                    error_message="llm_initialization_failed",
                 )
-            return self._finish_query_result(
-                answer="Please upload and process a document first.",
-                question=clean_prompt,
-                active_state=active_state,
-                run=run,
-                final_decision=LoopDecision.BLOCK,
-                error_message="document_not_loaded",
-            )
+            run = self._refresh_run_model_identity(run)
 
+        context_provider_type = self._context_provider_type_for_run(active_state)
+        context_provider = self._active_context_provider_for_run(active_state)
+        context_output = (
+            active_state.document_name
+            if context_provider_type == "document"
+            else "no_context_provider"
+        )
         run, guardrail_decision = self._append_loop_step(
             run,
             self._loop_step(
                 LoopPhase.CONTEXT_SELECT,
                 decision=LoopDecision.CONTINUE,
-                name="Select document context",
-                output_summary=active_state.document_name,
-                metadata={"document_name": active_state.document_name},
+                name="Select context provider",
+                output_summary=context_output,
+                metadata={
+                    "document_name": active_state.document_name,
+                    "context_provider": context_provider_type,
+                    "context_provider_name": (
+                        context_provider.display_name if context_provider else None
+                    ),
+                },
             ),
         )
         if guardrail_decision:
@@ -1982,8 +2095,127 @@ class AILoopEngine:
             )
 
         model_thinking = None
+        direct_context = not active_state.retrieval_chain
         try:
-            if hasattr(active_state.retrieval_chain, "invoke_with_trace"):
+            if direct_context:
+                planned_draft_step = self._planned_loop_step(
+                    LoopPhase.DRAFT,
+                    name="Draft direct answer",
+                    input_summary=clean_prompt,
+                )
+                guardrail_decision = self._prepare_loop_step(run, planned_draft_step)
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                raw_response = str(
+                    self.llm.invoke(self._direct_answer_prompt(clean_prompt))
+                ).strip()
+                model_thinking = self._last_model_thinking()
+                removed_inline_citation_ids = self._direct_citation_marker_ids(
+                    raw_response
+                )
+                response = self._strip_direct_answer_citations(raw_response)
+                if len(response) < 3:
+                    model_thinking = None
+                    error_metadata = {
+                        "context_provider": "none",
+                        "raw_answer_chars": len(raw_response),
+                        "removed_inline_citation_ids": removed_inline_citation_ids,
+                    }
+                    run, guardrail_decision = self._record_loop_step(
+                        run,
+                        self._loop_step(
+                            LoopPhase.DRAFT,
+                            decision=LoopDecision.ERROR,
+                            name="Draft direct answer",
+                            input_summary=clean_prompt,
+                            output_summary="empty_direct_answer",
+                            error_message="empty_direct_answer",
+                            metadata=error_metadata,
+                        ),
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    return self._finish_query_result(
+                        answer=(
+                            "The model returned an empty answer. Please try again "
+                            "or check your LLM backend."
+                        ),
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                        final_decision=LoopDecision.ERROR,
+                        error_message="empty_direct_answer",
+                    )
+                retrieved_chunk_count = 0
+                citations = []
+                self_check = AnswerSelfCheck(
+                    outcome="not_verified",
+                    reasons=list(NO_CONTEXT_SELF_CHECK_REASONS),
+                    retry_attempted=False,
+                )
+                draft_metadata = {
+                    "answer_chars": len(response),
+                    "context_provider": "none",
+                    "inline_citation_ids": self._direct_citation_marker_ids(response),
+                    "model_thinking_available": bool(model_thinking),
+                    "removed_inline_citation_ids": removed_inline_citation_ids,
+                    "trace_available": True,
+                }
+                if model_thinking:
+                    draft_metadata["model_thinking_chars"] = len(model_thinking)
+                run, guardrail_decision = self._record_loop_step(
+                    run,
+                    self._loop_step(
+                        LoopPhase.DRAFT,
+                        decision=LoopDecision.CONTINUE,
+                        name="Draft direct answer",
+                        input_summary=clean_prompt,
+                        output_summary=str(response).strip()[:500],
+                        metadata=draft_metadata,
+                    ),
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                verify_step = self._loop_step(
+                    LoopPhase.VERIFY,
+                    decision=LoopDecision.NOT_VERIFIED,
+                    name="No-context verification boundary",
+                    input_summary="answer without prompt evidence",
+                    output_summary=self_check.outcome,
+                    verification=self._verification_result_for_self_check(
+                        self_check
+                    ),
+                    metadata={
+                        "reasons": list(self_check.reasons),
+                        "citation_count": 0,
+                        "retry_attempted": False,
+                        "verifier_skipped": True,
+                    },
+                )
+                run, guardrail_decision = self._record_loop_step(run, verify_step)
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+            elif hasattr(active_state.retrieval_chain, "invoke_with_trace"):
                 supports_split_trace = (
                     hasattr(active_state.retrieval_chain, "retrieve_with_trace")
                     and hasattr(active_state.retrieval_chain, "draft_with_trace")
@@ -2250,12 +2482,7 @@ class AILoopEngine:
                         run=run,
                     )
                 response = active_state.retrieval_chain.invoke(clean_prompt)
-                llm_thinking = getattr(self.llm, "last_thinking", None)
-                model_thinking = (
-                    llm_thinking.strip()
-                    if isinstance(llm_thinking, str) and llm_thinking.strip()
-                    else None
-                )
+                model_thinking = self._last_model_thinking()
                 retrieved_chunk_count = 0
                 citations = []
                 self_check = None
@@ -2279,7 +2506,7 @@ class AILoopEngine:
                     )
 
             response = str(response).strip()
-            if len(response) < 3:
+            if len(response) < 3 and not direct_context:
                 response = SELF_CHECK_REFUSAL_ANSWER
                 model_thinking = None
                 run, guardrail_decision, self_check = self._run_self_check_with_loop(
@@ -2345,6 +2572,7 @@ class AILoopEngine:
                 self_check=self_check,
                 model_thinking=model_thinking,
                 metadata={
+                    "context_provider": run.context_provider,
                     "self_check_outcome": self_check.outcome if self_check else None,
                     "retry_attempted": (
                         self_check.retry_attempted if self_check else False
@@ -2352,31 +2580,10 @@ class AILoopEngine:
                 },
             )
 
-            self.chat_history.append(
-                {
-                    "session_id": session_id,
-                    "question": clean_prompt,
-                    "answer": result.answer,
-                    "citations": [
-                        {
-                            "id": citation.citation_id,
-                            "source_name": citation.source_name,
-                            "page": citation.page,
-                            "chunk_index": citation.chunk_index,
-                            "excerpt": citation.excerpt,
-                        }
-                        for citation in result.trace.citations
-                    ],
-                    "self_check": (
-                        {
-                            "outcome": result.trace.self_check.outcome,
-                            "reasons": result.trace.self_check.reasons,
-                            "retry_attempted": result.trace.self_check.retry_attempted,
-                        }
-                        if result.trace.self_check
-                        else None
-                    ),
-                }
+            self._record_chat_history_entry(
+                session_id=session_id,
+                question=clean_prompt,
+                result=result,
             )
             return result
         except Exception as exc:

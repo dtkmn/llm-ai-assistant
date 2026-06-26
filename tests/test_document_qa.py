@@ -231,17 +231,169 @@ def create_processed_mock_qa(tmp_path):
     return qa, document
 
 
-def test_query_before_document_asks_for_upload_first():
+def test_query_before_document_runs_no_context_loop():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
-    assert qa.query("What is this?") == "Please upload and process a document first."
-    result = qa.query_with_trace("What is this?")
-    assert result.answer == "Please upload and process a document first."
+    assert "mock response" in qa.query("What is this?")
+    result = qa.query_with_trace("What is this?", session_id="direct")
+    assert "mock response" in result.answer
     assert result.trace.question == "What is this?"
     assert result.trace.document_name is None
     assert result.trace.retrieved_chunk_count == 0
     assert result.trace.citations == []
-    assert result.trace.error_message == "document_not_loaded"
+    assert result.trace.error_message is None
+    assert result.trace.self_check.outcome == "not_verified"
+    assert result.trace.self_check.reasons == [
+        "no_context_provider",
+        "verifier_requires_prompt_evidence",
+    ]
+    assert result.trace.self_check.retry_attempted is False
+
+    run = result.loop_report.run
+    assert run.context_provider == "none"
+    assert run.metadata["context_provider"] == "none"
+    assert "document_text" not in run.metadata["untrusted_inputs"]
+    assert run.final_decision == LoopDecision.NOT_VERIFIED
+    assert [step.phase for step in run.steps] == [
+        LoopPhase.CONTEXT_SELECT,
+        LoopPhase.DRAFT,
+        LoopPhase.VERIFY,
+        LoopPhase.FINAL,
+    ]
+    verify_step = next(step for step in run.steps if step.phase == LoopPhase.VERIFY)
+    assert verify_step.verification.outcome.value == "not_verified"
+    assert verify_step.metadata["verifier_skipped"] is True
+    assert qa.loop_session("direct").report_count == 1
+
+
+def test_no_context_query_strips_inline_citation_markers():
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(
+        invoke=lambda _prompt: "The answer is definitely grounded [1].",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace("What is the answer?", session_id="direct_citation")
+
+    assert result.answer == "The answer is definitely grounded."
+    assert "[1]" not in result.answer
+    assert result.trace.citations == []
+    assert result.trace.retrieved_chunk_count == 0
+    assert result.trace.self_check.outcome == "not_verified"
+
+    draft_step = next(
+        step for step in result.loop_report.run.steps if step.phase == LoopPhase.DRAFT
+    )
+    assert "[1]" not in draft_step.output_summary
+    assert draft_step.metadata["inline_citation_ids"] == []
+    assert draft_step.metadata["removed_inline_citation_ids"] == [1]
+    assert result.loop_report.run.final_decision == LoopDecision.NOT_VERIFIED
+
+
+def test_no_context_query_preserves_attached_bracket_expressions():
+    cases = [
+        "The answer is definitely grounded[1].",
+        "That fact[1] is useful.",
+        "This is true[1].",
+        "Use fact[1] carefully.",
+        "Use source[0] and references[1] in the loop.",
+        "Use `fact[1]` in the code sample.",
+    ]
+
+    for raw_answer in cases:
+        qa = DocumentQA(fast_mode=True, llm_backend="mock")
+        qa.llm = SimpleNamespace(invoke=lambda _prompt, answer=raw_answer: answer)
+
+        result = qa.query_with_trace("What is the answer?")
+
+        assert result.answer == raw_answer
+        assert result.trace.citations == []
+        draft_step = next(
+            step for step in result.loop_report.run.steps if step.phase == LoopPhase.DRAFT
+        )
+        assert draft_step.output_summary == raw_answer
+        assert draft_step.metadata["inline_citation_ids"] == []
+        assert draft_step.metadata["removed_inline_citation_ids"] == []
+
+
+def test_no_context_query_preserves_code_indices():
+    cases = [
+        "Use arr[0] to access the first item, and arr[1] for the second.",
+        "Call item[0] from the list.",
+        "Read list[0] before list[1].",
+        "Read `foo[1]` inside the code sample.",
+        "Use users[0] to access the first user and scores[1] for the next score.",
+        "Read records[0] before names[1].",
+    ]
+
+    for answer in cases:
+        qa = DocumentQA(fast_mode=True, llm_backend="mock")
+        qa.llm = SimpleNamespace(invoke=lambda _prompt, value=answer: value)
+
+        result = qa.query_with_trace("How do I access indexed values?")
+
+        assert result.answer == answer
+        assert result.trace.citations == []
+        assert result.trace.self_check.outcome == "not_verified"
+        draft_step = next(
+            step for step in result.loop_report.run.steps if step.phase == LoopPhase.DRAFT
+        )
+        assert draft_step.output_summary == result.answer
+        assert draft_step.metadata["inline_citation_ids"] == []
+        assert draft_step.metadata["removed_inline_citation_ids"] == []
+
+
+def test_no_context_empty_draft_fails_closed():
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(invoke=lambda _prompt: "   ", last_thinking=None)
+
+    result = qa.query_with_trace("Say something.", session_id="empty_direct")
+
+    assert result.answer == (
+        "The model returned an empty answer. Please try again or check your LLM backend."
+    )
+    assert result.trace.error_message == "empty_direct_answer"
+    assert result.trace.self_check is None
+    assert result.trace.citations == []
+
+    run = result.loop_report.run
+    assert run.context_provider == "none"
+    assert run.final_decision == LoopDecision.ERROR
+    assert run.error_message == "empty_direct_answer"
+    assert [step.phase for step in run.steps] == [
+        LoopPhase.CONTEXT_SELECT,
+        LoopPhase.DRAFT,
+        LoopPhase.FINAL,
+    ]
+    draft_step = next(step for step in run.steps if step.phase == LoopPhase.DRAFT)
+    assert draft_step.decision == LoopDecision.ERROR
+    assert draft_step.error_message == "empty_direct_answer"
+    assert qa.loop_session("empty_direct").report_count == 1
+
+
+def test_query_before_document_fails_on_unavailable_llm_not_missing_document(
+    monkeypatch,
+):
+    qa = DocumentQA(fast_mode=True, llm_backend="ollama")
+
+    def fail_initialize_llm():
+        raise RuntimeError("ollama unavailable")
+
+    monkeypatch.setattr(qa, "_initialize_llm", fail_initialize_llm)
+
+    result = qa.query_with_trace("What is this?", session_id="no_llm")
+
+    assert result.answer == (
+        "Language model could not be initialized. Please check your LLM backend setup."
+    )
+    assert "upload" not in result.answer.lower()
+    assert result.trace.error_message == "llm_initialization_failed"
+    assert result.trace.citations == []
+    assert result.trace.self_check is None
+    assert result.loop_report.run.context_provider == "none"
+    assert result.loop_report.run.final_decision == LoopDecision.ERROR
+    assert result.loop_report.run.error_message == "llm_initialization_failed"
+    assert qa.loop_session("no_llm").report_count == 1
 
 
 def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
@@ -421,17 +573,18 @@ def test_loop_session_history_is_bounded(tmp_path):
     assert alpha_session.reports[0].run.run_id != first_result.loop_report.run.run_id
 
 
-def test_blocked_query_is_recorded_for_replay(tmp_path):
+def test_no_context_query_is_recorded_for_replay(tmp_path):
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
-    result = qa.query_with_trace("What is this?", session_id="blocked")
+    result = qa.query_with_trace("What is this?", session_id="direct")
 
-    session = qa.loop_session("blocked")
+    session = qa.loop_session("direct")
 
-    assert result.trace.error_message == "document_not_loaded"
+    assert result.trace.error_message is None
     assert session.report_count == 1
-    assert session.reports[0].run.final_decision == LoopDecision.BLOCK
-    assert session.reports[0].run.error_message == "document_not_loaded"
+    assert session.reports[0].run.context_provider == "none"
+    assert session.reports[0].run.final_decision == LoopDecision.NOT_VERIFIED
+    assert session.reports[0].run.error_message is None
 
 
 def test_processed_document_is_wrapped_as_context_provider(tmp_path):

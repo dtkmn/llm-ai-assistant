@@ -61,6 +61,10 @@ first context provider, not the product boundary.
   the first context provider capability, not the repo's strategic identity.
 - Document context is the first `ContextProvider`; keep provider identity in
   loop reports instead of hardcoding document-specific assumptions in UI code.
+- Document context is optional at query time. No-context answers may draft with
+  the selected LLM backend, but they must report `context_provider="none"`,
+  zero citations, and `not_verified`; do not run document verifier support
+  claims without prompt evidence.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,
   `LoopSession`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
