@@ -11,6 +11,7 @@ const state = {
   recipes: [],
   activeThreadId: null,
   activeRecipeId: null,
+  recipeDraft: null,
   latest: null,
 };
 
@@ -28,6 +29,18 @@ const elements = {
   recipeSelect: document.querySelector("#recipe-select"),
   recipeStatus: document.querySelector("#recipe-status"),
   recipeState: document.querySelector("#recipe-state"),
+  recipeEditor: document.querySelector("#recipe-editor"),
+  recipeEditorState: document.querySelector("#recipe-editor-state"),
+  recipeNewButton: document.querySelector("#recipe-new"),
+  recipeSaveButton: document.querySelector("#recipe-save"),
+  recipeDeleteButton: document.querySelector("#recipe-delete"),
+  recipeExportButton: document.querySelector("#recipe-export"),
+  recipeImport: document.querySelector("#recipe-import"),
+  recipeName: document.querySelector("#recipe-name"),
+  recipeGoal: document.querySelector("#recipe-goal"),
+  recipeInstructions: document.querySelector("#recipe-instructions"),
+  recipeCriteria: document.querySelector("#recipe-criteria"),
+  recipeStop: document.querySelector("#recipe-stop"),
   activeThreadTitle: document.querySelector("#active-thread-title"),
   refreshStatus: document.querySelector("#refresh-status"),
   runtimeGrid: document.querySelector("#runtime-grid"),
@@ -85,6 +98,10 @@ function safeText(value, fallback = "", maxLength = 120) {
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
+function safeField(value, maxLength = 4000) {
+  return String(value || "").slice(0, maxLength);
+}
+
 function sanitizeMessage(message) {
   const role = message?.role === "assistant" ? "assistant" : "user";
   const sanitized = {
@@ -118,15 +135,40 @@ function sanitizeLoopRun(rawRun) {
 
 function sanitizeRecipe(rawRecipe) {
   const recipeId = String(rawRecipe?.recipe_id || "");
+  const detailLoaded = Boolean(
+    rawRecipe &&
+      (
+        Object.hasOwn(rawRecipe, "instructions") ||
+        Object.hasOwn(rawRecipe, "success_criteria") ||
+        Object.hasOwn(rawRecipe, "stop_condition") ||
+        Object.hasOwn(rawRecipe, "metadata") ||
+        Object.hasOwn(rawRecipe, "created_at")
+      ),
+  );
+  const successCriteria = Array.isArray(rawRecipe?.success_criteria)
+    ? rawRecipe.success_criteria
+        .map((criterion) => safeField(criterion, 500).replace(/\s+/g, " ").trim())
+        .filter(Boolean)
+    : [];
   return {
     recipe_id: SESSION_ID_PATTERN.test(recipeId) ? recipeId : "",
     name: safeText(rawRecipe?.name, "Loop recipe", 96),
-    description: safeText(rawRecipe?.description, "", 180),
-    goal: safeText(rawRecipe?.goal, "", 260),
+    description: safeField(rawRecipe?.description, 500).replace(/\s+/g, " ").trim(),
+    goal: safeField(rawRecipe?.goal, 2000),
+    instructions: safeField(rawRecipe?.instructions, 4000),
+    success_criteria: successCriteria,
+    stop_condition: safeField(rawRecipe?.stop_condition, 1000),
     context_provider: String(rawRecipe?.context_provider || "auto"),
     model_profile: String(rawRecipe?.model_profile || "quality"),
     verifier: String(rawRecipe?.verifier || "default"),
+    metadata:
+      rawRecipe?.metadata && typeof rawRecipe.metadata === "object"
+        ? rawRecipe.metadata
+        : {},
+    detail_loaded: detailLoaded,
     is_default: Boolean(rawRecipe?.is_default),
+    created_at: String(rawRecipe?.created_at || ""),
+    updated_at: String(rawRecipe?.updated_at || ""),
   };
 }
 
@@ -152,10 +194,15 @@ function sanitizeThread(rawThread) {
     ? rawThread.loop_runs.map(sanitizeLoopRun).filter((run) => run.run_id)
     : [];
   const rawLoopRunCount = Number(rawThread?.loop_run_count ?? rawThread?.loopRunCount);
+  const rawMemoryCount = Number(rawThread?.memory_count ?? rawThread?.memoryCount);
   const loopRunCount =
     Number.isSafeInteger(rawLoopRunCount) && rawLoopRunCount >= 0
       ? rawLoopRunCount
       : loopRuns.length;
+  const memoryCount =
+    Number.isSafeInteger(rawMemoryCount) && rawMemoryCount >= 0
+      ? rawMemoryCount
+      : 0;
   const createdAt = String(
     rawThread?.created_at || rawThread?.createdAt || new Date().toISOString(),
   );
@@ -176,7 +223,25 @@ function sanitizeThread(rawThread) {
     messageCount: Number.isSafeInteger(messageCount) && messageCount >= 0
       ? messageCount
       : messages.length,
+    memoryCount,
   };
+}
+
+function applyThreadSummary(thread, summary) {
+  if (!thread || !summary?.id || thread.id !== summary.id) {
+    return;
+  }
+  thread.title = summary.title || thread.title;
+  thread.updatedAt = summary.updatedAt || thread.updatedAt;
+  thread.messageCount = Number.isSafeInteger(summary.messageCount)
+    ? summary.messageCount
+    : thread.messageCount;
+  thread.loopRunCount = Number.isSafeInteger(summary.loopRunCount)
+    ? summary.loopRunCount
+    : thread.loopRunCount;
+  thread.memoryCount = Number.isSafeInteger(summary.memoryCount)
+    ? summary.memoryCount
+    : thread.memoryCount;
 }
 
 function legacyActiveThreadId() {
@@ -281,6 +346,7 @@ function activeThread() {
       messages: [],
       loopRuns: [],
       loopRunCount: 0,
+      memoryCount: 0,
       latest: null,
       revision: 0,
       createdAt: "",
@@ -331,9 +397,14 @@ function renderThreads() {
     const runCount = Number.isSafeInteger(thread.loopRunCount)
       ? thread.loopRunCount
       : Array.isArray(thread.loopRuns) ? thread.loopRuns.length : 0;
+    const memoryCount = Number.isSafeInteger(thread.memoryCount)
+      ? thread.memoryCount
+      : 0;
     meta.textContent = `${messageCount} ${
       messageCount === 1 ? "message" : "messages"
-    } · ${runCount} ${runCount === 1 ? "run" : "runs"}`;
+    } · ${runCount} ${runCount === 1 ? "run" : "runs"} · ${memoryCount} ${
+      memoryCount === 1 ? "memory" : "memories"
+    }`;
 
     button.append(title, meta);
     elements.threadList.append(button);
@@ -761,6 +832,9 @@ async function loadRecipes() {
     ? preferredRecipeId
     : state.recipes[0]?.recipe_id || "";
   persistActiveRecipeId();
+  if (state.activeRecipeId) {
+    await loadRecipeDetail(state.activeRecipeId).catch(() => null);
+  }
   renderRecipes();
 }
 
@@ -770,6 +844,65 @@ function activeRecipe() {
     state.recipes[0] ||
     null
   );
+}
+
+function upsertRecipe(recipe) {
+  if (!recipe.recipe_id) {
+    return;
+  }
+  const others = state.recipes.filter((item) => item.recipe_id !== recipe.recipe_id);
+  state.recipes = [recipe, ...others].sort((left, right) => {
+    if (left.is_default !== right.is_default) {
+      return left.is_default ? -1 : 1;
+    }
+    return String(left.name).localeCompare(String(right.name));
+  });
+}
+
+async function loadRecipeDetail(recipeId) {
+  const recipe = sanitizeRecipe(
+    await requestJson(`/api/recipes/${encodeURIComponent(recipeId)}`),
+  );
+  upsertRecipe(recipe);
+  return recipe;
+}
+
+function recipeFields() {
+  return [
+    elements.recipeName,
+    elements.recipeGoal,
+    elements.recipeInstructions,
+    elements.recipeCriteria,
+    elements.recipeStop,
+  ];
+}
+
+function renderRecipeEditor() {
+  const recipe = state.recipeDraft || activeRecipe();
+  const isDraft = Boolean(state.recipeDraft);
+  const isDefault = Boolean(recipe?.is_default);
+  const detailLoaded = isDraft || isDefault || Boolean(recipe?.detail_loaded);
+  elements.recipeEditorState.textContent = isDraft
+    ? "new"
+    : isDefault
+      ? "default"
+      : detailLoaded
+        ? "custom"
+        : "loading";
+  elements.recipeName.value = recipe?.name || "";
+  elements.recipeGoal.value = recipe?.goal || "";
+  elements.recipeInstructions.value = recipe?.instructions || "";
+  elements.recipeCriteria.value = Array.isArray(recipe?.success_criteria)
+    ? recipe.success_criteria.join("\n")
+    : "";
+  elements.recipeStop.value = recipe?.stop_condition || "";
+  for (const field of recipeFields()) {
+    field.readOnly = !isDraft && (isDefault || !detailLoaded);
+  }
+  elements.recipeSaveButton.disabled =
+    !recipe || (!isDraft && (isDefault || !detailLoaded));
+  elements.recipeDeleteButton.disabled = !recipe || isDraft || isDefault;
+  elements.recipeExportButton.disabled = !recipe || isDraft;
 }
 
 function renderRecipes() {
@@ -784,8 +917,175 @@ function renderRecipes() {
   const recipe = activeRecipe();
   elements.recipeState.textContent = recipe?.is_default ? "default" : "custom";
   elements.recipeStatus.textContent = recipe
-    ? `${recipe.goal || recipe.description || recipe.name}`
+    ? safeText(recipe.goal || recipe.description || recipe.name, "", 180)
     : "No loop recipe available.";
+  renderRecipeEditor();
+}
+
+function recipePayloadFromForm() {
+  const basis = state.recipeDraft || activeRecipe() || {};
+  return {
+    name: elements.recipeName.value,
+    goal: elements.recipeGoal.value,
+    instructions: elements.recipeInstructions.value,
+    success_criteria: elements.recipeCriteria.value
+      .split(/\r?\n/)
+      .map((criterion) => criterion.trim())
+      .filter(Boolean),
+    stop_condition: elements.recipeStop.value,
+    context_provider: basis.context_provider || "auto",
+    model_profile: basis.model_profile || "quality",
+    verifier: basis.verifier || "default",
+    metadata: basis.metadata || {},
+  };
+}
+
+function startNewRecipe() {
+  state.recipeDraft = {
+    recipe_id: "",
+    name: "",
+    goal: "",
+    instructions: "",
+    success_criteria: [],
+    stop_condition: "",
+    context_provider: "auto",
+    model_profile: "quality",
+    verifier: "default",
+    is_default: false,
+  };
+  elements.recipeEditor.open = true;
+  elements.recipeStatus.textContent = "Editing new custom recipe.";
+  renderRecipeEditor();
+  elements.recipeName.focus();
+}
+
+async function saveRecipe() {
+  let active = activeRecipe();
+  const draft = state.recipeDraft;
+  setBusy(elements.recipeSaveButton, true, "Save");
+  try {
+    if (!draft && active && !active.detail_loaded) {
+      elements.recipeStatus.textContent = "Loading recipe details...";
+      active = await loadRecipeDetail(active.recipe_id);
+      renderRecipes();
+    }
+    const payload = recipePayloadFromForm();
+    const saved = sanitizeRecipe(
+      await requestJson(
+        draft
+          ? "/api/recipes"
+          : `/api/recipes/${encodeURIComponent(active.recipe_id)}`,
+        {
+          method: draft ? "POST" : "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      ),
+    );
+    state.recipeDraft = null;
+    upsertRecipe(saved);
+    state.activeRecipeId = saved.recipe_id;
+    persistActiveRecipeId();
+    renderRecipes();
+    elements.recipeStatus.textContent = `Saved ${saved.name}.`;
+  } catch (error) {
+    elements.recipeStatus.textContent = error.message;
+  } finally {
+    setBusy(elements.recipeSaveButton, false, "Save");
+    renderRecipeEditor();
+  }
+}
+
+async function deleteRecipe() {
+  const recipe = activeRecipe();
+  if (!recipe || recipe.is_default) {
+    return;
+  }
+  const confirmed =
+    typeof globalThis.confirm === "function"
+      ? globalThis.confirm(`Delete ${recipe.name}?`)
+      : true;
+  if (!confirmed) {
+    return;
+  }
+  setBusy(elements.recipeDeleteButton, true, "Delete");
+  try {
+    await requestJson(`/api/recipes/${encodeURIComponent(recipe.recipe_id)}`, {
+      method: "DELETE",
+    });
+    state.recipes = state.recipes.filter(
+      (item) => item.recipe_id !== recipe.recipe_id,
+    );
+    state.activeRecipeId = state.recipes[0]?.recipe_id || "";
+    persistActiveRecipeId();
+    if (state.activeRecipeId) {
+      await loadRecipeDetail(state.activeRecipeId).catch(() => null);
+    }
+    renderRecipes();
+    elements.recipeStatus.textContent = `Deleted ${recipe.name}.`;
+  } catch (error) {
+    elements.recipeStatus.textContent = error.message;
+  } finally {
+    setBusy(elements.recipeDeleteButton, false, "Delete");
+    renderRecipeEditor();
+  }
+}
+
+function downloadRecipe(recipe) {
+  const blob = new Blob([JSON.stringify(recipe, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${recipe.recipe_id || "loop-recipe"}.json`;
+  document.body?.append(link);
+  link.click();
+  link.remove?.();
+  URL.revokeObjectURL(url);
+}
+
+async function exportRecipe() {
+  const recipe = activeRecipe();
+  if (!recipe) {
+    return;
+  }
+  try {
+    const exported = await requestJson(
+      `/api/recipes/${encodeURIComponent(recipe.recipe_id)}/export`,
+    );
+    downloadRecipe(exported);
+    elements.recipeStatus.textContent = `Exported ${recipe.name}.`;
+  } catch (error) {
+    elements.recipeStatus.textContent = error.message;
+  }
+}
+
+async function importRecipe() {
+  const file = elements.recipeImport.files?.[0];
+  if (!file) {
+    return;
+  }
+  try {
+    const raw = JSON.parse(await file.text());
+    const imported = sanitizeRecipe(
+      await requestJson("/api/recipes", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(raw),
+      }),
+    );
+    state.recipeDraft = null;
+    upsertRecipe(imported);
+    state.activeRecipeId = imported.recipe_id;
+    persistActiveRecipeId();
+    renderRecipes();
+    elements.recipeStatus.textContent = `Imported ${imported.name}.`;
+  } catch (error) {
+    elements.recipeStatus.textContent = error.message;
+  } finally {
+    elements.recipeImport.value = "";
+  }
 }
 
 async function refreshStatus() {
@@ -882,6 +1182,9 @@ async function runQuery(event) {
         targetThread.loopRuns.length,
       );
     }
+    if (result.thread) {
+      applyThreadSummary(targetThread, sanitizeThread(result.thread));
+    }
     targetThread.latest = result;
     touchThread(targetThread);
     renderThreads();
@@ -914,6 +1217,7 @@ async function clearChat() {
   thread.messages = [];
   thread.loopRuns = [];
   thread.loopRunCount = 0;
+  thread.memoryCount = 0;
   thread.latest = null;
   touchThread(thread);
   renderThreads();
@@ -978,9 +1282,20 @@ async function boot() {
   elements.refreshStatus.addEventListener("click", refreshStatus);
   elements.recipeSelect.addEventListener("change", () => {
     state.activeRecipeId = elements.recipeSelect.value;
+    state.recipeDraft = null;
     persistActiveRecipeId();
-    renderRecipes();
+    loadRecipeDetail(state.activeRecipeId)
+      .then(renderRecipes)
+      .catch((error) => {
+        elements.recipeStatus.textContent = error.message;
+        renderRecipeEditor();
+      });
   });
+  elements.recipeNewButton.addEventListener("click", startNewRecipe);
+  elements.recipeSaveButton.addEventListener("click", saveRecipe);
+  elements.recipeDeleteButton.addEventListener("click", deleteRecipe);
+  elements.recipeExportButton.addEventListener("click", exportRecipe);
+  elements.recipeImport.addEventListener("change", importRecipe);
   await loadConfig();
   await refreshStatus();
 }

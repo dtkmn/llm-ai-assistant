@@ -105,6 +105,7 @@ class ThreadUpdateRequest(BaseModel):
 
 
 class RecipeWriteRequest(BaseModel):
+    recipe_id: Optional[str] = None
     name: str
     goal: str
     description: Optional[str] = None
@@ -460,6 +461,11 @@ def create_app(
     def create_recipe(request: RecipeWriteRequest) -> dict:
         try:
             recipe = threads().create_recipe(
+                recipe_id=(
+                    safe_path_id(request.recipe_id, label="recipe id")
+                    if request.recipe_id
+                    else None
+                ),
                 name=request.name,
                 description=request.description or "",
                 goal=request.goal,
@@ -474,6 +480,16 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return recipe_detail_response(recipe)
+
+    @api.get("/api/recipes/{recipe_id}/export")
+    def export_recipe(recipe_id: str) -> dict:
+        safe_recipe_id = safe_path_id(recipe_id, label="recipe id")
+        recipe = threads().get_recipe(safe_recipe_id)
+        if recipe is None:
+            raise HTTPException(status_code=404, detail="Recipe not found.")
+        payload = recipe_detail_response(recipe)
+        payload["exported_from"] = APP_TITLE
+        return payload
 
     @api.get("/api/recipes/{recipe_id}")
     def get_recipe(recipe_id: str) -> dict:
@@ -634,6 +650,9 @@ def create_app(
         )
         if persisted_turn:
             index_thread_memory(current_runtime, store, persisted_turn)
+            updated_thread = store.get_thread(session_id)
+            if updated_thread is not None:
+                payload["thread"] = thread_summary_response(updated_thread)
             if raw_loop_report:
                 run_id = ((raw_loop_report.get("run") or {}).get("run_id"))
                 if run_id:
