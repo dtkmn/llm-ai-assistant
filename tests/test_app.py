@@ -352,7 +352,7 @@ def test_static_frontend_renders_model_thinking_inside_assistant_message():
 
     script = r"""
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
+import { readFile } from "node:fs/promises";
 
 class ClassList {
   constructor(element) {
@@ -540,6 +540,15 @@ function deferred() {
   return { promise, resolve };
 }
 
+async function importFreshApp() {
+  const source = await readFile(process.env.APP_JS_PATH, "utf8");
+  const encoded = Buffer.from(
+    `${source}\n// frontend harness case ${Date.now()} ${Math.random()}`,
+    "utf8",
+  ).toString("base64");
+  await import(`data:text/javascript;base64,${encoded}`);
+}
+
 async function runCase(modelThinking) {
   const dom = createDom();
   const queryBodies = [];
@@ -575,7 +584,7 @@ async function runCase(modelThinking) {
     throw new Error(`unexpected fetch ${url}`);
   };
 
-  await import(`${pathToFileURL(process.env.APP_JS_PATH).href}?case=${Math.random()}`);
+  await importFreshApp();
   await new Promise((resolve) => setTimeout(resolve, 0));
   dom["query-input"].value = "What happened?";
   await dom["query-form"].dispatch("submit");
@@ -662,7 +671,7 @@ globalThis.fetch = async (url, options = {}) => {
   }
   throw new Error(`unexpected fetch ${url}`);
 };
-await import(`${pathToFileURL(process.env.APP_JS_PATH).href}?case=${Math.random()}`);
+await importFreshApp();
 await new Promise((resolve) => setTimeout(resolve, 0));
 staleDom["query-input"].value = "Question that will be cleared";
 const pendingSubmit = staleDom["query-form"].dispatch("submit");
