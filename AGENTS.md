@@ -46,8 +46,8 @@ Primary runtime files:
   verification result mapping. Keep it free of native-heavy imports.
 - `src/DocumentQA.py`: legacy compatibility module for old imports and
   monkeypatch targets. Do not add new implementation code here.
-- `src/loop_engine.py`: provider-neutral loop primitives for typed run, step,
-  policy, verifier, human-review, session, and report records.
+- `src/loop_engine.py`: provider-neutral loop primitives for typed recipe, run,
+  step, policy, verifier, human-review, session, and report records.
 - `src/loop_eval.py`: unified provider-free and optional live Ollama loop eval
   CLI with JSON artifacts containing scored `LoopReport` evidence.
 - `src/adapters/`: dependency-free framework-shaped exports from loop reports.
@@ -58,6 +58,9 @@ Primary runtime files:
   LangGraph manifest artifacts.
 - `src/app.py`: FastAPI backend, static frontend serving, upload/query routes,
   and user-facing status messages.
+- `src/thread_store.py`: local SQLite thread metadata, message, durable
+  loop-run, recipe, semantic-memory, and latest public loop payload
+  persistence. Browser storage must remain only a selected-thread/recipe hint.
 - `src/web_contract.py`: shared API/frontend response shaping for runtime
   status, upload messages, loop timeline, loop summary, and redacted trace
   payloads.
@@ -73,7 +76,7 @@ Primary runtime files:
 - Pip fallback: `python -m pip install -r requirements-dev.txt`
 - Run the app locally: `uv run ai-loop-engine` or `python -m src.app`
 - Run tests: `uv run pytest` or `python -m pytest`
-- Compile check: `python -m py_compile src/__init__.py src/app.py src/web_contract.py src/env_file.py src/ai_loop_engine.py src/ai_loop_runtime.py src/context_providers.py src/retrieval.py src/retrieval_types.py src/answer_loop.py src/document_config.py src/document_text.py src/document_ingestion.py src/runtime_config.py src/model_adapters.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/conftest.py tests/test_app.py tests/test_env_file.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
+- Compile check: `python -m py_compile src/__init__.py src/app.py src/thread_store.py src/web_contract.py src/env_file.py src/ai_loop_engine.py src/ai_loop_runtime.py src/context_providers.py src/retrieval.py src/retrieval_types.py src/answer_loop.py src/document_config.py src/document_text.py src/document_ingestion.py src/runtime_config.py src/model_adapters.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/conftest.py tests/test_app.py tests/test_env_file.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py tests/test_thread_store.py`
 - Dependency checks: `python -m pip check` and `python -m pip_audit -r requirements.txt --strict`
 
 ## Non-Negotiable Contracts
@@ -107,7 +110,7 @@ Primary runtime files:
 - Ollama model-emitted thinking is a UI/debugging signal, not evidence. Keep it
   separate from the final answer, label it as unverified, never synthesize it in
   mock mode, and redact/drop it whenever the final answer is refused, blocked,
-  or hidden by terminal guardrail redaction. GPT-OSS thinking must use a
+  or hidden by terminal public redaction. GPT-OSS thinking must use a
   validated `OLLAMA_THINK_LEVEL` of `low`, `medium`, or `high`; do not send
   boolean `think` values to GPT-OSS models.
 - Golden document evals must remain provider-free and deterministic. They should
@@ -147,6 +150,9 @@ Primary runtime files:
 - Local `.env` and `.env.local` files are developer conveniences loaded before
   native defaults in the app entrypoint. They must not override shell
   environment variables and must stay disabled under tests.
+- Response length is explicit runtime configuration. `FAST_MODE` controls the
+  speed/retrieval profile, while `MAX_OUTPUT_TOKENS` controls generation budget
+  and must be reflected in runtime status.
 - Runtime imports must not eagerly load the document parser stack. Keep
   `docx2txt`, `pypdf`, `langchain_text_splitters`, and `document_ingestion`
   lazy to upload/indexing paths.
@@ -164,10 +170,10 @@ Primary runtime files:
 - Product identity is AI Loop Engine. Document answering is now a
   document context provider capability, not the repo's strategic identity.
 - Typed loop records are the contract surface for future agent work. Add or
-  update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,
-  `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
-  `HumanReviewRequest` before adding planner, multi-agent, tool, replay, or
-  framework-adapter behavior.
+  update `LoopRecipe`, `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`,
+  `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`,
+  and `HumanReviewRequest` before adding planner, multi-agent, tool, replay,
+  or framework-adapter behavior.
 - `AILoopEngine.query_with_trace()` must expose a `LoopReport` that matches the
   actual query path: prompt evidence, draft, mechanical check, verifier outcome,
   retry/refusal state, and final answer.
@@ -175,6 +181,21 @@ Primary runtime files:
   `LoopSession` state keyed by `session_id`. Local replay JSONL export writes
   raw loop reports for developer diagnostics; public UI traces must keep using
   the redacted report surface.
+- Web/API threads must pass an explicit validated `session_id` into
+  `AILoopEngine.query_with_trace()`. FastAPI owns local SQLite persistence for
+  thread metadata, messages, durable public loop-run records, recipes, and
+  latest public loop payloads. Recent same-thread messages should be passed as
+  bounded conversation context so follow-up questions can resolve references
+  without leaking across threads. Older same-thread messages may be retrieved
+  by embedding similarity as semantic thread memory, but public loop traces
+  should expose only memory counts/status, not raw memory text. Browser storage
+  is only a selected-thread/recipe hint. Do not imply authenticated,
+  cross-device, or account-backed history until that architecture exists.
+- Loop recipes are reusable local skill definitions: goal, instructions,
+  success criteria, stop condition, context provider, model profile, and
+  verifier metadata. They may guide drafting and must be recorded in loop
+  metadata, but they must not grant tool access, scheduling, or autonomous
+  action by themselves.
 - Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
   or request human review, but it must not introduce autonomous tools by itself.
 - Framework adapters must export `LoopReport`/`LoopSession` surfaces before they
@@ -215,8 +236,9 @@ Use this loop for every non-trivial change:
   old document is still active and queryable after every failed upload path.
 - Preserve `AILoopEngine.query()` as the simple string API; add richer answer
   evidence through structured result objects such as `query_with_trace()`.
-- Keep replay/export behavior local and explicit. Do not add SQLite, server
-  persistence, or background replay jobs until tests prove the product need.
+- Keep replay/export behavior local and explicit. Do not add background replay
+  jobs, account-backed storage, or remote persistence until tests prove the
+  product need.
 - Keep `AILoopEngine` honest before making it clever. Reliability beats agentic
   theater.
 - Do not add OpenAI Agents SDK, LangGraph, or Microsoft Agent Framework as a core
@@ -248,7 +270,7 @@ For Python behavior changes:
 - `uv run pytest tests/test_langgraph_manifest_adapter.py -q`
 - `uv run pytest tests/test_loop_export.py -q`
 - `uv lock --check`
-- `python -m py_compile src/__init__.py src/app.py src/web_contract.py src/env_file.py src/ai_loop_engine.py src/ai_loop_runtime.py src/context_providers.py src/retrieval.py src/retrieval_types.py src/answer_loop.py src/document_config.py src/document_text.py src/document_ingestion.py src/runtime_config.py src/model_adapters.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/conftest.py tests/test_app.py tests/test_env_file.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
+- `python -m py_compile src/__init__.py src/app.py src/thread_store.py src/web_contract.py src/env_file.py src/ai_loop_engine.py src/ai_loop_runtime.py src/context_providers.py src/retrieval.py src/retrieval_types.py src/answer_loop.py src/document_config.py src/document_text.py src/document_ingestion.py src/runtime_config.py src/model_adapters.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/conftest.py tests/test_app.py tests/test_env_file.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py tests/test_thread_store.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:

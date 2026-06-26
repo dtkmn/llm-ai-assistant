@@ -18,6 +18,7 @@ from src.loop_engine import (
     LoopRun,
     LoopSession,
     LoopStep,
+    PUBLIC_REDACTION_TEXT,
     VerificationOutcome,
     VerificationResult,
 )
@@ -197,14 +198,10 @@ def test_public_export_redacts_terminal_content():
 
     assert payload["public"] is True
     assert secret not in serialized
-    assert payload["manifest"]["terminal_state"]["user_input"] == (
-        "[redacted: terminal guardrail decision]"
-    )
+    assert payload["manifest"]["terminal_state"]["user_input"] == PUBLIC_REDACTION_TEXT
     assert payload["manifest"]["metadata"]["policy"]["metadata"]["redacted"] is True
     checkpoint_state = payload["manifest"]["checkpoints"][0]["state"]
-    assert checkpoint_state["verification"]["reasons"] == [
-        "[redacted: terminal guardrail decision]"
-    ]
+    assert checkpoint_state["verification"]["reasons"] == [PUBLIC_REDACTION_TEXT]
     assert checkpoint_state["human_review"] is None
 
 

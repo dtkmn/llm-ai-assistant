@@ -21,7 +21,25 @@
       </header>
 
       <main class="workspace">
-        <section class="context-panel" aria-labelledby="context-title">
+        <section class="context-panel" aria-labelledby="threads-title">
+          <div class="panel-heading">
+            <h2 id="threads-title">Threads</h2>
+            <button class="ghost-button" id="new-thread" type="button">New</button>
+          </div>
+          <div class="thread-list" id="thread-list" role="list" aria-label="Conversation threads"></div>
+          <div class="panel-divider"></div>
+          <div class="panel-heading">
+            <h2 id="recipe-title">Loop Recipe</h2>
+            <span class="mini-status" id="recipe-state">default</span>
+          </div>
+          <label>
+            Skill
+            <select id="recipe-select" name="recipe"></select>
+          </label>
+          <p class="status-message compact" id="recipe-status">
+            Loading loop recipes...
+          </p>
+          <div class="panel-divider"></div>
           <div class="panel-heading">
             <h2 id="context-title">Optional Context</h2>
             <button class="ghost-button" id="refresh-status" type="button">Refresh</button>
@@ -45,7 +63,10 @@
 
         <section class="chat-panel" aria-labelledby="chat-title">
           <div class="panel-heading">
-            <h2 id="chat-title">Session</h2>
+            <div>
+              <h2 id="chat-title">Session</h2>
+              <p class="active-thread-title" id="active-thread-title">New thread</p>
+            </div>
             <button class="ghost-button" id="clear-chat" type="button">Clear</button>
           </div>
           <div class="messages" id="messages" aria-live="polite"></div>
@@ -62,6 +83,13 @@
             <span class="decision-chip" id="final-decision">idle</span>
           </div>
           <div class="timeline" id="timeline"></div>
+          <div class="run-history">
+            <div class="panel-heading compact-heading">
+              <h2>Durable Runs</h2>
+              <span class="mini-status" id="run-count">0 stored</span>
+            </div>
+            <div class="run-list" id="run-list"></div>
+          </div>
           <details class="thinking-panel" id="thinking-panel">
             <summary>
               <span>Model Thinking</span>

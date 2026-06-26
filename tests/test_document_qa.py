@@ -266,6 +266,142 @@ def test_query_before_document_runs_no_context_loop():
     assert qa.loop_session("direct").report_count == 1
 
 
+def test_no_context_query_uses_same_thread_conversation_history():
+    captured_prompts = []
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(
+        invoke=lambda prompt: captured_prompts.append(prompt)
+        or "Dynamic programming means solving a big problem by reusing smaller answers.",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace(
+        "Please explain it in layman terms.",
+        session_id="thread_memory",
+        conversation_history=[
+            {
+                "role": "user",
+                "content": "Do you know what dynamic programming is?",
+            },
+            {"role": "assistant", "content": "Yes."},
+        ],
+    )
+
+    assert "Dynamic programming means" in result.answer
+    assert result.trace.question == "Please explain it in layman terms."
+    prompt = captured_prompts[0]
+    assert "Recent same-thread conversation" in prompt
+    assert "Do you know what dynamic programming is?" in prompt
+    assert "Assistant: Yes." in prompt
+    assert "Current question: Please explain it in layman terms." in prompt
+    assert result.loop_report.run.user_input == "Please explain it in layman terms."
+    assert result.loop_report.run.metadata["conversation_context_turns"] == 2
+
+
+def test_no_context_query_uses_semantic_thread_memory():
+    captured_prompts = []
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(
+        invoke=lambda prompt: captured_prompts.append(prompt)
+        or "Dynamic programming is like keeping notes for solved subproblems.",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace(
+        "Please explain that algorithm.",
+        session_id="thread_memory",
+        semantic_memory=[
+            {
+                "role": "user",
+                "content": "Dynamic programming stores answers to subproblems.",
+                "score": 0.9,
+                "message_id": 7,
+            }
+        ],
+        semantic_memory_status="retrieved",
+    )
+
+    prompt = captured_prompts[0]
+    assert "Relevant same-thread memory" in prompt
+    assert "Dynamic programming stores answers to subproblems." in prompt
+    assert "Current question: Please explain that algorithm." in prompt
+    assert result.trace.question == "Please explain that algorithm."
+    assert result.loop_report.run.user_input == "Please explain that algorithm."
+    assert result.loop_report.run.metadata["semantic_memory_turns"] == 1
+    assert result.loop_report.run.metadata["semantic_memory_status"] == "retrieved"
+    memory_step = next(
+        step
+        for step in result.loop_report.run.steps
+        if step.name == "Retrieve thread memory"
+    )
+    assert memory_step.output_summary == "1 semantic memories"
+    assert memory_step.metadata == {
+        "semantic_memory_count": 1,
+        "semantic_memory_status": "retrieved",
+    }
+
+
+def test_semantic_memory_status_is_sanitized_in_public_loop_metadata():
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(
+        invoke=lambda _prompt: "A short answer.",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace(
+        "Say something.",
+        semantic_memory_status="SECRET_STATUS",
+    )
+
+    assert result.loop_report.run.metadata["semantic_memory_status"] == "unavailable"
+    memory_step = next(
+        step
+        for step in result.loop_report.run.steps
+        if step.name == "Retrieve thread memory"
+    )
+    assert memory_step.metadata["semantic_memory_status"] == "unavailable"
+
+
+def test_no_context_query_applies_loop_recipe_to_prompt_and_report():
+    captured_prompts = []
+    recipe = {
+        "recipe_id": "recipe_explainer",
+        "name": "Plain-language explainer",
+        "goal": "Explain technical ideas in simple language.",
+        "instructions": "Avoid jargon unless you define it.",
+        "success_criteria": ["Uses an analogy.", "Names uncertainty."],
+        "stop_condition": "Stop after the answer is clear.",
+        "context_provider": "none",
+        "model_profile": "quality",
+        "verifier": "default",
+    }
+    qa = DocumentQA(fast_mode=False, llm_backend="mock")
+    qa.llm = SimpleNamespace(
+        invoke=lambda prompt: captured_prompts.append(prompt)
+        or "Dynamic programming is like keeping a notebook of solved subproblems.",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace(
+        "Explain dynamic programming.",
+        session_id="recipe_runtime",
+        loop_recipe=recipe,
+    )
+
+    prompt = captured_prompts[0]
+    assert "Loop recipe guidance" in prompt
+    assert "Plain-language explainer" in prompt
+    assert "Avoid jargon unless you define it." in prompt
+    assert "Uses an analogy." in prompt
+    run = result.loop_report.run
+    assert run.metadata["recipe_id"] == "recipe_explainer"
+    assert run.metadata["recipe_name"] == "Plain-language explainer"
+    recipe_step = run.steps[0]
+    assert recipe_step.phase == LoopPhase.INPUT
+    assert recipe_step.name == "Apply loop recipe"
+    assert recipe_step.metadata["success_criteria_count"] == 2
+
+
 def test_no_context_query_strips_inline_citation_markers():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.llm = SimpleNamespace(
@@ -585,6 +721,34 @@ def test_no_context_query_is_recorded_for_replay(tmp_path):
     assert session.reports[0].run.context_provider == "none"
     assert session.reports[0].run.final_decision == LoopDecision.NOT_VERIFIED
     assert session.reports[0].run.error_message is None
+
+
+def test_cleared_session_does_not_record_in_flight_query_result():
+    class ClearSessionDuringDraftMiddleware:
+        def __init__(self):
+            self.qa = None
+            self.cleared = False
+
+        def before_step(self, run, step):
+            if step.phase == LoopPhase.DRAFT and not self.cleared:
+                self.cleared = True
+                self.qa.clear_loop_session(run.session_id)
+            return None
+
+    middleware = ClearSessionDuringDraftMiddleware()
+    qa = DocumentQA(
+        fast_mode=True,
+        llm_backend="mock",
+        loop_middlewares=(middleware,),
+    )
+    middleware.qa = qa
+
+    result = qa.query_with_trace("What is this?", session_id="stale")
+
+    assert result.loop_report.run.session_id == "stale"
+    assert middleware.cleared is True
+    assert qa.loop_session("stale").report_count == 0
+    assert qa.chat_history == []
 
 
 def test_processed_document_is_wrapped_as_context_provider(tmp_path):
@@ -1739,6 +1903,38 @@ def test_status_reports_configured_backend_before_initialization(monkeypatch):
     assert status.ready_for_queries is False
     assert status.mock_mode is False
     assert status.processing_report is None
+
+
+def test_max_output_tokens_defaults_to_quality_and_fast_profiles(monkeypatch):
+    monkeypatch.delenv("MAX_OUTPUT_TOKENS", raising=False)
+
+    quality = DocumentQA(fast_mode=False, llm_backend="mock")
+    fast = DocumentQA(fast_mode=True, llm_backend="mock")
+
+    assert quality.profile["max_new_tokens"] == 1024
+    assert quality.status().max_output_tokens == 1024
+    assert fast.profile["max_new_tokens"] == 384
+    assert fast.status().max_output_tokens == 384
+
+
+def test_max_output_tokens_env_overrides_profile(monkeypatch):
+    monkeypatch.setenv("MAX_OUTPUT_TOKENS", "2048")
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+
+    assert qa.profile["max_new_tokens"] == 2048
+    assert qa.max_output_tokens == 2048
+    assert qa.status().max_output_tokens == 2048
+
+
+def test_max_output_tokens_env_is_clamped(monkeypatch):
+    monkeypatch.setenv("MAX_OUTPUT_TOKENS", "999999")
+    high = DocumentQA(fast_mode=False, llm_backend="mock")
+    monkeypatch.setenv("MAX_OUTPUT_TOKENS", "1")
+    low = DocumentQA(fast_mode=False, llm_backend="mock")
+
+    assert high.max_output_tokens == 8192
+    assert low.max_output_tokens == 64
 
 
 def test_mock_backend_ignores_ollama_think_level_env(monkeypatch):
@@ -3819,6 +4015,107 @@ def test_ollama_llm_uses_chat_thinking_when_model_supports_it(monkeypatch):
         "think": True,
         "options": {"temperature": 0},
     }
+
+
+def test_ollama_llm_respects_explicit_thinking_token_budget(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        payload = json.loads(request.data.decode("utf-8"))
+        requests.append((request.full_url, payload, timeout))
+        if request.full_url.endswith("/api/show"):
+            return FakeResponse({"capabilities": ["completion", "thinking"]})
+        if request.full_url.endswith("/api/chat"):
+            return FakeResponse(
+                {
+                    "message": {
+                        "content": "Complete answer after thinking [1].",
+                        "thinking": "Reasoning that would otherwise consume budget.",
+                    },
+                    "done": True,
+                    "done_reason": "stop",
+                }
+            )
+        raise AssertionError(f"Unexpected Ollama URL: {request.full_url}")
+
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    llm = OllamaLLM(
+        model=DEFAULT_OLLAMA_MODEL,
+        options={"temperature": 0, "num_predict": 160},
+    )
+
+    llm.validate_model_available()
+    answer = llm.invoke("Answer with citation.")
+
+    assert answer == "Complete answer after thinking [1]."
+    assert requests[1][1]["options"] == {
+        "temperature": 0,
+        "num_predict": 160,
+    }
+
+
+def test_ollama_llm_rejects_length_truncated_chat_response(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        payload = json.loads(request.data.decode("utf-8"))
+        requests.append((request.full_url, payload, timeout))
+        if request.full_url.endswith("/api/show"):
+            return FakeResponse({"capabilities": ["completion", "thinking"]})
+        if request.full_url.endswith("/api/chat"):
+            return FakeResponse(
+                {
+                    "message": {
+                        "content": "This answer is visibly cut off because",
+                        "thinking": "Long hidden thinking consumed the budget.",
+                    },
+                    "done": True,
+                    "done_reason": "length",
+                }
+            )
+        raise AssertionError(f"Unexpected Ollama URL: {request.full_url}")
+
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    llm = OllamaLLM(model=DEFAULT_OLLAMA_MODEL)
+
+    llm.validate_model_available()
+    with pytest.raises(RuntimeError, match="stopped generation"):
+        llm.invoke("Answer with citation.")
+
+    assert llm.last_thinking is None
+    assert requests[1][0] == "http://localhost:11434/api/chat"
 
 
 def test_ollama_llm_uses_level_for_gpt_oss_thinking(monkeypatch):

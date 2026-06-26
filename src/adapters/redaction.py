@@ -3,8 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional
 
 from src.loop_engine import (
+    PUBLIC_REDACTION_REASON,
     PUBLIC_REDACTION_TEXT,
-    TERMINAL_GUARDRAIL_DECISION_VALUES,
+    TERMINAL_PUBLIC_REDACTION_DECISION_VALUES,
     LoopReport,
 )
 
@@ -20,7 +21,7 @@ def report_payload(report: LoopReport, *, public: bool = True) -> Dict[str, Any]
         return report.to_dict()
 
     payload = report.to_public_dict()
-    if _is_terminal_guardrail_payload(payload):
+    if _is_terminal_public_redaction_payload(payload):
         return _redact_terminal_payload(payload)
     return payload
 
@@ -36,9 +37,9 @@ def run_with_session_fallback(
     return run_with_session
 
 
-def _is_terminal_guardrail_payload(payload: Mapping[str, Any]) -> bool:
+def _is_terminal_public_redaction_payload(payload: Mapping[str, Any]) -> bool:
     final_decision = payload.get("run", {}).get("final_decision")
-    return final_decision in TERMINAL_GUARDRAIL_DECISION_VALUES
+    return final_decision in TERMINAL_PUBLIC_REDACTION_DECISION_VALUES
 
 
 def _redact_terminal_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -47,13 +48,13 @@ def _redact_terminal_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "run": dict(payload["run"]),
         "public_redaction": {
             "applied": True,
-            "reason": "terminal_guardrail_decision",
+            "reason": PUBLIC_REDACTION_REASON,
         },
     }
     run = redacted["run"]
     run["user_input"] = PUBLIC_REDACTION_TEXT
     run["final_answer"] = PUBLIC_REDACTION_TEXT
-    run["error_message"] = "terminal_guardrail_decision"
+    run["error_message"] = PUBLIC_REDACTION_REASON
     run["metadata"] = _redacted_metadata()
     if run.get("policy"):
         policy = dict(run["policy"])
@@ -76,7 +77,7 @@ def _redact_terminal_step(step: Mapping[str, Any]) -> Dict[str, Any]:
         else None
     )
     redacted["error_message"] = (
-        "terminal_guardrail_decision"
+        PUBLIC_REDACTION_REASON
         if redacted.get("error_message") is not None
         else None
     )
@@ -96,5 +97,5 @@ def _redact_terminal_step(step: Mapping[str, Any]) -> Dict[str, Any]:
 def _redacted_metadata() -> Dict[str, Any]:
     return {
         "redacted": True,
-        "redaction_reason": "terminal_guardrail_decision",
+        "redaction_reason": PUBLIC_REDACTION_REASON,
     }

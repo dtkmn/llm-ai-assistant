@@ -11,6 +11,27 @@ from uuid import uuid4
 
 SCHEMA_VERSION = "loop-report/v1"
 LOOP_SESSION_SCHEMA_VERSION = "loop-session/v1"
+LOOP_RECIPE_SCHEMA_VERSION = "loop-recipe/v1"
+DEFAULT_LOOP_RECIPE_ID = "recipe_general_loop"
+DEFAULT_LOOP_RECIPE_NAME = "General assistant loop"
+DEFAULT_LOOP_RECIPE_GOAL = (
+    "Answer the current user request clearly, using indexed context when it is "
+    "available and direct model reasoning when it is not."
+)
+DEFAULT_LOOP_RECIPE_INSTRUCTIONS = (
+    "Prefer useful, specific answers. Use same-thread memory only to resolve "
+    "references. Do not invent citations. Surface uncertainty when evidence is "
+    "missing."
+)
+DEFAULT_LOOP_RECIPE_SUCCESS_CRITERIA = (
+    "The answer addresses the current request.",
+    "Context-grounded claims use retrieved evidence and citations.",
+    "No-context answers are marked not_verified instead of supported.",
+)
+DEFAULT_LOOP_RECIPE_STOP_CONDITION = (
+    "Stop when the answer passes mechanical checks, is refused, or reaches the "
+    "configured retry limit."
+)
 GUARDRAIL_DECISION_VALUES = frozenset(
     {
         "continue",
@@ -20,14 +41,15 @@ GUARDRAIL_DECISION_VALUES = frozenset(
         "requires_review",
     }
 )
-TERMINAL_GUARDRAIL_DECISION_VALUES = frozenset(
+TERMINAL_PUBLIC_REDACTION_DECISION_VALUES = frozenset(
     {
         "refuse",
         "block",
         "requires_review",
     }
 )
-PUBLIC_REDACTION_TEXT = "[redacted: terminal guardrail decision]"
+PUBLIC_REDACTION_REASON = "terminal_public_redaction"
+PUBLIC_REDACTION_TEXT = "[redacted: terminal decision]"
 
 
 def _new_id(prefix: str) -> str:
@@ -58,6 +80,10 @@ def _metadata_dict(metadata: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
 
 def _string_tuple(values) -> Tuple[str, ...]:
     return tuple(str(value) for value in (values or ()))
+
+
+def _clean_text(value: Any, *, max_chars: int = 4000) -> str:
+    return " ".join(str(value or "").split()).strip()[:max_chars]
 
 
 def _json_bool(data: Mapping[str, Any], key: str, default: bool) -> bool:
@@ -105,6 +131,169 @@ class VerificationOutcome(str, Enum):
     INSUFFICIENT = "insufficient"
     NOT_VERIFIED = "not_verified"
     ERROR = "error"
+
+
+@dataclass(frozen=True)
+class LoopRecipe:
+    name: str
+    goal: str
+    instructions: str = ""
+    success_criteria: Tuple[str, ...] = ()
+    stop_condition: str = DEFAULT_LOOP_RECIPE_STOP_CONDITION
+    context_provider: str = "auto"
+    model_profile: str = "quality"
+    verifier: str = "default"
+    recipe_id: str = field(default_factory=lambda: _new_id("recipe"))
+    description: str = ""
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    schema_version: str = LOOP_RECIPE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        recipe_id = _clean_text(self.recipe_id, max_chars=96)
+        name = _clean_text(self.name, max_chars=96)
+        goal = _clean_text(self.goal, max_chars=2000)
+        if not recipe_id:
+            raise ValueError("Loop recipe id must not be empty")
+        if not name:
+            raise ValueError("Loop recipe name must not be empty")
+        if not goal:
+            raise ValueError("Loop recipe goal must not be empty")
+        criteria = tuple(
+            criterion
+            for criterion in (
+                _clean_text(value, max_chars=500)
+                for value in self.success_criteria
+            )
+            if criterion
+        )
+        object.__setattr__(self, "recipe_id", recipe_id)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "goal", goal)
+        object.__setattr__(
+            self,
+            "instructions",
+            _clean_text(self.instructions, max_chars=4000),
+        )
+        object.__setattr__(self, "success_criteria", criteria[:12])
+        object.__setattr__(
+            self,
+            "stop_condition",
+            _clean_text(self.stop_condition, max_chars=1000)
+            or DEFAULT_LOOP_RECIPE_STOP_CONDITION,
+        )
+        object.__setattr__(
+            self,
+            "context_provider",
+            _clean_text(self.context_provider, max_chars=64) or "auto",
+        )
+        object.__setattr__(
+            self,
+            "model_profile",
+            _clean_text(self.model_profile, max_chars=64) or "quality",
+        )
+        object.__setattr__(
+            self,
+            "verifier",
+            _clean_text(self.verifier, max_chars=64) or "default",
+        )
+        object.__setattr__(
+            self,
+            "description",
+            _clean_text(self.description, max_chars=500),
+        )
+        object.__setattr__(self, "metadata", _metadata_dict(self.metadata))
+        if self.schema_version != LOOP_RECIPE_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported loop recipe schema: {self.schema_version}")
+
+    @property
+    def is_default(self) -> bool:
+        return self.recipe_id == DEFAULT_LOOP_RECIPE_ID
+
+    def summary_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "recipe_id": self.recipe_id,
+            "name": self.name,
+            "description": self.description,
+            "goal": self.goal,
+            "context_provider": self.context_provider,
+            "model_profile": self.model_profile,
+            "verifier": self.verifier,
+            "is_default": self.is_default,
+            "updated_at": _datetime_to_json(self.updated_at),
+        }
+
+    def runtime_dict(self) -> Dict[str, Any]:
+        return {
+            "recipe_id": self.recipe_id,
+            "name": self.name,
+            "goal": self.goal,
+            "instructions": self.instructions,
+            "success_criteria": list(self.success_criteria),
+            "stop_condition": self.stop_condition,
+            "context_provider": self.context_provider,
+            "model_profile": self.model_profile,
+            "verifier": self.verifier,
+        }
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = self.runtime_dict()
+        payload.update(
+            {
+                "schema_version": self.schema_version,
+                "description": self.description,
+                "created_at": _datetime_to_json(self.created_at),
+                "updated_at": _datetime_to_json(self.updated_at),
+                "metadata": _metadata_dict(self.metadata),
+                "is_default": self.is_default,
+            }
+        )
+        return payload
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "LoopRecipe":
+        schema_version = str(data.get("schema_version", LOOP_RECIPE_SCHEMA_VERSION))
+        if schema_version != LOOP_RECIPE_SCHEMA_VERSION:
+            raise ValueError(f"Unsupported loop recipe schema: {schema_version}")
+        return cls(
+            schema_version=schema_version,
+            recipe_id=str(data.get("recipe_id") or data.get("id") or ""),
+            name=str(data.get("name") or ""),
+            description=str(data.get("description") or ""),
+            goal=str(data.get("goal") or ""),
+            instructions=str(data.get("instructions") or ""),
+            success_criteria=_string_tuple(data.get("success_criteria")),
+            stop_condition=str(
+                data.get("stop_condition") or DEFAULT_LOOP_RECIPE_STOP_CONDITION
+            ),
+            context_provider=str(data.get("context_provider") or "auto"),
+            model_profile=str(data.get("model_profile") or "quality"),
+            verifier=str(data.get("verifier") or "default"),
+            created_at=_datetime_from_json(data.get("created_at")) or utc_now(),
+            updated_at=_datetime_from_json(data.get("updated_at")) or utc_now(),
+            metadata=_metadata_dict(data.get("metadata")),
+        )
+
+
+def default_loop_recipe(*, created_at: Optional[datetime] = None) -> LoopRecipe:
+    timestamp = created_at or utc_now()
+    return LoopRecipe(
+        recipe_id=DEFAULT_LOOP_RECIPE_ID,
+        name=DEFAULT_LOOP_RECIPE_NAME,
+        description="Default local-first loop behavior.",
+        goal=DEFAULT_LOOP_RECIPE_GOAL,
+        instructions=DEFAULT_LOOP_RECIPE_INSTRUCTIONS,
+        success_criteria=DEFAULT_LOOP_RECIPE_SUCCESS_CRITERIA,
+        stop_condition=DEFAULT_LOOP_RECIPE_STOP_CONDITION,
+        context_provider="auto",
+        model_profile="quality",
+        verifier="default",
+        created_at=timestamp,
+        updated_at=timestamp,
+        metadata={"built_in": True},
+    )
 
 
 @dataclass(frozen=True)
@@ -488,31 +677,20 @@ class LoopReport:
         run = report["run"]
         steps = run.get("steps", [])
         final_decision = run.get("final_decision")
-        guardrail_step_index = next(
-            (
-                index
-                for index, step in enumerate(steps)
-                if _step_has_guardrail_decision(step)
-            ),
-            None,
-        )
-        if (
-            final_decision not in TERMINAL_GUARDRAIL_DECISION_VALUES
-            or guardrail_step_index is None
-        ):
+        if final_decision not in TERMINAL_PUBLIC_REDACTION_DECISION_VALUES:
             return report
 
         run["user_input"] = PUBLIC_REDACTION_TEXT
         run["final_answer"] = PUBLIC_REDACTION_TEXT
-        run["error_message"] = "terminal_guardrail_decision"
+        run["error_message"] = PUBLIC_REDACTION_REASON
         run["metadata"] = {
             "redacted": True,
-            "redaction_reason": "terminal_guardrail_decision",
+            "redaction_reason": PUBLIC_REDACTION_REASON,
         }
         run["steps"] = [_redact_public_step(step) for step in steps]
         report["public_redaction"] = {
             "applied": True,
-            "reason": "terminal_guardrail_decision",
+            "reason": PUBLIC_REDACTION_REASON,
         }
         return report
 
@@ -626,14 +804,6 @@ class LoopSession:
         )
 
 
-def _step_has_guardrail_decision(step: Mapping[str, Any]) -> bool:
-    metadata = step.get("metadata") or {}
-    return (
-        step.get("name") == "Guardrail decision"
-        or "guardrail_decision" in metadata
-    )
-
-
 def _redact_public_step(step: Mapping[str, Any]) -> Dict[str, Any]:
     redacted = dict(step)
     if redacted.get("input_summary") is not None:
@@ -641,21 +811,22 @@ def _redact_public_step(step: Mapping[str, Any]) -> Dict[str, Any]:
     if redacted.get("output_summary") is not None:
         redacted["output_summary"] = PUBLIC_REDACTION_TEXT
     if redacted.get("error_message") is not None:
-        redacted["error_message"] = "terminal_guardrail_decision"
+        redacted["error_message"] = PUBLIC_REDACTION_REASON
     redacted["metadata"] = {
         "redacted": True,
-        "redaction_reason": "terminal_guardrail_decision",
+        "redaction_reason": PUBLIC_REDACTION_REASON,
     }
     if redacted.get("human_review") is not None:
         redacted["human_review"] = None
     verification = redacted.get("verification")
     if verification:
         redacted_verification = dict(verification)
+        redacted_verification["verifier"] = None
         redacted_verification["reasons"] = [PUBLIC_REDACTION_TEXT]
         redacted_verification["raw_response"] = None
         redacted_verification["metadata"] = {
             "redacted": True,
-            "redaction_reason": "terminal_guardrail_decision",
+            "redaction_reason": PUBLIC_REDACTION_REASON,
         }
         redacted["verification"] = redacted_verification
     return redacted

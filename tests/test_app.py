@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -26,9 +27,12 @@ from src.loop_engine import (
     LoopReport,
     LoopRun,
     LoopStep,
+    PUBLIC_REDACTION_REASON,
+    PUBLIC_REDACTION_TEXT,
     VerificationOutcome,
     VerificationResult,
 )
+from src.thread_store import ThreadStore
 from src.web_contract import (
     answer_trace_dict,
     loop_summary_dict,
@@ -94,6 +98,7 @@ class FakeQA:
         )
         return DocumentQAStatus(
             profile_label="FAST" if self.fast_mode else "QUALITY",
+            max_output_tokens=384 if self.fast_mode else 1024,
             configured_backend=self.llm_backend,
             active_backend=active_backend,
             active_model_label=active_model_label,
@@ -107,7 +112,20 @@ class FakeQA:
             processing_report=self.latest_processing_report,
         )
 
-    def query_with_trace(self, message):
+    def query_with_trace(
+        self,
+        message,
+        session_id="default",
+        conversation_history=None,
+        semantic_memory=None,
+        semantic_memory_status="not_requested",
+        loop_recipe=None,
+    ):
+        self.last_query_session_id = session_id
+        self.last_conversation_history = list(conversation_history or [])
+        self.last_semantic_memory = list(semantic_memory or [])
+        self.last_semantic_memory_status = semantic_memory_status
+        self.last_loop_recipe = dict(loop_recipe or {})
         active_backend = self.active_llm_backend or self.llm_backend
         active_model_label = (
             self.loaded_model_label
@@ -115,30 +133,71 @@ class FakeQA:
             or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
         answer = "Project Phoenix is described in the uploaded document."
+        steps = []
+        if self.last_loop_recipe:
+            steps.append(
+                LoopStep(
+                    phase=LoopPhase.INPUT,
+                    decision=LoopDecision.CONTINUE,
+                    name="Apply loop recipe",
+                    output_summary=self.last_loop_recipe.get("name"),
+                    metadata={
+                        "recipe_id": self.last_loop_recipe.get("recipe_id"),
+                        "recipe_name": self.last_loop_recipe.get("name"),
+                    },
+                )
+            )
+        if semantic_memory_status != "not_requested":
+            steps.append(
+                LoopStep(
+                    phase=LoopPhase.CONTEXT_SELECT,
+                    decision=LoopDecision.CONTINUE,
+                    name="Retrieve thread memory",
+                    output_summary=(
+                        f"{len(self.last_semantic_memory)} semantic memories"
+                        if self.last_semantic_memory
+                        else semantic_memory_status
+                    ),
+                    metadata={
+                        "semantic_memory_count": len(self.last_semantic_memory),
+                        "semantic_memory_status": semantic_memory_status,
+                    },
+                )
+            )
+        steps.extend(
+            [
+                LoopStep(
+                    phase=LoopPhase.RETRIEVE,
+                    decision=LoopDecision.CONTINUE,
+                    name="Retrieve prompt evidence",
+                    output_summary="1 prompt chunks",
+                    metadata={"retrieved_chunk_count": 1, "citation_ids": [1]},
+                ),
+                LoopStep(
+                    phase=LoopPhase.MECHANICAL_CHECK,
+                    decision=LoopDecision.NOT_VERIFIED,
+                    name="Mechanical checks",
+                    output_summary="mechanical_checks_passed",
+                ),
+            ]
+        )
         loop_report = LoopReport(
             run=LoopRun(
                 run_id="run_fake",
+                session_id=session_id,
                 user_input=message,
                 context_provider="document",
                 backend=active_backend,
                 model_label=active_model_label,
-                steps=(
-                    LoopStep(
-                        phase=LoopPhase.RETRIEVE,
-                        decision=LoopDecision.CONTINUE,
-                        name="Retrieve prompt evidence",
-                        output_summary="1 prompt chunks",
-                        metadata={"retrieved_chunk_count": 1, "citation_ids": [1]},
-                    ),
-                    LoopStep(
-                        phase=LoopPhase.MECHANICAL_CHECK,
-                        decision=LoopDecision.NOT_VERIFIED,
-                        name="Mechanical checks",
-                        output_summary="mechanical_checks_passed",
-                    ),
-                ),
+                steps=tuple(steps),
                 final_decision=LoopDecision.NOT_VERIFIED,
                 final_answer=answer,
+                metadata={
+                    "semantic_memory_turns": len(self.last_semantic_memory),
+                    "semantic_memory_status": semantic_memory_status,
+                    "recipe_id": self.last_loop_recipe.get("recipe_id"),
+                    "recipe_name": self.last_loop_recipe.get("name"),
+                },
             )
         )
         return QueryResult(
@@ -170,6 +229,23 @@ class FakeQA:
             ),
             loop_report=loop_report,
         )
+
+    def memory_embedding_model_label(self):
+        return "fake-memory"
+
+    def embed_memory_texts(self, texts):
+        vectors = []
+        for text in texts:
+            lowered = str(text).lower()
+            if "dynamic programming" in lowered or "algorithm" in lowered:
+                vectors.append([1.0, 0.0])
+            elif "phoenix" in lowered:
+                vectors.append([0.8, 0.2])
+            else:
+                vectors.append([0.0, 1.0])
+        self.embedded_memory_texts = list(getattr(self, "embedded_memory_texts", []))
+        self.embedded_memory_texts.extend(str(text) for text in texts)
+        return "fake-memory", vectors
 
     def clear_loop_session(self, session_id="default"):
         self.cleared_loop_session_id = session_id
@@ -316,6 +392,42 @@ def test_app_import_keeps_engine_lazy():
     assert web_app.qa_system is None
 
 
+def test_app_main_defaults_to_loopback(monkeypatch):
+    observed = {}
+
+    def fake_run(app, *, host, port, log_level):
+        observed.update(
+            {"app": app, "host": host, "port": port, "log_level": log_level}
+        )
+
+    monkeypatch.delenv("WEB_HOST", raising=False)
+    monkeypatch.delenv("HOST", raising=False)
+    monkeypatch.delenv("WEB_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.setattr(web_app.uvicorn, "run", fake_run)
+
+    web_app.main()
+
+    assert observed["host"] == "127.0.0.1"
+    assert observed["port"] == 7860
+
+
+def test_app_main_allows_explicit_non_loopback_host(monkeypatch):
+    observed = {}
+
+    def fake_run(app, *, host, port, log_level):
+        observed.update({"host": host, "port": port, "log_level": log_level})
+
+    monkeypatch.setenv("WEB_HOST", "0.0.0.0")
+    monkeypatch.setenv("WEB_PORT", "8799")
+    monkeypatch.setattr(web_app.uvicorn, "run", fake_run)
+
+    web_app.main()
+
+    assert observed["host"] == "0.0.0.0"
+    assert observed["port"] == 8799
+
+
 def test_static_frontend_is_served():
     client = TestClient(web_app.create_app(FakeQA()))
 
@@ -325,6 +437,9 @@ def test_static_frontend_is_served():
 
     assert response.status_code == 200
     assert "AI Loop Engine" in response.text
+    assert "Threads" in response.text
+    assert "Loop Recipe" in response.text
+    assert "Durable Runs" in response.text
     assert "Optional Context" in response.text
     assert "You can still run the loop without documents" in response.text
     assert "Model Thinking" in response.text
@@ -333,11 +448,17 @@ def test_static_frontend_is_served():
     assert "Ask a question, or add context" in script.text
     assert "direct mode" in script.text
     assert "renderMessageThinking" in script.text
+    assert "session_id" in script.text
+    assert "switchThread" in script.text
+    assert "recipe_id" in script.text
+    assert "renderRuns" in script.text
     assert "result.trace?.model_thinking" in script.text
     assert "message-thinking" in script.text
     assert "innerHTML" not in script.text
     assert styles.status_code == 200
+    assert ".thread-button" in styles.text
     assert ".message-thinking" in styles.text
+    assert ".message-code-block" in styles.text
 
 
 def test_static_frontend_renders_model_thinking_inside_assistant_message():
@@ -346,7 +467,7 @@ def test_static_frontend_renders_model_thinking_inside_assistant_message():
 
     script = r"""
 import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
+import { readFile } from "node:fs/promises";
 
 class ClassList {
   constructor(element) {
@@ -407,6 +528,8 @@ class Element {
     await listener({ preventDefault() {} });
   }
 
+  focus() {}
+
   querySelector(selector) {
     if (selector === "summary span") {
       const summary = findNode(this, (node) => node.tagName === "SUMMARY");
@@ -436,7 +559,33 @@ function findNode(root, predicate) {
   return null;
 }
 
+function nodeText(root) {
+  return [
+    root.textContent || "",
+    ...root.children.map((child) => nodeText(child)),
+  ].join(" ");
+}
+
+function createMemoryStorage() {
+  const values = new Map();
+  return {
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null;
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+  };
+}
+
 function createDom() {
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: createMemoryStorage(),
+  });
   const ids = [
     "backend-pill",
     "model-pill",
@@ -446,6 +595,12 @@ function createDom() {
     "upload-status",
     "document-file",
     "text-encoding",
+    "new-thread",
+    "thread-list",
+    "recipe-select",
+    "recipe-status",
+    "recipe-state",
+    "active-thread-title",
     "refresh-status",
     "runtime-grid",
     "query-form",
@@ -454,6 +609,8 @@ function createDom() {
     "clear-chat",
     "messages",
     "timeline",
+    "run-list",
+    "run-count",
     "final-decision",
     "thinking-panel",
     "thinking-state",
@@ -502,9 +659,61 @@ function jsonResponse(payload) {
   };
 }
 
-async function runCase(modelThinking) {
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function createThreadPayload(id, messages = [], latest = null, options = {}) {
+  const payload = {
+    id,
+    title: "New thread",
+    messages,
+    latest,
+    message_count: messages.length,
+    loop_run_count: options.loopRunCount || 0,
+    created_at: "2026-06-26T00:00:00.000Z",
+    updated_at: "2026-06-26T00:00:00.000Z",
+  };
+  if (options.includeRuns !== false) {
+    payload.loop_runs = options.loopRuns || [];
+  }
+  return payload;
+}
+
+async function importFreshApp() {
+  const source = await readFile(process.env.APP_JS_PATH, "utf8");
+  const encoded = Buffer.from(
+    `${source}\n// frontend harness case ${Date.now()} ${Math.random()}`,
+    "utf8",
+  ).toString("base64");
+  await import(`data:text/javascript;base64,${encoded}`);
+}
+
+async function runCase(modelThinking, answer = "Loop answer") {
   const dom = createDom();
-  globalThis.fetch = async (url) => {
+  const queryBodies = [];
+  const serverThreads = [
+    createThreadPayload("thread_initial"),
+    createThreadPayload("thread_with_runs", [], null, {
+      includeRuns: false,
+      loopRunCount: 2,
+    }),
+  ];
+  const recipes = [{
+    recipe_id: "recipe_general_loop",
+    name: "General assistant loop",
+    goal: "Answer the request clearly.",
+    context_provider: "auto",
+    model_profile: "quality",
+    verifier: "default",
+    is_default: true,
+  }];
+  globalThis.fetch = async (url, options = {}) => {
+    const method = String(options.method || "GET").toUpperCase();
     if (url === "/api/config") {
       return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
     }
@@ -517,9 +726,42 @@ async function runCase(modelThinking) {
         chunk_count: 0,
       });
     }
-    if (url === "/api/query") {
+    if (url === "/api/recipes") {
       return jsonResponse({
-        answer: "Loop answer",
+        default_recipe_id: "recipe_general_loop",
+        recipes,
+      });
+    }
+    if (url === "/api/threads" && method === "GET") {
+      return jsonResponse({ threads: serverThreads });
+    }
+    if (url === "/api/threads" && method === "POST") {
+      const thread = createThreadPayload(`thread_created_${serverThreads.length}`);
+      serverThreads.unshift(thread);
+      return jsonResponse(thread);
+    }
+    if (url.startsWith("/api/threads/") && method === "GET") {
+      const id = decodeURIComponent(url.slice("/api/threads/".length));
+      const thread = serverThreads.find((item) => item.id === id);
+      if (thread) {
+        return jsonResponse(thread);
+      }
+    }
+    if (url === "/api/query") {
+      queryBodies.push(JSON.parse(options.body));
+      return jsonResponse({
+        answer,
+        run: {
+          run_id: "run_frontend",
+          final_decision: "not_verified",
+          context_provider: "none",
+          backend: "mock",
+          model: "MockLLM",
+          recipe_id: "recipe_general_loop",
+          recipe_name: "General assistant loop",
+          step_count: 4,
+          created_at: "2026-06-26T00:00:00.000Z",
+        },
         timeline: { rows: [], final_decision: "not_verified" },
         summary: {},
         trace: { model_thinking: modelThinking },
@@ -535,20 +777,64 @@ async function runCase(modelThinking) {
     throw new Error(`unexpected fetch ${url}`);
   };
 
-  await import(`${pathToFileURL(process.env.APP_JS_PATH).href}?case=${Math.random()}`);
+  await importFreshApp();
   await new Promise((resolve) => setTimeout(resolve, 0));
   dom["query-input"].value = "What happened?";
   await dom["query-form"].dispatch("submit");
-  return dom;
+  return { dom, queryBodies };
 }
 
-const capturedDom = await runCase({
+const capturedCase = await runCase({
   available: true,
   redacted: false,
   label: "Model Thinking (unverified)",
   content: "Captured thinking from model.",
   note: "Model-emitted thinking is useful for debugging the loop.",
-});
+}, [
+  "Here is `dp[0]` safely:",
+  "```java",
+  "public class FibonacciDP {",
+  "  public static int fib(int n) { return n; }",
+  "}",
+  "```",
+  "- uses memoization",
+  "<img src=x onerror=alert(1)>",
+].join("\n"));
+const capturedDom = capturedCase.dom;
+assert.equal(capturedCase.queryBodies.length, 1);
+assert.ok(capturedCase.queryBodies[0].session_id.startsWith("thread_"));
+assert.equal(capturedCase.queryBodies[0].recipe_id, "recipe_general_loop");
+const capturedAssistantMessage = findNode(
+  capturedDom.messages,
+  (node) => node.className === "message assistant",
+);
+assert.ok(capturedAssistantMessage, "assistant message should render");
+const capturedMessageContent = findNode(
+  capturedAssistantMessage,
+  (node) => node.className === "message-content",
+);
+assert.ok(capturedMessageContent, "assistant message should include rich content");
+const capturedCodeBlock = findNode(
+  capturedMessageContent,
+  (node) => node.className === "message-code-block",
+);
+assert.ok(capturedCodeBlock, "assistant markdown fence should become a code block");
+const capturedLanguage = findNode(
+  capturedCodeBlock,
+  (node) => node.className === "message-code-language",
+);
+assert.equal(capturedLanguage.textContent, "java");
+const capturedAnswerCode = findNode(capturedCodeBlock, (node) => node.tagName === "CODE");
+assert.ok(capturedAnswerCode.textContent.includes("public class FibonacciDP"));
+const capturedInlineCode = findNode(
+  capturedMessageContent,
+  (node) => node.className === "message-inline-code",
+);
+assert.equal(capturedInlineCode.textContent, "dp[0]");
+const capturedList = findNode(capturedMessageContent, (node) => node.tagName === "UL");
+assert.ok(capturedList, "assistant markdown list should render as a list");
+const capturedImage = findNode(capturedMessageContent, (node) => node.tagName === "IMG");
+assert.equal(capturedImage, null, "model HTML must stay inert text");
 const capturedThinking = findNode(
   capturedDom.messages,
   (node) => node.className === "message-thinking",
@@ -556,19 +842,138 @@ const capturedThinking = findNode(
 assert.ok(capturedThinking, "assistant message should include thinking details");
 const capturedPre = findNode(capturedThinking, (node) => node.tagName === "PRE");
 assert.equal(capturedPre.textContent, "Captured thinking from model.");
+const capturedRun = findNode(
+  capturedDom["run-list"],
+  (node) => node.className === "run-row",
+);
+assert.ok(capturedRun, "durable run summary should render after query");
+assert.ok(
+  nodeText(capturedDom["thread-list"]).includes("2 runs"),
+  "thread summaries should preserve backend loop_run_count before details load",
+);
 
-const emptyDom = await runCase({
+const inlineFenceCase = await runCase({
+  available: false,
+  redacted: false,
+  label: "Model Thinking (unverified)",
+  content: null,
+  note: "Model-emitted thinking is useful for debugging the loop.",
+}, "Inline fence: ```java public class InlineFence {}``` done.");
+const inlineAssistant = findNode(
+  inlineFenceCase.dom.messages,
+  (node) => node.className === "message assistant",
+);
+const inlineCodeBlock = findNode(
+  inlineAssistant,
+  (node) => node.className === "message-code-block",
+);
+assert.ok(inlineCodeBlock, "inline fenced code should become a code block");
+const inlineFenceLanguage = findNode(
+  inlineCodeBlock,
+  (node) => node.className === "message-code-language",
+);
+assert.equal(inlineFenceLanguage.textContent, "java");
+const inlineFenceCode = findNode(inlineCodeBlock, (node) => node.tagName === "CODE");
+assert.equal(inlineFenceCode.textContent, "public class InlineFence {}");
+
+const emptyCase = await runCase({
   available: false,
   redacted: false,
   label: "Model Thinking (unverified)",
   content: null,
   note: "Model-emitted thinking is useful for debugging the loop.",
 });
+const emptyDom = emptyCase.dom;
 const emptyThinking = findNode(
   emptyDom.messages,
   (node) => node.className === "message-thinking",
 );
 assert.equal(emptyThinking, null);
+
+const threadCase = await runCase({
+  available: false,
+  redacted: false,
+  label: "Model Thinking (unverified)",
+  content: null,
+  note: "Model-emitted thinking is useful for debugging the loop.",
+});
+const firstThreadId = threadCase.queryBodies[0].session_id;
+await threadCase.dom["new-thread"].dispatch("click");
+threadCase.dom["query-input"].value = "Second thread question";
+await threadCase.dom["query-form"].dispatch("submit");
+assert.equal(threadCase.queryBodies.length, 2);
+assert.notEqual(threadCase.queryBodies[1].session_id, firstThreadId);
+assert.equal(threadCase.dom["thread-list"].children.length, 3);
+
+const staleDom = createDom();
+const staleQuery = deferred();
+const staleServerThreads = [createThreadPayload("thread_stale")];
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({
+      backend: "ollama",
+      model: "thinking-model",
+      ready_for_queries: false,
+      query_mode: "direct",
+      chunk_count: 0,
+    });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({
+      default_recipe_id: "recipe_general_loop",
+      recipes: [{
+        recipe_id: "recipe_general_loop",
+        name: "General assistant loop",
+        goal: "Answer the request clearly.",
+        is_default: true,
+      }],
+    });
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: staleServerThreads });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    const thread = staleServerThreads.find((item) => item.id === id);
+    if (thread) {
+      return jsonResponse(thread);
+    }
+  }
+  if (url === "/api/query") {
+    await staleQuery.promise;
+    return jsonResponse({
+      answer: "Stale answer should not reappear",
+      timeline: { rows: [], final_decision: "not_verified" },
+      summary: {},
+      trace: { model_thinking: null },
+    });
+  }
+  if (url === "/api/chat/clear") {
+    return jsonResponse({
+      timeline: { rows: [], final_decision: null },
+      summary: {},
+      trace: {},
+    });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await importFreshApp();
+await new Promise((resolve) => setTimeout(resolve, 0));
+staleDom["query-input"].value = "Question that will be cleared";
+const pendingSubmit = staleDom["query-form"].dispatch("submit");
+await new Promise((resolve) => setTimeout(resolve, 0));
+await staleDom["clear-chat"].dispatch("click");
+staleQuery.resolve();
+await pendingSubmit;
+const staleAssistant = findNode(
+  staleDom.messages,
+  (node) => node.className === "message assistant",
+);
+assert.equal(staleAssistant, null);
 """
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -870,10 +1275,15 @@ def test_query_endpoint_returns_visible_loop_payload():
     assert response.status_code == 200
     payload = response.json()
     assert "Project Phoenix" in payload["answer"]
-    assert payload["timeline"]["rows"][0]["phase"] == "Retrieve"
-    assert payload["timeline"]["rows"][0]["signals"] == "1 prompt chunks; chunks: 1; citations: 1"
+    assert payload["timeline"]["rows"][0]["step"] == "Apply loop recipe"
+    assert payload["timeline"]["rows"][0]["signals"] == "General assistant loop"
+    assert payload["timeline"]["rows"][1]["phase"] == "Retrieve"
+    assert payload["timeline"]["rows"][1]["signals"] == "1 prompt chunks; chunks: 1; citations: 1"
     assert payload["summary"]["document"] == "demo.txt"
     assert payload["summary"]["final_decision"] == "not_verified"
+    assert payload["summary"]["recipe_id"] == "recipe_general_loop"
+    assert payload["summary"]["recipe_name"] == "General assistant loop"
+    assert payload["recipe"]["recipe_id"] == "recipe_general_loop"
     assert payload["trace"]["question"] == "What is Project Phoenix?"
     assert payload["trace"]["citations"][0]["source"] == "demo.txt"
     assert payload["trace"]["model_thinking"] == {
@@ -886,6 +1296,547 @@ def test_query_endpoint_returns_visible_loop_payload():
             "not verified evidence."
         ),
     }
+
+
+def test_query_endpoint_passes_session_id_to_loop_runtime():
+    fake_qa = FakeQA()
+    client = TestClient(web_app.create_app(fake_qa))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "What is Project Phoenix?", "session_id": "thread_alpha"},
+    )
+
+    assert response.status_code == 200
+    assert fake_qa.last_query_session_id == "thread_alpha"
+    assert fake_qa.last_loop_recipe["recipe_id"] == "recipe_general_loop"
+    assert response.json()["trace"]["loop_report"]["run"]["session_id"] == (
+        "thread_alpha"
+    )
+
+
+def test_query_endpoint_applies_selected_loop_recipe():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    recipe = store.create_recipe(
+        recipe_id="recipe_custom",
+        name="Custom recipe",
+        goal="Answer with a custom tone.",
+        instructions="Be direct.",
+        success_criteria=("Uses the selected recipe.",),
+    )
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/query",
+        json={
+            "message": "What is Project Phoenix?",
+            "session_id": "thread_alpha",
+            "recipe_id": recipe.recipe_id,
+        },
+    )
+
+    payload = response.json()
+    thread = client.get("/api/threads/thread_alpha").json()
+    assert response.status_code == 200
+    assert fake_qa.last_loop_recipe["recipe_id"] == "recipe_custom"
+    assert fake_qa.last_loop_recipe["success_criteria"] == [
+        "Uses the selected recipe."
+    ]
+    assert payload["recipe"]["recipe_id"] == "recipe_custom"
+    assert payload["summary"]["recipe_name"] == "Custom recipe"
+    assert thread["loop_runs"][0]["recipe_id"] == "recipe_custom"
+
+
+def test_thread_endpoints_create_list_get_rename_and_delete():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    initial = client.get("/api/threads")
+    assert initial.status_code == 200
+    assert len(initial.json()["threads"]) == 1
+
+    created = client.post("/api/threads", json={"title": "Research thread"})
+    assert created.status_code == 200
+    thread_id = created.json()["id"]
+    assert thread_id.startswith("thread_")
+    assert created.json()["title"] == "Research thread"
+
+    listed = client.get("/api/threads")
+    assert listed.status_code == 200
+    assert any(thread["id"] == thread_id for thread in listed.json()["threads"])
+
+    fetched = client.get(f"/api/threads/{thread_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["messages"] == []
+
+    renamed = client.patch(
+        f"/api/threads/{thread_id}",
+        json={"title": "Renamed thread"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "Renamed thread"
+
+    deleted = client.delete(f"/api/threads/{thread_id}")
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "thread_id": thread_id}
+    assert fake_qa.cleared_loop_session_id == thread_id
+    assert client.get(f"/api/threads/{thread_id}").status_code == 404
+
+
+def test_recipe_endpoints_manage_loop_recipes():
+    client = TestClient(web_app.create_app(FakeQA(), thread_store=ThreadStore.in_memory()))
+
+    listed = client.get("/api/recipes")
+    assert listed.status_code == 200
+    assert listed.json()["default_recipe_id"] == "recipe_general_loop"
+    assert listed.json()["recipes"][0]["recipe_id"] == "recipe_general_loop"
+
+    created = client.post(
+        "/api/recipes",
+        json={
+            "name": "Strict reviewer",
+            "description": "Review answers sharply.",
+            "goal": "Find weak assumptions before final answer.",
+            "instructions": "Call out uncertainty.",
+            "success_criteria": ["Risks first.", "No vague praise."],
+            "stop_condition": "Stop after a clear verdict.",
+            "context_provider": "auto",
+            "model_profile": "quality",
+            "verifier": "human_review",
+        },
+    )
+    assert created.status_code == 200
+    recipe_id = created.json()["recipe_id"]
+
+    fetched = client.get(f"/api/recipes/{recipe_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["success_criteria"] == ["Risks first.", "No vague praise."]
+
+    patched = client.patch(
+        f"/api/recipes/{recipe_id}",
+        json={"name": "Sharper reviewer", "success_criteria": ["No soft passes."]},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["name"] == "Sharper reviewer"
+    assert patched.json()["success_criteria"] == ["No soft passes."]
+
+    assert client.delete("/api/recipes/recipe_general_loop").status_code == 404
+    deleted = client.delete(f"/api/recipes/{recipe_id}")
+    assert deleted.status_code == 200
+    assert client.get(f"/api/recipes/{recipe_id}").status_code == 404
+
+
+def test_query_endpoint_persists_thread_messages_and_latest_payload():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "What is Project Phoenix?", "session_id": "thread_alpha"},
+    )
+
+    assert response.status_code == 200
+    thread = client.get("/api/threads/thread_alpha").json()
+    listed_thread = next(
+        thread
+        for thread in client.get("/api/threads").json()["threads"]
+        if thread["id"] == "thread_alpha"
+    )
+    assert "latest" not in listed_thread
+    assert thread["title"] == "What is Project Phoenix?"
+    assert [message["role"] for message in thread["messages"]] == [
+        "user",
+        "assistant",
+    ]
+    assert thread["messages"][0]["content"] == "What is Project Phoenix?"
+    assert "Project Phoenix" in thread["messages"][1]["content"]
+    assert thread["messages"][1]["thinking"]["available"] is True
+    assert thread["latest"]["summary"]["final_decision"] == "not_verified"
+    assert thread["loop_run_count"] == 1
+    assert thread["loop_runs"][0]["run_id"] == "run_fake"
+    assert thread["loop_runs"][0]["recipe_id"] == "recipe_general_loop"
+    assert response.json()["run"]["run_id"] == "run_fake"
+    assert thread["latest"]["trace"]["loop_report"]["run"]["session_id"] == (
+        "thread_alpha"
+    )
+
+    runs = client.get("/api/threads/thread_alpha/runs").json()
+    run_detail = client.get("/api/threads/thread_alpha/runs/run_fake").json()
+    assert runs["runs"][0]["run_id"] == "run_fake"
+    assert run_detail["public"] is True
+    assert run_detail["report"]["run"]["run_id"] == "run_fake"
+    assert run_detail["report"]["run"]["metadata"]["recipe_id"] == (
+        "recipe_general_loop"
+    )
+
+
+def test_query_endpoint_passes_recent_same_thread_history_to_runtime():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    store.create_thread(thread_id="thread_alpha")
+    store.append_message(
+        "thread_alpha",
+        role="user",
+        content="Do you know what dynamic programming is?",
+    )
+    store.append_message("thread_alpha", role="assistant", content="Yes.")
+    store.create_thread(thread_id="thread_other")
+    store.append_message(
+        "thread_other",
+        role="user",
+        content="This should stay out of alpha.",
+    )
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/query",
+        json={
+            "message": "Please explain it in layman terms.",
+            "session_id": "thread_alpha",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_qa.last_query_session_id == "thread_alpha"
+    assert fake_qa.last_conversation_history == [
+        {
+            "role": "user",
+            "content": "Do you know what dynamic programming is?",
+        },
+        {"role": "assistant", "content": "Yes."},
+    ]
+    assert all(
+        "stay out" not in entry["content"]
+        for entry in fake_qa.last_conversation_history
+    )
+
+
+def test_query_endpoint_retrieves_older_semantic_thread_memory():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    store.create_thread(thread_id="thread_alpha")
+    relevant = store.append_message(
+        "thread_alpha",
+        role="user",
+        content="Dynamic programming means reusing answers to subproblems.",
+    )
+    unrelated = store.append_message(
+        "thread_alpha",
+        role="assistant",
+        content="Banana bread uses ripe bananas.",
+    )
+    store.upsert_message_embedding(
+        relevant,
+        embedding_model="fake-memory",
+        vector=[1.0, 0.0],
+    )
+    store.upsert_message_embedding(
+        unrelated,
+        embedding_model="fake-memory",
+        vector=[0.0, 1.0],
+    )
+    for index in range(web_app.MAX_QUERY_HISTORY_MESSAGES):
+        store.append_message(
+            "thread_alpha",
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"recent filler {index}",
+        )
+    other_thread_memory = store.append_message(
+        "thread_other",
+        role="user",
+        content="Dynamic programming in another thread must not leak.",
+    )
+    store.upsert_message_embedding(
+        other_thread_memory,
+        embedding_model="fake-memory",
+        vector=[1.0, 0.0],
+    )
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/query",
+        json={
+            "message": "Can you explain that algorithm simply?",
+            "session_id": "thread_alpha",
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert fake_qa.last_semantic_memory_status == "retrieved"
+    assert fake_qa.last_semantic_memory == [
+        {
+            "message_id": relevant.id,
+            "role": "user",
+            "content": "Dynamic programming means reusing answers to subproblems.",
+            "score": 1.0,
+        }
+    ]
+    assert all(
+        "another thread" not in entry["content"]
+        for entry in fake_qa.last_semantic_memory
+    )
+    assert all(
+        "Dynamic programming means" not in entry["content"]
+        for entry in fake_qa.last_conversation_history
+    )
+    memory_rows = [
+        row
+        for row in payload["timeline"]["rows"]
+        if row["step"] == "Retrieve thread memory"
+    ]
+    assert memory_rows
+    assert "memory: 1" in memory_rows[0]["signals"]
+    assert payload["summary"]["semantic_memory_count"] == 1
+    assert payload["summary"]["semantic_memory_status"] == "retrieved"
+    indexed_memories = store.semantic_memories(
+        "thread_alpha",
+        embedding_model="fake-memory",
+        query_vector=[1.0, 0.0],
+        min_score=0.0,
+    )
+    assert any(
+        memory.content == "Can you explain that algorithm simply?"
+        for memory in indexed_memories
+    )
+
+
+def test_query_endpoint_does_not_persist_partial_turn_on_runtime_failure():
+    class FailingQA(FakeQA):
+        def query_with_trace(
+            self,
+            message,
+            session_id="default",
+            conversation_history=None,
+            semantic_memory=None,
+            semantic_memory_status="not_requested",
+            loop_recipe=None,
+        ):
+            self.last_query_session_id = session_id
+            self.last_conversation_history = list(conversation_history or [])
+            self.last_semantic_memory = list(semantic_memory or [])
+            self.last_semantic_memory_status = semantic_memory_status
+            self.last_loop_recipe = dict(loop_recipe or {})
+            raise RuntimeError("backend unavailable")
+
+    fake_qa = FailingQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(
+        web_app.create_app(fake_qa, thread_store=store),
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        "/api/query",
+        json={"message": "hello", "session_id": "thread_fail"},
+    )
+
+    assert response.status_code == 500
+    thread = client.get("/api/threads/thread_fail").json()
+    assert thread["messages"] == []
+    assert thread["message_count"] == 0
+    assert thread["loop_run_count"] == 0
+    assert thread["latest"] is None
+
+
+def test_clear_chat_blocks_stale_in_flight_query_persistence():
+    class BlockingQA(FakeQA):
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def query_with_trace(
+            self,
+            message,
+            session_id="default",
+            conversation_history=None,
+            semantic_memory=None,
+            semantic_memory_status="not_requested",
+            loop_recipe=None,
+        ):
+            self.last_query_session_id = session_id
+            self.last_conversation_history = list(conversation_history or [])
+            self.last_semantic_memory = list(semantic_memory or [])
+            self.last_semantic_memory_status = semantic_memory_status
+            self.last_loop_recipe = dict(loop_recipe or {})
+            self.started.set()
+            if not self.release.wait(timeout=5):
+                raise RuntimeError("timed out waiting for test release")
+            return super().query_with_trace(
+                message,
+                session_id=session_id,
+                conversation_history=conversation_history,
+                semantic_memory=semantic_memory,
+                semantic_memory_status=semantic_memory_status,
+                loop_recipe=loop_recipe,
+            )
+
+    fake_qa = BlockingQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+    responses = {}
+
+    def run_query():
+        responses["query"] = client.post(
+            "/api/query",
+            json={"message": "stale me", "session_id": "thread_race"},
+        )
+
+    query_thread = threading.Thread(target=run_query)
+    query_thread.start()
+    assert fake_qa.started.wait(timeout=5)
+
+    clear_response = client.post(
+        "/api/chat/clear",
+        json={"session_id": "thread_race"},
+    )
+    fake_qa.release.set()
+    query_thread.join(timeout=5)
+
+    assert not query_thread.is_alive()
+    assert clear_response.status_code == 200
+    assert responses["query"].status_code == 200
+    thread = client.get("/api/threads/thread_race").json()
+    assert thread["messages"] == []
+    assert thread["message_count"] == 0
+    assert thread["loop_run_count"] == 0
+    assert client.get("/api/threads/thread_race/runs").json()["runs"] == []
+    assert thread["latest"] is None
+
+
+def test_delete_thread_blocks_stale_in_flight_query_resurrection():
+    class BlockingQA(FakeQA):
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def query_with_trace(
+            self,
+            message,
+            session_id="default",
+            conversation_history=None,
+            semantic_memory=None,
+            semantic_memory_status="not_requested",
+            loop_recipe=None,
+        ):
+            self.last_query_session_id = session_id
+            self.last_conversation_history = list(conversation_history or [])
+            self.last_semantic_memory = list(semantic_memory or [])
+            self.last_semantic_memory_status = semantic_memory_status
+            self.last_loop_recipe = dict(loop_recipe or {})
+            self.started.set()
+            if not self.release.wait(timeout=5):
+                raise RuntimeError("timed out waiting for test release")
+            return super().query_with_trace(
+                message,
+                session_id=session_id,
+                conversation_history=conversation_history,
+                semantic_memory=semantic_memory,
+                semantic_memory_status=semantic_memory_status,
+                loop_recipe=loop_recipe,
+            )
+
+    fake_qa = BlockingQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+    responses = {}
+
+    def run_query():
+        responses["query"] = client.post(
+            "/api/query",
+            json={"message": "stale me", "session_id": "thread_race"},
+        )
+
+    query_thread = threading.Thread(target=run_query)
+    query_thread.start()
+    assert fake_qa.started.wait(timeout=5)
+
+    delete_response = client.delete("/api/threads/thread_race")
+    fake_qa.release.set()
+    query_thread.join(timeout=5)
+
+    assert not query_thread.is_alive()
+    assert delete_response.status_code == 200
+    assert responses["query"].status_code == 200
+    assert client.get("/api/threads/thread_race").status_code == 404
+
+
+def test_delete_recreate_blocks_stale_in_flight_query_resurrection():
+    class BlockingQA(FakeQA):
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def query_with_trace(
+            self,
+            message,
+            session_id="default",
+            conversation_history=None,
+            semantic_memory=None,
+            semantic_memory_status="not_requested",
+            loop_recipe=None,
+        ):
+            self.last_query_session_id = session_id
+            self.last_conversation_history = list(conversation_history or [])
+            self.last_semantic_memory = list(semantic_memory or [])
+            self.last_semantic_memory_status = semantic_memory_status
+            self.last_loop_recipe = dict(loop_recipe or {})
+            self.started.set()
+            if not self.release.wait(timeout=5):
+                raise RuntimeError("timed out waiting for test release")
+            return super().query_with_trace(
+                message,
+                session_id=session_id,
+                conversation_history=conversation_history,
+                semantic_memory=semantic_memory,
+                semantic_memory_status=semantic_memory_status,
+                loop_recipe=loop_recipe,
+            )
+
+    fake_qa = BlockingQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+    responses = {}
+
+    def run_query():
+        responses["query"] = client.post(
+            "/api/query",
+            json={"message": "stale me", "session_id": "thread_race"},
+        )
+
+    query_thread = threading.Thread(target=run_query)
+    query_thread.start()
+    assert fake_qa.started.wait(timeout=5)
+
+    delete_response = client.delete("/api/threads/thread_race")
+    recreated = store.create_thread(thread_id="thread_race")
+    fake_qa.release.set()
+    query_thread.join(timeout=5)
+
+    assert not query_thread.is_alive()
+    assert delete_response.status_code == 200
+    assert responses["query"].status_code == 200
+    thread = client.get("/api/threads/thread_race").json()
+    assert thread["id"] == recreated.id
+    assert thread["messages"] == []
+    assert thread["message_count"] == 0
+    assert thread["loop_run_count"] == 0
+    assert thread["latest"] is None
+
+
+def test_query_endpoint_rejects_invalid_session_id():
+    client = TestClient(web_app.create_app(FakeQA()))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "What is Project Phoenix?", "session_id": "../bad"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid session id."
 
 
 def test_query_endpoint_allows_no_context_loop():
@@ -906,8 +1857,9 @@ def test_query_endpoint_allows_no_context_loop():
     assert payload["trace"]["retrieved_chunk_count"] == 0
     assert payload["trace"]["citations"] == []
     assert payload["trace"]["self_check"]["outcome"] == "not_verified"
-    assert payload["timeline"]["rows"][0]["phase"] == "Context"
-    assert payload["timeline"]["rows"][0]["signals"] == "no_context_provider"
+    assert payload["timeline"]["rows"][0]["step"] == "Apply loop recipe"
+    assert payload["timeline"]["rows"][1]["phase"] == "Context"
+    assert payload["timeline"]["rows"][1]["signals"] == "no_context_provider"
     assert payload["trace"]["model_thinking"]["available"] is False
     assert payload["trace"]["model_thinking"]["content"] is None
 
@@ -932,6 +1884,73 @@ def test_clear_chat_resets_session_state():
     assert fake_qa.chat_history == []
     assert fake_qa.cleared_loop_session_id == "default"
     assert response.json()["timeline"]["empty"] is True
+
+
+def test_clear_chat_resets_requested_session_state():
+    class StaleAppendDuringClearQA(FakeQA):
+        def clear_loop_session(self, session_id="default"):
+            super().clear_loop_session(session_id)
+            self.chat_history.append(
+                {"session_id": session_id, "question": "stale in-flight"}
+            )
+
+    fake_qa = StaleAppendDuringClearQA()
+    fake_qa.chat_history = [
+        {"session_id": "thread_beta", "question": "old"},
+        {"session_id": "thread_other", "question": "keep"},
+    ]
+    client = TestClient(web_app.create_app(fake_qa))
+
+    response = client.post("/api/chat/clear", json={"session_id": "thread_beta"})
+
+    assert response.status_code == 200
+    assert fake_qa.chat_history == [
+        {"session_id": "thread_other", "question": "keep"}
+    ]
+    assert fake_qa.cleared_loop_session_id == "thread_beta"
+    assert response.json()["timeline"]["empty"] is True
+
+
+def test_clear_chat_resets_persisted_thread_messages_only():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    store.create_thread(thread_id="thread_beta")
+    store.create_thread(thread_id="thread_other")
+    store.append_message("thread_beta", role="user", content="old")
+    store.append_message("thread_other", role="user", content="keep")
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post("/api/chat/clear", json={"session_id": "thread_beta"})
+
+    assert response.status_code == 200
+    assert client.get("/api/threads/thread_beta").json()["messages"] == []
+    other_messages = client.get("/api/threads/thread_other").json()["messages"]
+    assert [message["content"] for message in other_messages] == ["keep"]
+
+
+def test_clear_chat_does_not_recreate_deleted_thread():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    store.create_thread(thread_id="thread_deleted")
+    store.delete_thread("thread_deleted")
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/chat/clear",
+        json={"session_id": "thread_deleted"},
+    )
+
+    assert response.status_code == 200
+    assert client.get("/api/threads/thread_deleted").status_code == 404
+
+
+def test_clear_chat_rejects_invalid_session_id():
+    client = TestClient(web_app.create_app(FakeQA()))
+
+    response = client.post("/api/chat/clear", json={"session_id": "bad/session"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid session id."
 
 
 def test_loop_contract_redacts_guardrail_blocked_draft_everywhere():
@@ -1006,19 +2025,15 @@ def test_loop_contract_redacts_guardrail_blocked_draft_everywhere():
     assert blocked_answer not in public_json
     assert secret_question not in public_json
     assert blocked_thinking not in public_json
-    assert public_payload["summary"]["last_error"] == "terminal_guardrail_decision"
+    assert public_payload["summary"]["last_error"] == PUBLIC_REDACTION_REASON
     assert public_payload["timeline"]["rows"][0]["signals"] == (
-        "[redacted: terminal guardrail decision]; "
+        f"{PUBLIC_REDACTION_TEXT}; "
         "verifier: unsupported; "
-        "reasons: [redacted: terminal guardrail decision]"
+        f"reasons: {PUBLIC_REDACTION_TEXT}"
     )
-    assert public_payload["trace"]["question"] == (
-        "[redacted: terminal guardrail decision]"
-    )
-    assert public_payload["answer"] == "[redacted: terminal guardrail decision]"
-    assert public_payload["trace"]["answer"] == (
-        "[redacted: terminal guardrail decision]"
-    )
+    assert public_payload["trace"]["question"] == PUBLIC_REDACTION_TEXT
+    assert public_payload["answer"] == PUBLIC_REDACTION_TEXT
+    assert public_payload["trace"]["answer"] == PUBLIC_REDACTION_TEXT
     assert public_payload["trace"]["model_thinking"] == {
         "available": False,
         "redacted": True,
@@ -1100,3 +2115,4 @@ def test_runtime_status_dict_preserves_honest_readiness_scope():
     assert status["ready_for_queries"] is False
     assert status["readiness_scope"] == "retrieval_pipeline"
     assert status["inference_validated"] is False
+    assert status["max_output_tokens"] == 384
