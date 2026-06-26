@@ -91,6 +91,7 @@ def upload_status_message(uploaded_name: str, qa_status: DocumentQAStatus) -> st
         return (
             f"Document context {document_name} processed in mock mode. "
             f"Profile: {qa_status.profile_label}. "
+            f"Max output: {qa_status.max_output_tokens} tokens. "
             f"Active model: {qa_status.active_model_label}. "
             f"{chunk_message} "
             "Answers will be demonstration responses until a real LLM backend "
@@ -99,6 +100,7 @@ def upload_status_message(uploaded_name: str, qa_status: DocumentQAStatus) -> st
     return (
         f"Document context {document_name} indexed. "
         f"Profile: {qa_status.profile_label}. "
+        f"Max output: {qa_status.max_output_tokens} tokens. "
         f"Backend: {qa_status.active_backend}. "
         f"Active model: {qa_status.active_model_label}. "
         f"{chunk_message} "
@@ -116,6 +118,7 @@ def runtime_status_dict(qa_status: DocumentQAStatus) -> dict:
         "backend": qa_status.active_backend,
         "model": qa_status.active_model_label,
         "profile": qa_status.profile_label,
+        "max_output_tokens": qa_status.max_output_tokens,
         "app_device": qa_status.device,
         "embeddings_model": qa_status.embeddings_model,
         "embeddings_device": qa_status.embeddings_device,
@@ -241,6 +244,10 @@ def loop_step_detail(step: dict) -> str:
         parts.append(f"reasons: {', '.join(str(reason) for reason in reasons)}")
     if metadata.get("retrieved_chunk_count") is not None:
         parts.append(f"chunks: {metadata.get('retrieved_chunk_count')}")
+    if metadata.get("semantic_memory_count") is not None:
+        parts.append(f"memory: {metadata.get('semantic_memory_count')}")
+    if metadata.get("semantic_memory_status"):
+        parts.append(f"memory status: {metadata.get('semantic_memory_status')}")
     citation_ids = metadata.get("citation_ids") or []
     if citation_ids:
         parts.append(f"citations: {', '.join(str(value) for value in citation_ids)}")
@@ -275,6 +282,8 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
             "backend": None,
             "model": None,
             "retrieved_chunk_count": 0,
+            "semantic_memory_count": 0,
+            "semantic_memory_status": None,
             "draft_attempt_count": 0,
             "mechanical_check": None,
             "verifier": None,
@@ -315,6 +324,13 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
         "backend": trace.backend,
         "model": trace.model_label,
         "retrieved_chunk_count": trace.retrieved_chunk_count,
+        "semantic_memory_count": run.get("metadata", {}).get(
+            "semantic_memory_turns",
+            0,
+        ),
+        "semantic_memory_status": run.get("metadata", {}).get(
+            "semantic_memory_status"
+        ),
         "draft_attempt_count": sum(
             1 for step in steps if step.get("phase") == "draft"
         ),

@@ -1,4 +1,5 @@
-const THREAD_STORAGE_KEY = "ai-loop-engine.threads.v1";
+const ACTIVE_THREAD_STORAGE_KEY = "ai-loop-engine.active-thread.v1";
+const LEGACY_THREAD_STORAGE_KEY = "ai-loop-engine.threads.v1";
 const DEFAULT_THREAD_TITLE = "New thread";
 const MAX_THREADS = 30;
 const MAX_THREAD_MESSAGES = 100;
@@ -76,26 +77,6 @@ function safeText(value, fallback = "", maxLength = 120) {
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
-function newThreadId() {
-  const randomId = globalThis.crypto?.randomUUID
-    ? globalThis.crypto.randomUUID()
-    : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  return `thread_${randomId.replace(/[^A-Za-z0-9_.:-]/g, "_")}`.slice(0, 96);
-}
-
-function createThread(title = DEFAULT_THREAD_TITLE) {
-  const timestamp = new Date().toISOString();
-  return {
-    id: newThreadId(),
-    title,
-    messages: [],
-    latest: null,
-    revision: 0,
-    createdAt: timestamp,
-    updatedAt: timestamp,
-  };
-}
-
 function sanitizeMessage(message) {
   const role = message?.role === "assistant" ? "assistant" : "user";
   const sanitized = {
@@ -119,64 +100,125 @@ function bumpThreadRevision(thread) {
 }
 
 function sanitizeThread(rawThread) {
-  const fallbackThread = createThread();
   const rawId = String(rawThread?.id || "");
-  const id = SESSION_ID_PATTERN.test(rawId) ? rawId : fallbackThread.id;
+  const id = SESSION_ID_PATTERN.test(rawId) ? rawId : "";
   const messages = Array.isArray(rawThread?.messages)
     ? rawThread.messages.slice(-MAX_THREAD_MESSAGES).map(sanitizeMessage)
     : [];
   const latest =
     rawThread?.latest && typeof rawThread.latest === "object" ? rawThread.latest : null;
+  const createdAt = String(
+    rawThread?.created_at || rawThread?.createdAt || new Date().toISOString(),
+  );
+  const updatedAt = String(
+    rawThread?.updated_at || rawThread?.updatedAt || createdAt,
+  );
+  const messageCount = Number(rawThread?.message_count);
   return {
     id,
     title: safeText(rawThread?.title, DEFAULT_THREAD_TITLE, 64),
     messages,
     latest,
     revision: normalizedRevision(rawThread?.revision),
-    createdAt: String(rawThread?.createdAt || fallbackThread.createdAt),
-    updatedAt: String(rawThread?.updatedAt || fallbackThread.updatedAt),
+    createdAt,
+    updatedAt,
+    messageCount: Number.isSafeInteger(messageCount) && messageCount >= 0
+      ? messageCount
+      : messages.length,
   };
 }
 
-function loadThreads() {
-  let payload = null;
+function legacyActiveThreadId() {
   try {
-    payload = JSON.parse(globalThis.localStorage?.getItem(THREAD_STORAGE_KEY) || "null");
+    const payload = JSON.parse(
+      globalThis.localStorage?.getItem(LEGACY_THREAD_STORAGE_KEY) || "null",
+    );
+    return String(payload?.activeThreadId || "");
   } catch {
-    payload = null;
+    return "";
   }
+}
 
-  const threads = Array.isArray(payload?.threads)
+function loadActiveThreadId() {
+  const activeId = String(
+    globalThis.localStorage?.getItem(ACTIVE_THREAD_STORAGE_KEY) || "",
+  );
+  return activeId || legacyActiveThreadId();
+}
+
+function persistActiveThreadId() {
+  try {
+    if (state.activeThreadId) {
+      globalThis.localStorage?.setItem(
+        ACTIVE_THREAD_STORAGE_KEY,
+        state.activeThreadId,
+      );
+    }
+  } catch {
+    // Browser storage is only a selected-thread hint. Server threads remain authoritative.
+  }
+}
+
+function upsertThread(thread, { moveToTop = false } = {}) {
+  if (!thread.id) {
+    return;
+  }
+  const others = state.threads.filter((item) => item.id !== thread.id);
+  state.threads = moveToTop
+    ? [thread, ...others].slice(0, MAX_THREADS)
+    : [thread, ...others].sort((left, right) =>
+        String(right.updatedAt).localeCompare(String(left.updatedAt)),
+      ).slice(0, MAX_THREADS);
+}
+
+async function loadThreadDetail(threadId) {
+  const detail = sanitizeThread(
+    await requestJson(`/api/threads/${encodeURIComponent(threadId)}`),
+  );
+  upsertThread(detail);
+  return detail;
+}
+
+async function loadThreads() {
+  const payload = await requestJson("/api/threads");
+  state.threads = Array.isArray(payload?.threads)
     ? payload.threads.map(sanitizeThread).filter((thread) => thread.id)
     : [];
-  state.threads = threads.length ? threads.slice(0, MAX_THREADS) : [createThread()];
-  const activeId = String(payload?.activeThreadId || "");
+
+  if (!state.threads.length) {
+    const created = sanitizeThread(
+      await requestJson("/api/threads", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ title: DEFAULT_THREAD_TITLE }),
+      }),
+    );
+    state.threads = [created];
+  }
+
+  const activeId = loadActiveThreadId();
   state.activeThreadId = state.threads.some((thread) => thread.id === activeId)
     ? activeId
     : state.threads[0].id;
-}
-
-function persistThreads() {
-  try {
-    globalThis.localStorage?.setItem(
-      THREAD_STORAGE_KEY,
-      JSON.stringify({
-        activeThreadId: state.activeThreadId,
-        threads: state.threads.slice(0, MAX_THREADS),
-      }),
-    );
-  } catch {
-    // Browser storage is a convenience. The active in-memory thread remains usable.
-  }
+  await loadThreadDetail(state.activeThreadId);
+  persistActiveThreadId();
 }
 
 function activeThread() {
   let thread = state.threads.find((item) => item.id === state.activeThreadId);
   if (!thread) {
-    thread = createThread();
-    state.threads.unshift(thread);
+    thread = state.threads[0] || {
+      id: "",
+      title: DEFAULT_THREAD_TITLE,
+      messages: [],
+      latest: null,
+      revision: 0,
+      createdAt: "",
+      updatedAt: "",
+      messageCount: 0,
+    };
     state.activeThreadId = thread.id;
-    persistThreads();
+    persistActiveThreadId();
   }
   return thread;
 }
@@ -188,11 +230,9 @@ function threadById(threadId) {
 function touchThread(thread) {
   thread.updatedAt = new Date().toISOString();
   thread.messages = thread.messages.slice(-MAX_THREAD_MESSAGES);
-  state.threads = [
-    thread,
-    ...state.threads.filter((item) => item.id !== thread.id),
-  ].slice(0, MAX_THREADS);
-  persistThreads();
+  thread.messageCount = thread.messages.length;
+  upsertThread(thread, { moveToTop: true });
+  persistActiveThreadId();
 }
 
 function titleFromMessage(message) {
@@ -206,12 +246,18 @@ function renderThreads() {
     button.type = "button";
     button.className = "thread-button";
     button.dataset.active = String(thread.id === state.activeThreadId);
-    button.addEventListener("click", () => switchThread(thread.id));
+    button.addEventListener("click", () =>
+      switchThread(thread.id).catch((error) => {
+        elements.uploadStatus.textContent = error.message;
+      }),
+    );
 
     const title = document.createElement("span");
     title.textContent = thread.title || DEFAULT_THREAD_TITLE;
     const meta = document.createElement("small");
-    const messageCount = thread.messages.length;
+    const messageCount = Number.isSafeInteger(thread.messageCount)
+      ? thread.messageCount
+      : thread.messages.length;
     meta.textContent = `${messageCount} ${messageCount === 1 ? "message" : "messages"}`;
 
     button.append(title, meta);
@@ -223,23 +269,30 @@ function renderActiveThreadTitle() {
   elements.activeThreadTitle.textContent = activeThread().title || DEFAULT_THREAD_TITLE;
 }
 
-function switchThread(threadId) {
+async function switchThread(threadId) {
   if (!threadById(threadId)) {
     return;
   }
   state.activeThreadId = threadId;
-  persistThreads();
+  persistActiveThreadId();
+  await loadThreadDetail(threadId);
   renderThreads();
   renderActiveThreadTitle();
   renderMessages();
   renderLoopPayload(activeThread().latest || emptyLoopPayload());
 }
 
-function startNewThread() {
-  const thread = createThread();
-  state.threads.unshift(thread);
+async function startNewThread() {
+  const thread = sanitizeThread(
+    await requestJson("/api/threads", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: DEFAULT_THREAD_TITLE }),
+    }),
+  );
+  upsertThread(thread, { moveToTop: true });
   state.activeThreadId = thread.id;
-  persistThreads();
+  persistActiveThreadId();
   renderThreads();
   renderActiveThreadTitle();
   renderMessages();
@@ -258,6 +311,7 @@ function renderRuntimeStatus(status) {
     ["Query mode", status.query_mode || (status.ready_for_queries ? "contextual" : "direct")],
     ["Last attempt", status.last_attempted_document || "none"],
     ["Profile", status.profile || "unknown"],
+    ["Max output", status.max_output_tokens ? `${status.max_output_tokens} tokens` : "unknown"],
     ["Embedding model", status.embeddings_model || "unknown"],
     ["Chunks", status.chunk_count ?? 0],
     ["Phase", status.phase || "idle"],
@@ -291,8 +345,7 @@ function renderMessages() {
     const role = document.createElement("span");
     role.className = "message-role";
     role.textContent = message.role === "user" ? "You" : "Loop";
-    const content = document.createElement("p");
-    content.textContent = message.content;
+    const content = renderMessageContent(message.content);
     bubble.append(role, content);
     const thinking = renderMessageThinking(message.thinking);
     if (thinking) {
@@ -301,6 +354,152 @@ function renderMessages() {
     elements.messages.append(bubble);
   }
   elements.messages.scrollTop = elements.messages.scrollHeight;
+}
+
+function appendTextWithLineBreaks(parent, text) {
+  const lines = String(text || "").split("\n");
+  for (const [index, line] of lines.entries()) {
+    if (line) {
+      const span = document.createElement("span");
+      span.textContent = line;
+      parent.append(span);
+    }
+    if (index < lines.length - 1) {
+      parent.append(document.createElement("br"));
+    }
+  }
+}
+
+function appendInlineMarkdown(parent, text) {
+  const inlineCodePattern = /`([^`\n]+)`/g;
+  let cursor = 0;
+  for (const match of text.matchAll(inlineCodePattern)) {
+    if (match.index > cursor) {
+      appendTextWithLineBreaks(parent, text.slice(cursor, match.index));
+    }
+    const code = document.createElement("code");
+    code.className = "message-inline-code";
+    code.textContent = match[1];
+    parent.append(code);
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) {
+    appendTextWithLineBreaks(parent, text.slice(cursor));
+  }
+}
+
+function appendParagraph(container, lines) {
+  const text = lines.join("\n").trim();
+  if (!text) {
+    return;
+  }
+  const paragraph = document.createElement("p");
+  paragraph.className = "message-paragraph";
+  appendInlineMarkdown(paragraph, text);
+  container.append(paragraph);
+}
+
+function appendList(container, items, ordered) {
+  if (!items.length) {
+    return;
+  }
+  const list = document.createElement(ordered ? "ol" : "ul");
+  list.className = "message-list";
+  for (const item of items) {
+    const element = document.createElement("li");
+    appendInlineMarkdown(element, item);
+    list.append(element);
+  }
+  container.append(list);
+}
+
+function appendTextBlocks(container, text) {
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  let paragraph = [];
+  let listItems = [];
+  let orderedList = false;
+
+  const flushParagraph = () => {
+    appendParagraph(container, paragraph);
+    paragraph = [];
+  };
+  const flushList = () => {
+    appendList(container, listItems, orderedList);
+    listItems = [];
+    orderedList = false;
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+
+    const unorderedMatch = line.match(/^\s*[-*]\s+(.+)$/);
+    const orderedMatch = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (unorderedMatch || orderedMatch) {
+      flushParagraph();
+      const nextOrdered = Boolean(orderedMatch);
+      if (listItems.length && orderedList !== nextOrdered) {
+        flushList();
+      }
+      orderedList = nextOrdered;
+      listItems.push((orderedMatch || unorderedMatch)[1]);
+      continue;
+    }
+
+    flushList();
+    paragraph.push(line);
+  }
+
+  flushParagraph();
+  flushList();
+}
+
+function appendCodeBlock(container, language, codeText) {
+  const figure = document.createElement("figure");
+  figure.className = "message-code-block";
+
+  const normalizedLanguage = String(language || "").trim();
+  if (normalizedLanguage) {
+    const caption = document.createElement("figcaption");
+    caption.className = "message-code-language";
+    caption.textContent = normalizedLanguage;
+    figure.append(caption);
+  }
+
+  const pre = document.createElement("pre");
+  const code = document.createElement("code");
+  code.textContent = String(codeText || "").replace(/^\n/, "").replace(/\s+$/, "");
+  pre.append(code);
+  figure.append(pre);
+  container.append(figure);
+}
+
+function renderMessageContent(text) {
+  const container = document.createElement("div");
+  container.className = "message-content";
+  const source = String(text || "");
+  const fencePattern = /```([A-Za-z0-9_+#.-]*)[ \t]*\n?([\s\S]*?)```/g;
+  let cursor = 0;
+
+  for (const match of source.matchAll(fencePattern)) {
+    if (match.index > cursor) {
+      appendTextBlocks(container, source.slice(cursor, match.index));
+    }
+    appendCodeBlock(container, match[1], match[2]);
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < source.length) {
+    appendTextBlocks(container, source.slice(cursor));
+  }
+  if (!container.children.length) {
+    appendParagraph(container, [source]);
+  }
+  return container;
 }
 
 function renderMessageThinking(thinking) {
@@ -582,15 +781,19 @@ function setupTabs() {
 }
 
 async function boot() {
-  loadThreads();
   setupTabs();
+  await loadThreads();
   renderThreads();
   renderActiveThreadTitle();
   renderMessages();
   renderLoopPayload(activeThread().latest || emptyLoopPayload());
   elements.uploadForm.addEventListener("submit", uploadDocument);
   elements.queryForm.addEventListener("submit", runQuery);
-  elements.newThreadButton.addEventListener("click", startNewThread);
+  elements.newThreadButton.addEventListener("click", () =>
+    startNewThread().catch((error) => {
+      elements.uploadStatus.textContent = error.message;
+    }),
+  );
   elements.clearButton.addEventListener("click", clearChat);
   elements.refreshStatus.addEventListener("click", refreshStatus);
   await loadConfig();

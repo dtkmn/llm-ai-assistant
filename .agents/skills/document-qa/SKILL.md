@@ -50,6 +50,9 @@ first context provider, not the product boundary.
 - Local `.env` and `.env.local` files are loaded before native defaults in the
   app entrypoint. They must not override shell environment variables and must
   stay disabled under tests.
+- Response length is explicit runtime configuration. `FAST_MODE` controls the
+  speed/retrieval profile, while `MAX_OUTPUT_TOKENS` controls generation budget
+  and must be reflected in runtime status.
 - Runtime imports must not eagerly load FAISS or `src.retrieval`; keep retrieval
   lazy to indexing/search paths or explicit compatibility imports.
 - Embedding runtime follows the selected provider. Ollama uses `/api/embed`;
@@ -77,9 +80,14 @@ first context provider, not the product boundary.
   state. Local JSONL export may write raw reports for developer replay/debug
   artifacts; public UI traces must continue using the redacted report surface.
 - Web/API threads must pass an explicit validated `session_id` into the runtime.
-  The current browser UI stores thread messages locally and the runtime stores
-  loop reports in memory; do not imply authenticated, cross-device, or
-  database-backed thread persistence until that architecture exists.
+  FastAPI owns local SQLite persistence for thread metadata, messages, and
+  latest public loop payloads. Recent same-thread messages should be passed as
+  bounded conversation context so follow-up questions can resolve references
+  without leaking across threads. Older same-thread messages may be retrieved by
+  embedding similarity as semantic thread memory, but public loop traces should
+  expose only memory counts/status, not raw memory text. Browser storage is only
+  a selected-thread hint. Do not imply authenticated, cross-device, or
+  account-backed history until that architecture exists.
 - Loop middleware is a guardrail/telemetry boundary. It may block, refuse, retry,
   or request human review, but it must not introduce autonomous tools by itself.
 - Upload status must say `indexed` for real backends, because endpoint readiness
@@ -139,6 +147,7 @@ first context provider, not the product boundary.
 
 - `src/ai_loop_engine.py`
 - `src/app.py`
+- `src/thread_store.py`
 - `src/web_contract.py`
 - `src/ai_loop_runtime.py`
 - `src/context_providers.py`

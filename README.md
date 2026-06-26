@@ -13,8 +13,8 @@ loop: making agent behavior visible, testable, and harder to fake.
 - **Vector Search:** Uses FAISS for efficient similarity search with
   provider-backed embedding models through Ollama or OpenAI-compatible gateways
 - **FastAPI Web App:** Real backend API plus a static browser UI for local loop
-  threads, context indexing, runtime status, a readable loop timeline, compact
-  loop summaries, and answer traces
+  threads, persistent local chat history, context indexing, runtime status, a
+  readable loop timeline, compact loop summaries, and answer traces
 - **Model Thinking in Chat:** Shows Ollama model-emitted thinking inline under
   assistant messages and in the loop detail panel when the model supports it,
   clearly labeled as unverified debugging signal rather than evidence
@@ -113,16 +113,25 @@ loop: making agent behavior visible, testable, and harder to fake.
     that require bearer auth. Plain `http://` is accepted only for loopback
     local development; non-loopback endpoints must use `https://`.
 
-6. (Optional) switch back to quality mode in `.env`:
+6. (Optional) tune quality and answer length in `.env`:
 
     ```dotenv
     FAST_MODE=false
+    MAX_OUTPUT_TOKENS=1024
     ```
 
 7. (Optional) enable debug logs in `.env`:
 
     ```dotenv
     APP_DEBUG=true
+    ```
+
+    Thread messages are stored locally in SQLite at
+    `~/.ai-loop-engine/threads.sqlite3` by default. Override this when you want
+    project-local or container-mounted persistence:
+
+    ```dotenv
+    AI_LOOP_THREAD_DB_PATH=.ai-loop-engine/threads.sqlite3
     ```
 
 8. Run the application:
@@ -175,7 +184,10 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 ## Usage
 1. Open your browser and go to `http://localhost:7860`
 2. Start a new thread or use the default thread, then ask directly to run the
-   loop without external context
+   loop without external context. Recent same-thread messages and retrieved
+   semantic thread memories are supplied to the model as bounded conversation
+   context, and threads/messages are restored after app restart from the local
+   SQLite store.
 3. Switch threads from the sidebar when you want separate local conversations
    and loop traces
 4. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
@@ -200,8 +212,15 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   loop without changing the product identity again
 - **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopSession`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
 - **Runtime reports:** `AILoopEngine.query_with_trace()` returns a `QueryResult` with both the legacy answer trace and a first-class `LoopReport`
-- **Session state:** completed loop reports are retained in bounded in-memory
-  `LoopSession` objects keyed by `session_id`
+- **Thread state:** browser threads are backed by a local SQLite store for
+  thread metadata, messages, and the latest public loop payload. Recent
+  same-thread messages are passed into the runtime as bounded conversation
+  context. Older same-thread messages may also be retrieved by local embedding
+  similarity as semantic thread memory; browser storage is only used to remember
+  the selected thread.
+- **Runtime session state:** completed loop reports are also retained in bounded
+  in-memory `LoopSession` objects keyed by `session_id` for local replay/export
+  during the running process.
 - **Replay artifacts:** local JSONL export writes one raw `LoopReport` per line,
   suitable for future replay and diff tooling
 - **Public trace surface:** the FastAPI/static web app shows a readable Loop
@@ -237,7 +256,9 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 - **Framework:** LangChain for orchestration
 
 ### Configuration
-- **Response Length:** 384 new tokens (quality) / 160 new tokens (fast)
+- **Response Length:** 1024 new tokens (quality) / 384 new tokens (fast) by
+  default. Override with `MAX_OUTPUT_TOKENS` when you want longer or shorter
+  local answers.
 - **Generation mode:** Deterministic (`do_sample=False`) for more reliable context-grounded answers
 - **Chunk Size:** 1200/200 overlap (quality) / 900/120 overlap (fast)
 - **Retrieval:** MMR retrieval with source/page grounding

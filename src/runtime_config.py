@@ -18,6 +18,7 @@ FAST_MODE_ENV_VAR = "FAST_MODE"
 LLM_BACKEND_ENV_VAR = "LLM_BACKEND"
 LLM_MODEL_ENV_VAR = "LLM_MODEL"
 MODEL_THINKING_ENV_VAR = "MODEL_THINKING"
+MAX_OUTPUT_TOKENS_ENV_VAR = "MAX_OUTPUT_TOKENS"
 EMBEDDINGS_MODEL_ENV_VAR = "EMBEDDINGS_MODEL"
 OLLAMA_BASE_URL_ENV_VAR = "OLLAMA_BASE_URL"
 OLLAMA_MODEL_ENV_VAR = "OLLAMA_MODEL"
@@ -64,6 +65,17 @@ def env_int(name: str, default: int) -> int:
     except ValueError:
         LOGGER.warning("Invalid integer for %s=%r. Using %s.", name, value, default)
         return default
+
+
+def env_int_range(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    value = env_int(name, default)
+    if value < minimum:
+        LOGGER.warning("Invalid %s=%r. Using minimum %s.", name, value, minimum)
+        return minimum
+    if value > maximum:
+        LOGGER.warning("Invalid %s=%r. Using maximum %s.", name, value, maximum)
+        return maximum
+    return value
 
 
 def first_env_value(*names: str) -> Optional[str]:

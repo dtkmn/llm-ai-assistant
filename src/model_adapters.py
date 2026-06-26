@@ -49,6 +49,7 @@ OLLAMA_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler
 OPENAI_COMPAT_NO_PROXY_OPENER = urllib.request.build_opener(
     urllib.request.ProxyHandler({})
 )
+OLLAMA_LENGTH_DONE_REASONS = {"length", "limit", "max_tokens", "num_predict"}
 
 
 def _legacy_runtime_override(name: str, current):
@@ -365,6 +366,22 @@ class OllamaLLM(LLM):
         )
         return self.think_level or True
 
+    def _raise_if_generation_truncated(
+        self, response: Dict[str, object], endpoint: str
+    ) -> None:
+        done_reason = response.get("done_reason")
+        if isinstance(done_reason, str):
+            normalized_reason = done_reason.strip().lower()
+        else:
+            normalized_reason = ""
+        if response.get("done") is False or normalized_reason in OLLAMA_LENGTH_DONE_REASONS:
+            raise RuntimeError(
+                "Ollama stopped generation before the answer was complete. "
+                f"Increase MAX_OUTPUT_TOKENS, use FAST_MODE=false, disable "
+                f"MODEL_THINKING, or choose a model that completes within the "
+                f"{endpoint} generation budget."
+            )
+
     def _call_chat_with_thinking(
         self, prompt: str, options: Dict[str, object]
     ) -> str:
@@ -376,6 +393,7 @@ class OllamaLLM(LLM):
             "options": options,
         }
         response = self._post_json("/api/chat", payload)
+        self._raise_if_generation_truncated(response, "/api/chat")
         message = response.get("message")
         if not isinstance(message, dict):
             raise RuntimeError("Ollama chat response did not include a message.")
@@ -401,6 +419,7 @@ class OllamaLLM(LLM):
             "options": options,
         }
         response = self._post_json("/api/generate", payload)
+        self._raise_if_generation_truncated(response, "/api/generate")
         generated_text = response.get("response")
         if not isinstance(generated_text, str):
             raise RuntimeError("Ollama response did not include generated text.")
@@ -648,6 +667,7 @@ __all__ = [
     "OllamaLLM",
     "OpenAICompatibleEmbeddings",
     "OpenAICompatibleLLM",
+    "OLLAMA_LENGTH_DONE_REASONS",
     "OLLAMA_NO_PROXY_OPENER",
     "OPENAI_COMPAT_NO_PROXY_OPENER",
     "open_ollama_request_no_proxy",

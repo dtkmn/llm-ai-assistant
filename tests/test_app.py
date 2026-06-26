@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -29,6 +30,7 @@ from src.loop_engine import (
     VerificationOutcome,
     VerificationResult,
 )
+from src.thread_store import ThreadStore
 from src.web_contract import (
     answer_trace_dict,
     loop_summary_dict,
@@ -94,6 +96,7 @@ class FakeQA:
         )
         return DocumentQAStatus(
             profile_label="FAST" if self.fast_mode else "QUALITY",
+            max_output_tokens=384 if self.fast_mode else 1024,
             configured_backend=self.llm_backend,
             active_backend=active_backend,
             active_model_label=active_model_label,
@@ -107,8 +110,18 @@ class FakeQA:
             processing_report=self.latest_processing_report,
         )
 
-    def query_with_trace(self, message, session_id="default"):
+    def query_with_trace(
+        self,
+        message,
+        session_id="default",
+        conversation_history=None,
+        semantic_memory=None,
+        semantic_memory_status="not_requested",
+    ):
         self.last_query_session_id = session_id
+        self.last_conversation_history = list(conversation_history or [])
+        self.last_semantic_memory = list(semantic_memory or [])
+        self.last_semantic_memory_status = semantic_memory_status
         active_backend = self.active_llm_backend or self.llm_backend
         active_model_label = (
             self.loaded_model_label
@@ -116,6 +129,41 @@ class FakeQA:
             or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
         answer = "Project Phoenix is described in the uploaded document."
+        steps = []
+        if semantic_memory_status != "not_requested":
+            steps.append(
+                LoopStep(
+                    phase=LoopPhase.CONTEXT_SELECT,
+                    decision=LoopDecision.CONTINUE,
+                    name="Retrieve thread memory",
+                    output_summary=(
+                        f"{len(self.last_semantic_memory)} semantic memories"
+                        if self.last_semantic_memory
+                        else semantic_memory_status
+                    ),
+                    metadata={
+                        "semantic_memory_count": len(self.last_semantic_memory),
+                        "semantic_memory_status": semantic_memory_status,
+                    },
+                )
+            )
+        steps.extend(
+            [
+                LoopStep(
+                    phase=LoopPhase.RETRIEVE,
+                    decision=LoopDecision.CONTINUE,
+                    name="Retrieve prompt evidence",
+                    output_summary="1 prompt chunks",
+                    metadata={"retrieved_chunk_count": 1, "citation_ids": [1]},
+                ),
+                LoopStep(
+                    phase=LoopPhase.MECHANICAL_CHECK,
+                    decision=LoopDecision.NOT_VERIFIED,
+                    name="Mechanical checks",
+                    output_summary="mechanical_checks_passed",
+                ),
+            ]
+        )
         loop_report = LoopReport(
             run=LoopRun(
                 run_id="run_fake",
@@ -124,23 +172,13 @@ class FakeQA:
                 context_provider="document",
                 backend=active_backend,
                 model_label=active_model_label,
-                steps=(
-                    LoopStep(
-                        phase=LoopPhase.RETRIEVE,
-                        decision=LoopDecision.CONTINUE,
-                        name="Retrieve prompt evidence",
-                        output_summary="1 prompt chunks",
-                        metadata={"retrieved_chunk_count": 1, "citation_ids": [1]},
-                    ),
-                    LoopStep(
-                        phase=LoopPhase.MECHANICAL_CHECK,
-                        decision=LoopDecision.NOT_VERIFIED,
-                        name="Mechanical checks",
-                        output_summary="mechanical_checks_passed",
-                    ),
-                ),
+                steps=tuple(steps),
                 final_decision=LoopDecision.NOT_VERIFIED,
                 final_answer=answer,
+                metadata={
+                    "semantic_memory_turns": len(self.last_semantic_memory),
+                    "semantic_memory_status": semantic_memory_status,
+                },
             )
         )
         return QueryResult(
@@ -172,6 +210,23 @@ class FakeQA:
             ),
             loop_report=loop_report,
         )
+
+    def memory_embedding_model_label(self):
+        return "fake-memory"
+
+    def embed_memory_texts(self, texts):
+        vectors = []
+        for text in texts:
+            lowered = str(text).lower()
+            if "dynamic programming" in lowered or "algorithm" in lowered:
+                vectors.append([1.0, 0.0])
+            elif "phoenix" in lowered:
+                vectors.append([0.8, 0.2])
+            else:
+                vectors.append([0.0, 1.0])
+        self.embedded_memory_texts = list(getattr(self, "embedded_memory_texts", []))
+        self.embedded_memory_texts.extend(str(text) for text in texts)
+        return "fake-memory", vectors
 
     def clear_loop_session(self, session_id="default"):
         self.cleared_loop_session_id = session_id
@@ -318,6 +373,42 @@ def test_app_import_keeps_engine_lazy():
     assert web_app.qa_system is None
 
 
+def test_app_main_defaults_to_loopback(monkeypatch):
+    observed = {}
+
+    def fake_run(app, *, host, port, log_level):
+        observed.update(
+            {"app": app, "host": host, "port": port, "log_level": log_level}
+        )
+
+    monkeypatch.delenv("WEB_HOST", raising=False)
+    monkeypatch.delenv("HOST", raising=False)
+    monkeypatch.delenv("WEB_PORT", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.setattr(web_app.uvicorn, "run", fake_run)
+
+    web_app.main()
+
+    assert observed["host"] == "127.0.0.1"
+    assert observed["port"] == 7860
+
+
+def test_app_main_allows_explicit_non_loopback_host(monkeypatch):
+    observed = {}
+
+    def fake_run(app, *, host, port, log_level):
+        observed.update({"host": host, "port": port, "log_level": log_level})
+
+    monkeypatch.setenv("WEB_HOST", "0.0.0.0")
+    monkeypatch.setenv("WEB_PORT", "8799")
+    monkeypatch.setattr(web_app.uvicorn, "run", fake_run)
+
+    web_app.main()
+
+    assert observed["host"] == "0.0.0.0"
+    assert observed["port"] == 8799
+
+
 def test_static_frontend_is_served():
     client = TestClient(web_app.create_app(FakeQA()))
 
@@ -344,6 +435,7 @@ def test_static_frontend_is_served():
     assert styles.status_code == 200
     assert ".thread-button" in styles.text
     assert ".message-thinking" in styles.text
+    assert ".message-code-block" in styles.text
 
 
 def test_static_frontend_renders_model_thinking_inside_assistant_message():
@@ -540,6 +632,18 @@ function deferred() {
   return { promise, resolve };
 }
 
+function createThreadPayload(id, messages = [], latest = null) {
+  return {
+    id,
+    title: "New thread",
+    messages,
+    latest,
+    message_count: messages.length,
+    created_at: "2026-06-26T00:00:00.000Z",
+    updated_at: "2026-06-26T00:00:00.000Z",
+  };
+}
+
 async function importFreshApp() {
   const source = await readFile(process.env.APP_JS_PATH, "utf8");
   const encoded = Buffer.from(
@@ -549,10 +653,12 @@ async function importFreshApp() {
   await import(`data:text/javascript;base64,${encoded}`);
 }
 
-async function runCase(modelThinking) {
+async function runCase(modelThinking, answer = "Loop answer") {
   const dom = createDom();
   const queryBodies = [];
+  const serverThreads = [createThreadPayload("thread_initial")];
   globalThis.fetch = async (url, options = {}) => {
+    const method = String(options.method || "GET").toUpperCase();
     if (url === "/api/config") {
       return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
     }
@@ -565,10 +671,25 @@ async function runCase(modelThinking) {
         chunk_count: 0,
       });
     }
+    if (url === "/api/threads" && method === "GET") {
+      return jsonResponse({ threads: serverThreads });
+    }
+    if (url === "/api/threads" && method === "POST") {
+      const thread = createThreadPayload(`thread_created_${serverThreads.length}`);
+      serverThreads.unshift(thread);
+      return jsonResponse(thread);
+    }
+    if (url.startsWith("/api/threads/") && method === "GET") {
+      const id = decodeURIComponent(url.slice("/api/threads/".length));
+      const thread = serverThreads.find((item) => item.id === id);
+      if (thread) {
+        return jsonResponse(thread);
+      }
+    }
     if (url === "/api/query") {
       queryBodies.push(JSON.parse(options.body));
       return jsonResponse({
-        answer: "Loop answer",
+        answer,
         timeline: { rows: [], final_decision: "not_verified" },
         summary: {},
         trace: { model_thinking: modelThinking },
@@ -597,10 +718,50 @@ const capturedCase = await runCase({
   label: "Model Thinking (unverified)",
   content: "Captured thinking from model.",
   note: "Model-emitted thinking is useful for debugging the loop.",
-});
+}, [
+  "Here is `dp[0]` safely:",
+  "```java",
+  "public class FibonacciDP {",
+  "  public static int fib(int n) { return n; }",
+  "}",
+  "```",
+  "- uses memoization",
+  "<img src=x onerror=alert(1)>",
+].join("\n"));
 const capturedDom = capturedCase.dom;
 assert.equal(capturedCase.queryBodies.length, 1);
 assert.ok(capturedCase.queryBodies[0].session_id.startsWith("thread_"));
+const capturedAssistantMessage = findNode(
+  capturedDom.messages,
+  (node) => node.className === "message assistant",
+);
+assert.ok(capturedAssistantMessage, "assistant message should render");
+const capturedMessageContent = findNode(
+  capturedAssistantMessage,
+  (node) => node.className === "message-content",
+);
+assert.ok(capturedMessageContent, "assistant message should include rich content");
+const capturedCodeBlock = findNode(
+  capturedMessageContent,
+  (node) => node.className === "message-code-block",
+);
+assert.ok(capturedCodeBlock, "assistant markdown fence should become a code block");
+const capturedLanguage = findNode(
+  capturedCodeBlock,
+  (node) => node.className === "message-code-language",
+);
+assert.equal(capturedLanguage.textContent, "java");
+const capturedAnswerCode = findNode(capturedCodeBlock, (node) => node.tagName === "CODE");
+assert.ok(capturedAnswerCode.textContent.includes("public class FibonacciDP"));
+const capturedInlineCode = findNode(
+  capturedMessageContent,
+  (node) => node.className === "message-inline-code",
+);
+assert.equal(capturedInlineCode.textContent, "dp[0]");
+const capturedList = findNode(capturedMessageContent, (node) => node.tagName === "UL");
+assert.ok(capturedList, "assistant markdown list should render as a list");
+const capturedImage = findNode(capturedMessageContent, (node) => node.tagName === "IMG");
+assert.equal(capturedImage, null, "model HTML must stay inert text");
 const capturedThinking = findNode(
   capturedDom.messages,
   (node) => node.className === "message-thinking",
@@ -608,6 +769,30 @@ const capturedThinking = findNode(
 assert.ok(capturedThinking, "assistant message should include thinking details");
 const capturedPre = findNode(capturedThinking, (node) => node.tagName === "PRE");
 assert.equal(capturedPre.textContent, "Captured thinking from model.");
+
+const inlineFenceCase = await runCase({
+  available: false,
+  redacted: false,
+  label: "Model Thinking (unverified)",
+  content: null,
+  note: "Model-emitted thinking is useful for debugging the loop.",
+}, "Inline fence: ```java public class InlineFence {}``` done.");
+const inlineAssistant = findNode(
+  inlineFenceCase.dom.messages,
+  (node) => node.className === "message assistant",
+);
+const inlineCodeBlock = findNode(
+  inlineAssistant,
+  (node) => node.className === "message-code-block",
+);
+assert.ok(inlineCodeBlock, "inline fenced code should become a code block");
+const inlineFenceLanguage = findNode(
+  inlineCodeBlock,
+  (node) => node.className === "message-code-language",
+);
+assert.equal(inlineFenceLanguage.textContent, "java");
+const inlineFenceCode = findNode(inlineCodeBlock, (node) => node.tagName === "CODE");
+assert.equal(inlineFenceCode.textContent, "public class InlineFence {}");
 
 const emptyCase = await runCase({
   available: false,
@@ -640,7 +825,9 @@ assert.equal(threadCase.dom["thread-list"].children.length, 2);
 
 const staleDom = createDom();
 const staleQuery = deferred();
+const staleServerThreads = [createThreadPayload("thread_stale")];
 globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
   if (url === "/api/config") {
     return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
   }
@@ -652,6 +839,16 @@ globalThis.fetch = async (url, options = {}) => {
       query_mode: "direct",
       chunk_count: 0,
     });
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: staleServerThreads });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    const thread = staleServerThreads.find((item) => item.id === id);
+    if (thread) {
+      return jsonResponse(thread);
+    }
   }
   if (url === "/api/query") {
     await staleQuery.promise;
@@ -1019,6 +1216,414 @@ def test_query_endpoint_passes_session_id_to_loop_runtime():
     )
 
 
+def test_thread_endpoints_create_list_get_rename_and_delete():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    initial = client.get("/api/threads")
+    assert initial.status_code == 200
+    assert len(initial.json()["threads"]) == 1
+
+    created = client.post("/api/threads", json={"title": "Research thread"})
+    assert created.status_code == 200
+    thread_id = created.json()["id"]
+    assert thread_id.startswith("thread_")
+    assert created.json()["title"] == "Research thread"
+
+    listed = client.get("/api/threads")
+    assert listed.status_code == 200
+    assert any(thread["id"] == thread_id for thread in listed.json()["threads"])
+
+    fetched = client.get(f"/api/threads/{thread_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["messages"] == []
+
+    renamed = client.patch(
+        f"/api/threads/{thread_id}",
+        json={"title": "Renamed thread"},
+    )
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "Renamed thread"
+
+    deleted = client.delete(f"/api/threads/{thread_id}")
+    assert deleted.status_code == 200
+    assert deleted.json() == {"deleted": True, "thread_id": thread_id}
+    assert fake_qa.cleared_loop_session_id == thread_id
+    assert client.get(f"/api/threads/{thread_id}").status_code == 404
+
+
+def test_query_endpoint_persists_thread_messages_and_latest_payload():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "What is Project Phoenix?", "session_id": "thread_alpha"},
+    )
+
+    assert response.status_code == 200
+    thread = client.get("/api/threads/thread_alpha").json()
+    listed_thread = next(
+        thread
+        for thread in client.get("/api/threads").json()["threads"]
+        if thread["id"] == "thread_alpha"
+    )
+    assert "latest" not in listed_thread
+    assert thread["title"] == "What is Project Phoenix?"
+    assert [message["role"] for message in thread["messages"]] == [
+        "user",
+        "assistant",
+    ]
+    assert thread["messages"][0]["content"] == "What is Project Phoenix?"
+    assert "Project Phoenix" in thread["messages"][1]["content"]
+    assert thread["messages"][1]["thinking"]["available"] is True
+    assert thread["latest"]["summary"]["final_decision"] == "not_verified"
+    assert thread["latest"]["trace"]["loop_report"]["run"]["session_id"] == (
+        "thread_alpha"
+    )
+
+
+def test_query_endpoint_passes_recent_same_thread_history_to_runtime():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    store.create_thread(thread_id="thread_alpha")
+    store.append_message(
+        "thread_alpha",
+        role="user",
+        content="Do you know what dynamic programming is?",
+    )
+    store.append_message("thread_alpha", role="assistant", content="Yes.")
+    store.create_thread(thread_id="thread_other")
+    store.append_message(
+        "thread_other",
+        role="user",
+        content="This should stay out of alpha.",
+    )
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/query",
+        json={
+            "message": "Please explain it in layman terms.",
+            "session_id": "thread_alpha",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_qa.last_query_session_id == "thread_alpha"
+    assert fake_qa.last_conversation_history == [
+        {
+            "role": "user",
+            "content": "Do you know what dynamic programming is?",
+        },
+        {"role": "assistant", "content": "Yes."},
+    ]
+    assert all(
+        "stay out" not in entry["content"]
+        for entry in fake_qa.last_conversation_history
+    )
+
+
+def test_query_endpoint_retrieves_older_semantic_thread_memory():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    store.create_thread(thread_id="thread_alpha")
+    relevant = store.append_message(
+        "thread_alpha",
+        role="user",
+        content="Dynamic programming means reusing answers to subproblems.",
+    )
+    unrelated = store.append_message(
+        "thread_alpha",
+        role="assistant",
+        content="Banana bread uses ripe bananas.",
+    )
+    store.upsert_message_embedding(
+        relevant,
+        embedding_model="fake-memory",
+        vector=[1.0, 0.0],
+    )
+    store.upsert_message_embedding(
+        unrelated,
+        embedding_model="fake-memory",
+        vector=[0.0, 1.0],
+    )
+    for index in range(web_app.MAX_QUERY_HISTORY_MESSAGES):
+        store.append_message(
+            "thread_alpha",
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"recent filler {index}",
+        )
+    other_thread_memory = store.append_message(
+        "thread_other",
+        role="user",
+        content="Dynamic programming in another thread must not leak.",
+    )
+    store.upsert_message_embedding(
+        other_thread_memory,
+        embedding_model="fake-memory",
+        vector=[1.0, 0.0],
+    )
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/query",
+        json={
+            "message": "Can you explain that algorithm simply?",
+            "session_id": "thread_alpha",
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert fake_qa.last_semantic_memory_status == "retrieved"
+    assert fake_qa.last_semantic_memory == [
+        {
+            "message_id": relevant.id,
+            "role": "user",
+            "content": "Dynamic programming means reusing answers to subproblems.",
+            "score": 1.0,
+        }
+    ]
+    assert all(
+        "another thread" not in entry["content"]
+        for entry in fake_qa.last_semantic_memory
+    )
+    assert all(
+        "Dynamic programming means" not in entry["content"]
+        for entry in fake_qa.last_conversation_history
+    )
+    memory_rows = [
+        row
+        for row in payload["timeline"]["rows"]
+        if row["step"] == "Retrieve thread memory"
+    ]
+    assert memory_rows
+    assert "memory: 1" in memory_rows[0]["signals"]
+    assert payload["summary"]["semantic_memory_count"] == 1
+    assert payload["summary"]["semantic_memory_status"] == "retrieved"
+    indexed_memories = store.semantic_memories(
+        "thread_alpha",
+        embedding_model="fake-memory",
+        query_vector=[1.0, 0.0],
+        min_score=0.0,
+    )
+    assert any(
+        memory.content == "Can you explain that algorithm simply?"
+        for memory in indexed_memories
+    )
+
+
+def test_query_endpoint_does_not_persist_partial_turn_on_runtime_failure():
+    class FailingQA(FakeQA):
+        def query_with_trace(
+            self,
+            message,
+            session_id="default",
+            conversation_history=None,
+            semantic_memory=None,
+            semantic_memory_status="not_requested",
+        ):
+            self.last_query_session_id = session_id
+            self.last_conversation_history = list(conversation_history or [])
+            self.last_semantic_memory = list(semantic_memory or [])
+            self.last_semantic_memory_status = semantic_memory_status
+            raise RuntimeError("backend unavailable")
+
+    fake_qa = FailingQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(
+        web_app.create_app(fake_qa, thread_store=store),
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        "/api/query",
+        json={"message": "hello", "session_id": "thread_fail"},
+    )
+
+    assert response.status_code == 500
+    thread = client.get("/api/threads/thread_fail").json()
+    assert thread["messages"] == []
+    assert thread["message_count"] == 0
+    assert thread["latest"] is None
+
+
+def test_clear_chat_blocks_stale_in_flight_query_persistence():
+    class BlockingQA(FakeQA):
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def query_with_trace(
+            self,
+            message,
+            session_id="default",
+            conversation_history=None,
+            semantic_memory=None,
+            semantic_memory_status="not_requested",
+        ):
+            self.last_query_session_id = session_id
+            self.last_conversation_history = list(conversation_history or [])
+            self.last_semantic_memory = list(semantic_memory or [])
+            self.last_semantic_memory_status = semantic_memory_status
+            self.started.set()
+            if not self.release.wait(timeout=5):
+                raise RuntimeError("timed out waiting for test release")
+            return super().query_with_trace(
+                message,
+                session_id=session_id,
+                conversation_history=conversation_history,
+                semantic_memory=semantic_memory,
+                semantic_memory_status=semantic_memory_status,
+            )
+
+    fake_qa = BlockingQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+    responses = {}
+
+    def run_query():
+        responses["query"] = client.post(
+            "/api/query",
+            json={"message": "stale me", "session_id": "thread_race"},
+        )
+
+    query_thread = threading.Thread(target=run_query)
+    query_thread.start()
+    assert fake_qa.started.wait(timeout=5)
+
+    clear_response = client.post(
+        "/api/chat/clear",
+        json={"session_id": "thread_race"},
+    )
+    fake_qa.release.set()
+    query_thread.join(timeout=5)
+
+    assert not query_thread.is_alive()
+    assert clear_response.status_code == 200
+    assert responses["query"].status_code == 200
+    thread = client.get("/api/threads/thread_race").json()
+    assert thread["messages"] == []
+    assert thread["message_count"] == 0
+    assert thread["latest"] is None
+
+
+def test_delete_thread_blocks_stale_in_flight_query_resurrection():
+    class BlockingQA(FakeQA):
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def query_with_trace(
+            self,
+            message,
+            session_id="default",
+            conversation_history=None,
+            semantic_memory=None,
+            semantic_memory_status="not_requested",
+        ):
+            self.last_query_session_id = session_id
+            self.last_conversation_history = list(conversation_history or [])
+            self.last_semantic_memory = list(semantic_memory or [])
+            self.last_semantic_memory_status = semantic_memory_status
+            self.started.set()
+            if not self.release.wait(timeout=5):
+                raise RuntimeError("timed out waiting for test release")
+            return super().query_with_trace(
+                message,
+                session_id=session_id,
+                conversation_history=conversation_history,
+                semantic_memory=semantic_memory,
+                semantic_memory_status=semantic_memory_status,
+            )
+
+    fake_qa = BlockingQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+    responses = {}
+
+    def run_query():
+        responses["query"] = client.post(
+            "/api/query",
+            json={"message": "stale me", "session_id": "thread_race"},
+        )
+
+    query_thread = threading.Thread(target=run_query)
+    query_thread.start()
+    assert fake_qa.started.wait(timeout=5)
+
+    delete_response = client.delete("/api/threads/thread_race")
+    fake_qa.release.set()
+    query_thread.join(timeout=5)
+
+    assert not query_thread.is_alive()
+    assert delete_response.status_code == 200
+    assert responses["query"].status_code == 200
+    assert client.get("/api/threads/thread_race").status_code == 404
+
+
+def test_delete_recreate_blocks_stale_in_flight_query_resurrection():
+    class BlockingQA(FakeQA):
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def query_with_trace(
+            self,
+            message,
+            session_id="default",
+            conversation_history=None,
+            semantic_memory=None,
+            semantic_memory_status="not_requested",
+        ):
+            self.last_query_session_id = session_id
+            self.last_conversation_history = list(conversation_history or [])
+            self.last_semantic_memory = list(semantic_memory or [])
+            self.last_semantic_memory_status = semantic_memory_status
+            self.started.set()
+            if not self.release.wait(timeout=5):
+                raise RuntimeError("timed out waiting for test release")
+            return super().query_with_trace(
+                message,
+                session_id=session_id,
+                conversation_history=conversation_history,
+                semantic_memory=semantic_memory,
+                semantic_memory_status=semantic_memory_status,
+            )
+
+    fake_qa = BlockingQA()
+    store = ThreadStore.in_memory()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+    responses = {}
+
+    def run_query():
+        responses["query"] = client.post(
+            "/api/query",
+            json={"message": "stale me", "session_id": "thread_race"},
+        )
+
+    query_thread = threading.Thread(target=run_query)
+    query_thread.start()
+    assert fake_qa.started.wait(timeout=5)
+
+    delete_response = client.delete("/api/threads/thread_race")
+    recreated = store.create_thread(thread_id="thread_race")
+    fake_qa.release.set()
+    query_thread.join(timeout=5)
+
+    assert not query_thread.is_alive()
+    assert delete_response.status_code == 200
+    assert responses["query"].status_code == 200
+    thread = client.get("/api/threads/thread_race").json()
+    assert thread["id"] == recreated.id
+    assert thread["messages"] == []
+    assert thread["message_count"] == 0
+    assert thread["latest"] is None
+
+
 def test_query_endpoint_rejects_invalid_session_id():
     client = TestClient(web_app.create_app(FakeQA()))
 
@@ -1100,6 +1705,39 @@ def test_clear_chat_resets_requested_session_state():
     ]
     assert fake_qa.cleared_loop_session_id == "thread_beta"
     assert response.json()["timeline"]["empty"] is True
+
+
+def test_clear_chat_resets_persisted_thread_messages_only():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    store.create_thread(thread_id="thread_beta")
+    store.create_thread(thread_id="thread_other")
+    store.append_message("thread_beta", role="user", content="old")
+    store.append_message("thread_other", role="user", content="keep")
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post("/api/chat/clear", json={"session_id": "thread_beta"})
+
+    assert response.status_code == 200
+    assert client.get("/api/threads/thread_beta").json()["messages"] == []
+    other_messages = client.get("/api/threads/thread_other").json()["messages"]
+    assert [message["content"] for message in other_messages] == ["keep"]
+
+
+def test_clear_chat_does_not_recreate_deleted_thread():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    store.create_thread(thread_id="thread_deleted")
+    store.delete_thread("thread_deleted")
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/chat/clear",
+        json={"session_id": "thread_deleted"},
+    )
+
+    assert response.status_code == 200
+    assert client.get("/api/threads/thread_deleted").status_code == 404
 
 
 def test_clear_chat_rejects_invalid_session_id():
@@ -1277,3 +1915,4 @@ def test_runtime_status_dict_preserves_honest_readiness_scope():
     assert status["ready_for_queries"] is False
     assert status["readiness_scope"] == "retrieval_pipeline"
     assert status["inference_validated"] is False
+    assert status["max_output_tokens"] == 384
