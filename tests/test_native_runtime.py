@@ -229,6 +229,15 @@ print(json.dumps({
 
 
 def test_ai_loop_runtime_does_not_eagerly_import_document_ingestion_stack():
+    env = os.environ.copy()
+    for name in (
+        "EMBEDDINGS_MODEL",
+        "LLM_BACKEND",
+        "LLM_MODEL",
+        "OLLAMA_EMBED_MODEL",
+        "OLLAMA_MODEL",
+    ):
+        env.pop(name, None)
     code = """
 import json
 import sys
@@ -258,6 +267,7 @@ print(json.dumps({
     result = subprocess.run(
         [sys.executable, "-c", code],
         cwd=REPO_ROOT,
+        env=env,
         text=True,
         capture_output=True,
         check=True,

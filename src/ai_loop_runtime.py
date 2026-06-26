@@ -124,9 +124,11 @@ try:
         FAST_MODE_ENV_VAR,
         LLM_BACKEND_ENV_VAR,
         LLM_MODEL_ENV_VAR,
+        MODEL_THINKING_ENV_VAR,
         OLLAMA_BASE_URL_ENV_VAR,
         OLLAMA_EMBEDDINGS_MODEL_ENV_VAR,
         OLLAMA_MODEL_ENV_VAR,
+        OLLAMA_THINK_LEVEL_ENV_VAR,
         OLLAMA_TIMEOUT_ENV_VAR,
         OPENAI_COMPAT_API_KEY_ENV_VAR,
         OPENAI_COMPAT_BASE_URL_ENV_VAR,
@@ -139,6 +141,7 @@ try:
         env_int,
         first_env_value,
         normalize_ollama_base_url,
+        normalize_ollama_think_level,
         normalize_openai_compatible_base_url,
         safe_ollama_base_url_for_error,
         safe_openai_compatible_base_url_for_error,
@@ -154,9 +157,11 @@ except ImportError:
         FAST_MODE_ENV_VAR,
         LLM_BACKEND_ENV_VAR,
         LLM_MODEL_ENV_VAR,
+        MODEL_THINKING_ENV_VAR,
         OLLAMA_BASE_URL_ENV_VAR,
         OLLAMA_EMBEDDINGS_MODEL_ENV_VAR,
         OLLAMA_MODEL_ENV_VAR,
+        OLLAMA_THINK_LEVEL_ENV_VAR,
         OLLAMA_TIMEOUT_ENV_VAR,
         OPENAI_COMPAT_API_KEY_ENV_VAR,
         OPENAI_COMPAT_BASE_URL_ENV_VAR,
@@ -169,6 +174,7 @@ except ImportError:
         env_int,
         first_env_value,
         normalize_ollama_base_url,
+        normalize_ollama_think_level,
         normalize_openai_compatible_base_url,
         safe_ollama_base_url_for_error,
         safe_openai_compatible_base_url_for_error,
@@ -405,6 +411,7 @@ class AnswerTrace:
     citations: List[AnswerCitation]
     self_check: Optional["AnswerSelfCheck"] = None
     error_message: Optional[str] = None
+    model_thinking: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -533,6 +540,7 @@ class AILoopEngine:
             OPENAI_COMPAT_MODEL_ENV_VAR, ""
         ).strip()
         self.openai_compat_timeout = env_int(OPENAI_COMPAT_TIMEOUT_ENV_VAR, 120)
+        self.model_thinking_enabled = env_flag(MODEL_THINKING_ENV_VAR, True)
         self.embeddings_model = self._resolve_embeddings_model(embeddings_model)
         self.embeddings_device = self._normalize_embeddings_device(embeddings_device)
 
@@ -670,10 +678,20 @@ class AILoopEngine:
     def _load_ollama_model(self, model_id: str) -> OllamaLLM:
         base_url = normalize_ollama_base_url(self.ollama_base_url)
         LOGGER.info("Configuring Ollama model %s at %s", model_id, base_url)
+        think_level = (
+            normalize_ollama_think_level(
+                os.getenv(OLLAMA_THINK_LEVEL_ENV_VAR),
+                model=model_id,
+            )
+            if self.model_thinking_enabled
+            else None
+        )
         llm = OllamaLLM(
             model=model_id,
             base_url=base_url,
             timeout=self.ollama_timeout,
+            enable_thinking=self.model_thinking_enabled,
+            think_level=think_level,
             options={
                 "temperature": 0,
                 "num_predict": self.profile["max_new_tokens"],
@@ -1456,6 +1474,7 @@ class AILoopEngine:
         self_check: Optional[AnswerSelfCheck] = None,
         error_message: Optional[str] = None,
         loop_report: Optional[LoopReport] = None,
+        model_thinking: Optional[str] = None,
     ) -> QueryResult:
         return QueryResult(
             answer=answer,
@@ -1468,6 +1487,7 @@ class AILoopEngine:
                 citations=citations or [],
                 self_check=self_check,
                 error_message=error_message,
+                model_thinking=model_thinking,
             ),
             loop_report=loop_report,
         )
@@ -1775,6 +1795,7 @@ class AILoopEngine:
         self_check: Optional[AnswerSelfCheck] = None,
         error_message: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        model_thinking: Optional[str] = None,
     ) -> QueryResult:
         (
             loop_report,
@@ -1793,6 +1814,7 @@ class AILoopEngine:
             retrieved_chunk_count = 0
             citations = []
             self_check = None
+            model_thinking = None
         result = self._query_result(
             answer=answer,
             question=question,
@@ -1802,6 +1824,7 @@ class AILoopEngine:
             self_check=self_check,
             error_message=error_message,
             loop_report=loop_report,
+            model_thinking=model_thinking,
         )
         self._record_loop_report(loop_report)
         return result
@@ -1958,6 +1981,7 @@ class AILoopEngine:
                 metadata={"identity_answer": True},
             )
 
+        model_thinking = None
         try:
             if hasattr(active_state.retrieval_chain, "invoke_with_trace"):
                 supports_split_trace = (
@@ -2053,10 +2077,14 @@ class AILoopEngine:
                 response = chain_result.answer
                 retrieved_chunk_count = chain_result.retrieved_chunk_count
                 citations = chain_result.citations
+                model_thinking = getattr(chain_result, "model_thinking", None)
                 draft_metadata = {
                     "answer_chars": len(str(response).strip()),
                     "inline_citation_ids": self._inline_citation_ids(str(response)),
+                    "model_thinking_available": bool(model_thinking),
                 }
+                if model_thinking:
+                    draft_metadata["model_thinking_chars"] = len(model_thinking)
                 if not supports_split_trace:
                     draft_metadata.update(
                         {
@@ -2152,6 +2180,18 @@ class AILoopEngine:
                     response = retry_result.answer
                     retrieved_chunk_count = retry_result.retrieved_chunk_count
                     citations = retry_result.citations
+                    model_thinking = getattr(retry_result, "model_thinking", None)
+                    retry_draft_metadata = {
+                        "answer_chars": len(str(response).strip()),
+                        "inline_citation_ids": self._inline_citation_ids(
+                            str(response)
+                        ),
+                        "model_thinking_available": bool(model_thinking),
+                    }
+                    if model_thinking:
+                        retry_draft_metadata["model_thinking_chars"] = len(
+                            model_thinking
+                        )
                     run, guardrail_decision = self._record_loop_step(
                         run,
                         self._loop_step(
@@ -2161,12 +2201,7 @@ class AILoopEngine:
                             input_summary=clean_prompt,
                             output_summary=str(response).strip()[:500],
                             retry_count=1,
-                            metadata={
-                                "answer_chars": len(str(response).strip()),
-                                "inline_citation_ids": self._inline_citation_ids(
-                                    str(response)
-                                ),
-                            },
+                            metadata=retry_draft_metadata,
                         ),
                     )
                     if guardrail_decision:
@@ -2215,6 +2250,12 @@ class AILoopEngine:
                         run=run,
                     )
                 response = active_state.retrieval_chain.invoke(clean_prompt)
+                llm_thinking = getattr(self.llm, "last_thinking", None)
+                model_thinking = (
+                    llm_thinking.strip()
+                    if isinstance(llm_thinking, str) and llm_thinking.strip()
+                    else None
+                )
                 retrieved_chunk_count = 0
                 citations = []
                 self_check = None
@@ -2240,6 +2281,7 @@ class AILoopEngine:
             response = str(response).strip()
             if len(response) < 3:
                 response = SELF_CHECK_REFUSAL_ANSWER
+                model_thinking = None
                 run, guardrail_decision, self_check = self._run_self_check_with_loop(
                     run=run,
                     answer=response,
@@ -2261,6 +2303,7 @@ class AILoopEngine:
 
             if self_check and self_check.outcome not in SELF_CHECK_PASS_OUTCOMES:
                 response = SELF_CHECK_REFUSAL_ANSWER
+                model_thinking = None
                 if self_check.outcome != "needs_refusal":
                     self_check = self._fail_closed_self_check(self_check)
                 run, guardrail_decision = self._append_loop_step(
@@ -2300,6 +2343,7 @@ class AILoopEngine:
                 retrieved_chunk_count=retrieved_chunk_count,
                 citations=citations,
                 self_check=self_check,
+                model_thinking=model_thinking,
                 metadata={
                     "self_check_outcome": self_check.outcome if self_check else None,
                     "retry_attempted": (

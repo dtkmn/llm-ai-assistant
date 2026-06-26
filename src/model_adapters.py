@@ -28,6 +28,7 @@ try:
         is_loopback_host,
         is_loopback_openai_compatible_host,
         normalize_ollama_base_url,
+        normalize_ollama_think_level,
         normalize_openai_compatible_base_url,
         safe_openai_compatible_base_url_for_error,
     )
@@ -38,6 +39,7 @@ except ImportError:
         is_loopback_host,
         is_loopback_openai_compatible_host,
         normalize_ollama_base_url,
+        normalize_ollama_think_level,
         normalize_openai_compatible_base_url,
         safe_openai_compatible_base_url_for_error,
     )
@@ -261,6 +263,16 @@ class OllamaLLM(LLM):
     base_url: str = DEFAULT_OLLAMA_BASE_URL
     timeout: int = 120
     options: Dict[str, object] = Field(default_factory=dict)
+    enable_thinking: bool = True
+    think_level: Optional[str] = None
+    supports_thinking: Optional[bool] = None
+    last_thinking: Optional[str] = None
+
+    def model_post_init(self, __context) -> None:
+        self.think_level = normalize_ollama_think_level(
+            self.think_level,
+            model=self.model,
+        )
 
     @property
     def _llm_type(self) -> str:
@@ -299,7 +311,19 @@ class OllamaLLM(LLM):
         return parsed
 
     def validate_model_available(self) -> None:
-        self._post_json("/api/show", {"model": self.model})
+        response = self._post_json("/api/show", {"model": self.model})
+        capabilities = response.get("capabilities")
+        self.supports_thinking = (
+            any(str(capability).lower() == "thinking" for capability in capabilities)
+            if isinstance(capabilities, list)
+            else False
+        )
+
+    def _clean_model_thinking(self, value: object) -> Optional[str]:
+        if not isinstance(value, str):
+            return None
+        thinking = value.strip()
+        return thinking or None
 
     def _strip_thinking_text(self, text: str) -> str:
         cleaned = re.sub(
@@ -316,10 +340,59 @@ class OllamaLLM(LLM):
             cleaned = cleaned[: dangling_think_start.start()]
         return cleaned.strip()
 
-    def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
-        options = dict(self.options)
-        if stop:
-            options["stop"] = stop
+    def _extract_inline_thinking_and_answer(
+        self, text: str
+    ) -> tuple[Optional[str], str]:
+        snippets = [
+            match.group(1).strip()
+            for match in re.finditer(
+                r"<think>(.*?)</think>",
+                text,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            if match.group(1).strip()
+        ]
+        thinking = "\n\n".join(snippets) if snippets else None
+        return thinking, self._strip_thinking_text(text)
+
+    def _thinking_enabled_for_request(self) -> bool:
+        return bool(self.enable_thinking and self.supports_thinking is True)
+
+    def _think_value_for_request(self) -> object:
+        self.think_level = normalize_ollama_think_level(
+            self.think_level,
+            model=self.model,
+        )
+        return self.think_level or True
+
+    def _call_chat_with_thinking(
+        self, prompt: str, options: Dict[str, object]
+    ) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "think": self._think_value_for_request(),
+            "options": options,
+        }
+        response = self._post_json("/api/chat", payload)
+        message = response.get("message")
+        if not isinstance(message, dict):
+            raise RuntimeError("Ollama chat response did not include a message.")
+        generated_text = message.get("content")
+        if not isinstance(generated_text, str):
+            raise RuntimeError("Ollama chat response did not include generated text.")
+        inline_thinking, answer = self._extract_inline_thinking_and_answer(
+            generated_text
+        )
+        self.last_thinking = self._clean_model_thinking(
+            message.get("thinking")
+        ) or inline_thinking
+        return answer
+
+    def _call_generate(
+        self, prompt: str, options: Dict[str, object]
+    ) -> str:
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -331,7 +404,24 @@ class OllamaLLM(LLM):
         generated_text = response.get("response")
         if not isinstance(generated_text, str):
             raise RuntimeError("Ollama response did not include generated text.")
-        return self._strip_thinking_text(generated_text)
+        inline_thinking, answer = self._extract_inline_thinking_and_answer(
+            generated_text
+        )
+        self.last_thinking = (
+            self._clean_model_thinking(response.get("thinking")) or inline_thinking
+            if self.enable_thinking and self.supports_thinking is True
+            else None
+        )
+        return answer
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
+        self.last_thinking = None
+        options = dict(self.options)
+        if stop:
+            options["stop"] = stop
+        if self._thinking_enabled_for_request():
+            return self._call_chat_with_thinking(prompt, options)
+        return self._call_generate(prompt, options)
 
 
 class OpenAICompatibleLLM(LLM):

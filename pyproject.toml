@@ -9,13 +9,13 @@ description = "Local-first engine for inspecting and hardening AI answer loops."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = "MIT"
-keywords = ["ai", "agents", "loop-engineering", "rag", "ollama", "gradio"]
+keywords = ["ai", "agents", "loop-engineering", "rag", "ollama", "fastapi"]
 dependencies = [
   "aiohttp==3.14.1",
   "charset-normalizer==3.4.4",
   "docx2txt==0.9",
   "faiss-cpu==1.13.2",
-  "gradio==6.15.2",
+  "fastapi==0.138.0",
   "langchain==1.3.10",
   "langchain-core==1.4.8",
   "langgraph-checkpoint==4.1.1",
@@ -29,6 +29,7 @@ dependencies = [
   "pypdf==6.13.3",
   "python-multipart==0.0.32",
   "urllib3==2.7.0",
+  "uvicorn==0.38.0",
 ]
 
 [project.urls]
@@ -42,6 +43,7 @@ ai-loop-ollama-eval = "src.ollama_model_eval:main"
 
 [dependency-groups]
 dev = [
+  "httpx==0.28.1",
   "pip-audit==2.10.1",
   "pytest==9.0.2",
 ]
@@ -49,6 +51,9 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
+
+[tool.setuptools.package-data]
+src = ["web_static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

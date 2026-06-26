@@ -150,6 +150,7 @@ class DocumentRetrievalChain:
         profile: Dict,
     ):
         self.retriever = retriever
+        self.llm = llm
         self.answer_chain = prompt | llm | StrOutputParser()
         self.document_name = document_name
         self.profile = profile
@@ -192,6 +193,7 @@ class DocumentRetrievalChain:
             retrieved_chunk_count=retrieved_context.retrieved_chunk_count,
             citations=retrieved_context.citations,
             context=retrieved_context.context,
+            model_thinking=self._latest_model_thinking(),
         )
 
     def retry_with_trace(
@@ -210,7 +212,15 @@ class DocumentRetrievalChain:
             retrieved_chunk_count=previous_result.retrieved_chunk_count,
             citations=previous_result.citations,
             context=previous_result.context,
+            model_thinking=self._latest_model_thinking(),
         )
+
+    def _latest_model_thinking(self) -> Optional[str]:
+        thinking = getattr(self.llm, "last_thinking", None)
+        if not isinstance(thinking, str):
+            return None
+        thinking = thinking.strip()
+        return thinking or None
 
     def _generate_answer(
         self, *, question: str, context: str, self_check_instruction: str = ""

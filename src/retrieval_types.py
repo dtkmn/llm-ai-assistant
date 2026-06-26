@@ -17,6 +17,7 @@ class RetrievalChainResult:
     retrieved_chunk_count: int
     citations: List[AnswerCitation]
     context: str = ""
+    model_thinking: Optional[str] = None
 
 
 @dataclass(frozen=True)

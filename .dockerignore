@@ -2,6 +2,9 @@
 .github
 .idea
 .DS_Store
+.env
+.env.*
+!.env.example
 .pytest_cache/
 .ruff_cache/
 venv/

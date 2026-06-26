@@ -12,9 +12,12 @@ loop: making agent behavior visible, testable, and harder to fake.
   gateway deployment uses a generic OpenAI-compatible chat-completions backend
 - **Vector Search:** Uses FAISS for efficient similarity search with
   provider-backed embedding models through Ollama or OpenAI-compatible gateways
-- **Gradio Interface:** Web interface for local loop sessions, context indexing,
-  runtime status, a readable loop timeline, compact loop summaries, and answer
-  traces
+- **FastAPI Web App:** Real backend API plus a static browser UI for local loop
+  sessions, context indexing, runtime status, a readable loop timeline, compact
+  loop summaries, and answer traces
+- **Model Thinking Panel:** Shows Ollama model-emitted thinking when the model
+  supports it, clearly labeled as unverified debugging signal rather than
+  evidence
 - **External Model Runtime:** Uses Ollama or an OpenAI-compatible gateway for
   generation so Python document indexing stays lightweight and stable
 
@@ -68,15 +71,22 @@ loop: making agent behavior visible, testable, and harder to fake.
     ```bash
     ollama pull nemotron-3-nano:4b
     ollama pull embeddinggemma
-    export LLM_BACKEND=ollama
-    export LLM_MODEL=nemotron-3-nano:4b
-    export EMBEDDINGS_MODEL=embeddinggemma
-    export OLLAMA_BASE_URL=http://localhost:11434
-    export FAST_MODE=true
+    cp .env.example .env
     ```
+
+    Edit `.env` if you pulled a different chat or embedding model. The app
+    loads `.env` and `.env.local` automatically when started with
+    `uv run ai-loop-engine` or `python -m src.app`; shell exports still override
+    file values for one-off runs. Both local files are ignored by git.
 
     `LLM_BACKEND` selects the provider runtime. `LLM_MODEL` chooses the chat
     model. `EMBEDDINGS_MODEL` chooses the retrieval embedding model.
+    `MODEL_THINKING=true` shows Ollama model-emitted thinking for models that
+    advertise the `thinking` capability; set it to `false` if you want final
+    answers and loop evidence only. `OLLAMA_THINK_LEVEL` can be set to `low`,
+    `medium`, `high`, or `max` for models that support levels. GPT-OSS accepts
+    only `low`, `medium`, or `high`; when left on `auto`, AI Loop Engine sends
+    `medium` for GPT-OSS and `true` for other thinking-capable Ollama models.
 
 4. (Optional) choose a different backend:
 
@@ -88,14 +98,14 @@ loop: making agent behavior visible, testable, and harder to fake.
       `/v1/chat/completions`.
     - `mock` disables real inference for demos/tests.
 
-5. (Optional) set up a cloud or local OpenAI-compatible endpoint:
+5. (Optional) set up a cloud or local OpenAI-compatible endpoint in `.env`:
 
-    ```bash
-    export LLM_BACKEND=openai-compatible
-    export OPENAI_COMPAT_BASE_URL=http://localhost:8000/v1
-    export LLM_MODEL=gpt-oss:20b
-    export EMBEDDINGS_MODEL=text-embedding-local
-    export OPENAI_COMPAT_API_KEY=optional_token_here
+    ```dotenv
+    LLM_BACKEND=openai-compatible
+    OPENAI_COMPAT_BASE_URL=http://localhost:8000/v1
+    LLM_MODEL=gpt-oss:20b
+    EMBEDDINGS_MODEL=text-embedding-local
+    OPENAI_COMPAT_API_KEY=optional_token_here
     ```
 
     `OPENAI_COMPAT_API_KEY` is optional for local gateways such as vLLM,
@@ -103,16 +113,16 @@ loop: making agent behavior visible, testable, and harder to fake.
     that require bearer auth. Plain `http://` is accepted only for loopback
     local development; non-loopback endpoints must use `https://`.
 
-6. (Optional) switch back to quality mode:
+6. (Optional) switch back to quality mode in `.env`:
 
-    ```bash
-    export FAST_MODE=false
+    ```dotenv
+    FAST_MODE=false
     ```
 
-7. (Optional) enable debug logs:
+7. (Optional) enable debug logs in `.env`:
 
-    ```bash
-    export APP_DEBUG=false
+    ```dotenv
+    APP_DEBUG=true
     ```
 
 8. Run the application:
@@ -187,9 +197,9 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   `LoopSession` objects keyed by `session_id`
 - **Replay artifacts:** local JSONL export writes one raw `LoopReport` per line,
   suitable for future replay and diff tooling
-- **Public trace surface:** the Gradio UI shows a readable Loop Timeline,
-  compact loop summary, and redacted public loop report; raw reports remain
-  internal diagnostics
+- **Public trace surface:** the FastAPI/static web app shows a readable Loop
+  Timeline, compact loop summary, and redacted public loop report; raw reports
+  remain internal diagnostics
 - **Middleware boundary:** loop middleware can observe runs/steps, block unsafe progress, request retry/refusal, or mark a human-review pending state without introducing autonomous tool use
 - **Framework posture:** OpenAI Agents SDK and LangGraph are dependency-free
   export targets today; Microsoft Agent Framework remains a future export
@@ -229,7 +239,7 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 - **Safety limits:** Max upload size 25 MB, chunk cap 2,000 chunks per document
 - **Native runtime defaults:** unless you override them, app entrypoints
   bootstrap `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
-  `VECLIB_MAXIMUM_THREADS`, and tokenizer parallelism before Gradio, NumPy,
+  `VECLIB_MAXIMUM_THREADS`, and tokenizer parallelism before FastAPI, NumPy,
   or FAISS load native libraries. This is intentional: upload stability beats
   native thread-pool surprises on local Macs.
 
@@ -416,9 +426,9 @@ ollama stop qwen3:8b
   for Docker and conservative CI/deployment paths. Tests assert they stay
   synchronized with `pyproject.toml`.
 - Dependabot is enabled weekly (`.github/dependabot.yml`) for dependency updates.
-- Current direct runtime baseline includes Gradio `6.15.2`, LangChain `1.3.10`,
-  FAISS CPU `1.13.2`, local text/document parsers, and the dependency-free
-  Ollama/OpenAI-compatible HTTP adapters.
+- Current direct runtime baseline includes FastAPI `0.138.0`, Uvicorn `0.38.0`,
+  LangChain `1.3.10`, FAISS CPU `1.13.2`, local text/document parsers, and the
+  dependency-free Ollama/OpenAI-compatible HTTP adapters.
 - Note: `marshmallow` is intentionally pinned to `3.26.2` because `dataclasses-json` currently requires `<4.0.0`.
 - Security-sensitive transitive dependencies are explicitly pinned (for example `aiohttp`, `urllib3`, `python-multipart`, and `orjson`) to keep audit results stable.
 - Recommended recurring checks:

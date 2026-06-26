@@ -1,6 +1,6 @@
 ---
 name: loop-engineering
-description: Use when changing loop contracts, document context, retrieval, LLM backend routing, Gradio upload/query behavior, evals, or CI release policy for AI Loop Engine.
+description: Use when changing loop contracts, document context, retrieval, LLM backend routing, FastAPI/web upload/query behavior, evals, or CI release policy for AI Loop Engine.
 ---
 
 # Loop Engineering
@@ -44,9 +44,12 @@ first context provider, not the product boundary.
   embedding backend variable. Configure the chat model with `LLM_MODEL` and the
   retrieval model with `EMBEDDINGS_MODEL`; provider-specific model env vars are
   compatibility aliases only.
-- Native runtime defaults must be installed before Gradio, NumPy, FAISS,
+- Native runtime defaults must be installed before FastAPI, NumPy, FAISS,
   or other native-heavy imports in app entrypoints. Use `src.native_runtime`
   instead of duplicating env setup in modules that may be imported too late.
+- Local `.env` and `.env.local` files are loaded before native defaults in the
+  app entrypoint. They must not override shell environment variables and must
+  stay disabled under tests.
 - Runtime imports must not eagerly load FAISS or `src.retrieval`; keep retrieval
   lazy to indexing/search paths or explicit compatibility imports.
 - Embedding runtime follows the selected provider. Ollama uses `/api/embed`;
@@ -87,6 +90,11 @@ first context provider, not the product boundary.
   mechanical checks and deterministic refutation prefilters may reject bad
   answers, but only a real backend verifier may label an answer `supported`.
   Mock/demo mode must report mechanically valid answers as `not_verified`.
+- Ollama model thinking is model-emitted debug signal. Show it only when the
+  provider exposes it, label it as unverified, keep it out of final answer text,
+  and drop/redact it for refused, blocked, or terminal-guardrail-redacted
+  results. GPT-OSS thinking must use `OLLAMA_THINK_LEVEL` with `low`, `medium`,
+  or `high`; boolean `think` values are ignored by that model family.
 - Golden document evals must exercise the full provider-free QA loop: upload,
   retrieval, cited answer, self-check, retry, and fail-closed refusal. Do not
   require a live Ollama backend for these CI checks.
@@ -122,6 +130,8 @@ first context provider, not the product boundary.
 ## Files To Inspect First
 
 - `src/ai_loop_engine.py`
+- `src/app.py`
+- `src/web_contract.py`
 - `src/ai_loop_runtime.py`
 - `src/context_providers.py`
 - `src/retrieval.py`
@@ -129,12 +139,12 @@ first context provider, not the product boundary.
 - `src/document_config.py`
 - `src/document_text.py`
 - `src/document_ingestion.py`
+- `src/env_file.py`
 - `src/runtime_config.py`
 - `src/model_adapters.py`
 - `src/answer_loop.py`
 - `src/DocumentQA.py`
 - `src/loop_engine.py`
-- `src/app.py`
 - `src/golden_eval.py`
 - `src/loop_eval.py`
 - `src/ollama_model_eval.py`

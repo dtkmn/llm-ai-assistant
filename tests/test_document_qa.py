@@ -70,6 +70,7 @@ def clear_model_provider_env(monkeypatch):
         "OLLAMA_BASE_URL",
         "OLLAMA_MODEL",
         "OLLAMA_EMBED_MODEL",
+        "OLLAMA_THINK_LEVEL",
         "OPENAI_COMPAT_BASE_URL",
         "OPENAI_COMPAT_MODEL",
         "OPENAI_COMPAT_EMBED_MODEL",
@@ -822,6 +823,7 @@ def test_self_check_rejects_cited_but_unsupported_answer(tmp_path):
                 retrieved_chunk_count=1,
                 citations=[citation_for(document.name)],
                 context="Project Phoenix launches in June 2026.",
+                model_thinking="I may cite a nonexistent budget source.",
             )
 
         def retry_with_trace(self, question, previous_result, self_check_instruction):
@@ -830,6 +832,7 @@ def test_self_check_rejects_cited_but_unsupported_answer(tmp_path):
                 retrieved_chunk_count=previous_result.retrieved_chunk_count,
                 citations=previous_result.citations,
                 context=previous_result.context,
+                model_thinking="I am still citing source 999.",
             )
 
     replace_retrieval_chain(qa, ContradictedCitationChain())
@@ -842,6 +845,7 @@ def test_self_check_rejects_cited_but_unsupported_answer(tmp_path):
     assert result.trace.self_check.outcome == "needs_refusal"
     assert result.trace.self_check.reasons == ["llm_verifier_unsupported"]
     assert result.trace.self_check.retry_attempted is False
+    assert result.trace.model_thinking is None
     assert len(verifier.calls) == 1
     assert "Project Phoenix launches tomorrow [1]." in verifier.calls[0]
     assert "Project Phoenix launches in June 2026." in verifier.calls[0]
@@ -867,6 +871,7 @@ def test_llm_verifier_marks_real_backend_answer_supported(tmp_path):
                 retrieved_chunk_count=1,
                 citations=[citation_for(document.name)],
                 context="Project Phoenix launches in June 2026.",
+                model_thinking="I used citation [1] to answer the launch question.",
             )
 
     replace_retrieval_chain(qa, SupportedCitationChain())
@@ -880,6 +885,9 @@ def test_llm_verifier_marks_real_backend_answer_supported(tmp_path):
         "mechanical_checks_passed",
         "llm_verifier_supported",
     ]
+    assert result.trace.model_thinking == (
+        "I used citation [1] to answer the launch question."
+    )
     assert len(verifier.calls) == 1
     assert "When does Project Phoenix launch?" in verifier.calls[0]
     assert "Project Phoenix launches in June 2026." in verifier.calls[0]
@@ -906,6 +914,7 @@ def test_loop_middleware_can_block_before_verifier_call(tmp_path):
                 retrieved_chunk_count=1,
                 citations=[citation_for(document.name)],
                 context="Project Phoenix launches in June 2026.",
+                model_thinking="I may cite a nonexistent budget source.",
             )
 
     replace_retrieval_chain(qa, SupportedCitationChain())
@@ -915,6 +924,7 @@ def test_loop_middleware_can_block_before_verifier_call(tmp_path):
     assert verifier.calls == []
     assert result.answer == "A loop guardrail blocked this query before it could complete."
     assert result.trace.error_message == "verifier_blocked"
+    assert result.trace.model_thinking is None
     assert result.loop_report.run.final_decision == LoopDecision.BLOCK
     phases = [step.phase for step in result.loop_report.run.steps]
     assert LoopPhase.MECHANICAL_CHECK in phases
@@ -948,6 +958,7 @@ def test_self_check_retries_hallucinated_inline_citation_id(tmp_path):
                 retrieved_chunk_count=previous_result.retrieved_chunk_count,
                 citations=previous_result.citations,
                 context=previous_result.context,
+                model_thinking="I removed the invalid [999] citation.",
             )
 
     retrieval_chain = HallucinatedCitationChain()
@@ -960,6 +971,7 @@ def test_self_check_retries_hallucinated_inline_citation_id(tmp_path):
     assert result.trace.self_check.retry_attempted is True
     assert len(retrieval_chain.calls) == 2
     assert "invalid_inline_citation" in retrieval_chain.calls[1]
+    assert result.trace.model_thinking == "I removed the invalid [999] citation."
     assert len(verifier.calls) == 1
     assert "[999]" not in verifier.calls[0]
 
@@ -978,6 +990,7 @@ def test_self_check_refuses_when_retry_keeps_hallucinated_inline_citation_id(tmp
                 retrieved_chunk_count=1,
                 citations=[citation_for(document.name)],
                 context="Project Phoenix launches in June 2026.",
+                model_thinking="I may cite a nonexistent budget source.",
             )
 
         def retry_with_trace(self, question, previous_result, self_check_instruction):
@@ -989,6 +1002,7 @@ def test_self_check_refuses_when_retry_keeps_hallucinated_inline_citation_id(tmp
                 retrieved_chunk_count=previous_result.retrieved_chunk_count,
                 citations=previous_result.citations,
                 context=previous_result.context,
+                model_thinking="I am still citing source 999.",
             )
 
     replace_retrieval_chain(qa, StillHallucinatedCitationChain())
@@ -1002,6 +1016,7 @@ def test_self_check_refuses_when_retry_keeps_hallucinated_inline_citation_id(tmp
     assert "self_check_failed_closed" in result.trace.self_check.reasons
     assert "invalid_inline_citation" in result.trace.self_check.reasons
     assert result.trace.self_check.retry_attempted is True
+    assert result.trace.model_thinking is None
     assert verifier.calls == []
 
 
@@ -1552,10 +1567,12 @@ def test_status_reports_configured_backend_before_initialization(monkeypatch):
     monkeypatch.delenv("OPENAI_COMPAT_MODEL", raising=False)
     monkeypatch.delenv("EMBEDDINGS_MODEL", raising=False)
     monkeypatch.delenv("OPENAI_COMPAT_EMBED_MODEL", raising=False)
+    monkeypatch.setenv("OLLAMA_THINK_LEVEL", "max")
     qa = DocumentQA(
         device="cpu",
         fast_mode=False,
         llm_backend="openai-compatible",
+        model_id="gpt-oss:20b",
     )
 
     status = qa.status()
@@ -1563,12 +1580,23 @@ def test_status_reports_configured_backend_before_initialization(monkeypatch):
     assert status.profile_label == "QUALITY"
     assert status.configured_backend == "openai-compatible"
     assert status.active_backend == "openai-compatible"
-    assert status.active_model_label == "OpenAI-compatible (unconfigured)"
+    assert status.active_model_label == "OpenAI-compatible (gpt-oss:20b)"
     assert status.embeddings_model == ""
     assert status.embeddings_device == "external"
     assert status.ready_for_queries is False
     assert status.mock_mode is False
     assert status.processing_report is None
+
+
+def test_mock_backend_ignores_ollama_think_level_env(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "mock")
+    monkeypatch.setenv("LLM_MODEL", "gpt-oss:20b")
+    monkeypatch.setenv("OLLAMA_THINK_LEVEL", "max")
+
+    qa = DocumentQA(fast_mode=True)
+
+    assert qa.llm_backend == "mock"
+    assert qa.status().active_backend == "mock"
 
 
 def test_auto_status_before_initialization_reports_local_first_plan(monkeypatch):
@@ -3532,8 +3560,8 @@ def test_ollama_llm_validates_model_and_generates(monkeypatch):
             return FakeResponse(
                 {
                     "response": (
-                        "The model is reasoning about the prompt.\n"
-                        "</think>\nProject Phoenix answer [1]."
+                        "<think>SECRET_GENERATE_THINKING</think>\n"
+                        "Project Phoenix answer [1]."
                     )
                 }
             )
@@ -3560,7 +3588,10 @@ def test_ollama_llm_validates_model_and_generates(monkeypatch):
     answer = llm.invoke("Answer with citation.", stop=["END"])
 
     assert answer == "Project Phoenix answer [1]."
+    assert llm.supports_thinking is False
+    assert llm.last_thinking is None
     assert llm._strip_thinking_text("<think>unfinished reasoning") == ""
+    assert "SECRET_GENERATE_THINKING" not in answer
     assert requests[0] == (
         "http://localhost:11434/api/show",
         {"model": DEFAULT_OLLAMA_MODEL},
@@ -3576,6 +3607,256 @@ def test_ollama_llm_validates_model_and_generates(monkeypatch):
         "num_predict": 160,
         "stop": ["END"],
     }
+
+
+def test_ollama_llm_uses_chat_thinking_when_model_supports_it(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        payload = json.loads(request.data.decode("utf-8"))
+        requests.append((request.full_url, payload, timeout))
+        if request.full_url.endswith("/api/show"):
+            return FakeResponse({"capabilities": ["completion", "thinking"]})
+        if request.full_url.endswith("/api/chat"):
+            return FakeResponse(
+                {
+                    "message": {
+                        "content": "Project Phoenix launches in June 2026 [1].",
+                        "thinking": "I checked the cited Phoenix launch excerpt.",
+                    }
+                }
+            )
+        raise AssertionError(f"Unexpected Ollama URL: {request.full_url}")
+
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    llm = OllamaLLM(
+        model=DEFAULT_OLLAMA_MODEL,
+        base_url="http://localhost:11434",
+        timeout=9,
+        options={"temperature": 0},
+    )
+
+    llm.validate_model_available()
+    answer = llm.invoke("Answer with citation.")
+
+    assert answer == "Project Phoenix launches in June 2026 [1]."
+    assert llm.supports_thinking is True
+    assert llm.last_thinking == "I checked the cited Phoenix launch excerpt."
+    assert requests[1][0] == "http://localhost:11434/api/chat"
+    assert requests[1][1] == {
+        "model": DEFAULT_OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": "Answer with citation."}],
+        "stream": False,
+        "think": True,
+        "options": {"temperature": 0},
+    }
+
+
+def test_ollama_llm_uses_level_for_gpt_oss_thinking(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        payload = json.loads(request.data.decode("utf-8"))
+        requests.append((request.full_url, payload, timeout))
+        if request.full_url.endswith("/api/show"):
+            return FakeResponse({"capabilities": ["completion", "thinking"]})
+        if request.full_url.endswith("/api/chat"):
+            return FakeResponse(
+                {
+                    "message": {
+                        "content": "GPT-OSS answer [1].",
+                        "thinking": "GPT-OSS medium trace.",
+                    }
+                }
+            )
+        raise AssertionError(f"Unexpected Ollama URL: {request.full_url}")
+
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    llm = OllamaLLM(model="gpt-oss:20b")
+
+    llm.validate_model_available()
+    answer = llm.invoke("Answer with citation.")
+
+    assert answer == "GPT-OSS answer [1]."
+    assert llm.think_level == "medium"
+    assert llm.last_thinking == "GPT-OSS medium trace."
+    assert requests[1][0] == "http://localhost:11434/api/chat"
+    assert requests[1][1]["model"] == "gpt-oss:20b"
+    assert requests[1][1]["think"] == "medium"
+
+
+def test_ollama_llm_respects_explicit_think_level(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        payload = json.loads(request.data.decode("utf-8"))
+        requests.append((request.full_url, payload, timeout))
+        if request.full_url.endswith("/api/show"):
+            return FakeResponse({"capabilities": ["completion", "thinking"]})
+        if request.full_url.endswith("/api/chat"):
+            return FakeResponse(
+                {
+                    "message": {
+                        "content": "High effort answer [1].",
+                        "thinking": "High effort trace.",
+                    }
+                }
+            )
+        raise AssertionError(f"Unexpected Ollama URL: {request.full_url}")
+
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    llm = OllamaLLM(model=DEFAULT_OLLAMA_MODEL, think_level="high")
+
+    llm.validate_model_available()
+    answer = llm.invoke("Answer with citation.")
+
+    assert answer == "High effort answer [1]."
+    assert requests[1][1]["think"] == "high"
+
+
+def test_ollama_think_level_rejects_gpt_oss_max(monkeypatch):
+    monkeypatch.setenv("LLM_BACKEND", "ollama")
+    monkeypatch.setenv("LLM_MODEL", "gpt-oss:20b")
+    monkeypatch.setenv("OLLAMA_THINK_LEVEL", "max")
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        lambda request, *, timeout: (_ for _ in ()).throw(
+            AssertionError("Invalid GPT-OSS think level must fail before Ollama I/O")
+        ),
+    )
+    qa = DocumentQA(fast_mode=True)
+
+    with pytest.raises(RuntimeError, match="OLLAMA_THINK_LEVEL=max"):
+        qa._load_ollama_model("gpt-oss:20b")
+
+
+def test_ollama_llm_revalidates_mutated_think_level_before_request(monkeypatch):
+    calls = 0
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps({"capabilities": ["completion", "thinking"]}).encode(
+                "utf-8"
+            )
+
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        nonlocal calls
+        calls += 1
+        if request.full_url.endswith("/api/show"):
+            return FakeResponse()
+        raise AssertionError("Invalid GPT-OSS think level must fail before chat request")
+
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    llm = OllamaLLM(model="gpt-oss:20b")
+    llm.validate_model_available()
+    llm.think_level = "max"
+
+    with pytest.raises(RuntimeError, match="OLLAMA_THINK_LEVEL=max"):
+        llm.invoke("Answer with citation.")
+
+    assert calls == 1
+
+
+def test_ollama_llm_respects_disabled_model_thinking(monkeypatch):
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_open_ollama_request_no_proxy(request, *, timeout):
+        payload = json.loads(request.data.decode("utf-8"))
+        requests.append((request.full_url, payload, timeout))
+        if request.full_url.endswith("/api/show"):
+            return FakeResponse({"capabilities": ["completion", "thinking"]})
+        if request.full_url.endswith("/api/generate"):
+            return FakeResponse(
+                {"response": "<think>hidden scratch</think>Plain answer [1]."}
+            )
+        raise AssertionError(f"Unexpected Ollama URL: {request.full_url}")
+
+    monkeypatch.setattr(
+        "src.DocumentQA.open_ollama_request_no_proxy",
+        fake_open_ollama_request_no_proxy,
+    )
+    llm = OllamaLLM(
+        model=DEFAULT_OLLAMA_MODEL,
+        enable_thinking=False,
+    )
+
+    llm.validate_model_available()
+    answer = llm.invoke("Answer plainly.")
+
+    assert answer == "Plain answer [1]."
+    assert requests[1][0] == "http://localhost:11434/api/generate"
+    assert requests[1][1]["think"] is False
+    assert llm.last_thinking is None
 
 
 def test_ollama_llm_http_error_body_is_not_reflected(monkeypatch):

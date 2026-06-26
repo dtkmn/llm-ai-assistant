@@ -1,8 +1,15 @@
-import json
+from __future__ import annotations
+
 import logging
 import os
-from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Optional
+
+try:
+    from .env_file import load_local_env_files
+except ImportError:
+    from env_file import load_local_env_files
 
 try:
     from .native_runtime import apply_native_runtime_defaults
@@ -10,35 +17,43 @@ except ImportError:
     from native_runtime import apply_native_runtime_defaults
 
 
+load_local_env_files()
 apply_native_runtime_defaults()
 
-import gradio as gr
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+import uvicorn
 
 try:
-    from .ai_loop_engine import (
-        AILoopEngine,
-        MAX_DOCUMENT_CHUNKS,
-        DocumentProcessingError,
-        DocumentProcessingReport,
-        DocumentQAStatus,
-        QueryResult,
+    from .ai_loop_engine import AILoopEngine, DocumentProcessingError
+    from .document_config import MAX_DOCUMENT_BYTES
+    from .web_contract import (
+        APP_TITLE,
+        TEXT_ENCODING_OPTIONS,
+        empty_query_response_dict,
+        env_flag,
+        normalize_text_encoding,
+        query_response_dict,
+        runtime_status_dict,
+        status_with_unexpected_upload_error,
+        upload_status_message,
     )
 except ImportError:
-    from ai_loop_engine import (
-        AILoopEngine,
-        MAX_DOCUMENT_CHUNKS,
-        DocumentProcessingError,
-        DocumentProcessingReport,
-        DocumentQAStatus,
-        QueryResult,
+    from ai_loop_engine import AILoopEngine, DocumentProcessingError
+    from document_config import MAX_DOCUMENT_BYTES
+    from web_contract import (
+        APP_TITLE,
+        TEXT_ENCODING_OPTIONS,
+        empty_query_response_dict,
+        env_flag,
+        normalize_text_encoding,
+        query_response_dict,
+        runtime_status_dict,
+        status_with_unexpected_upload_error,
+        upload_status_message,
     )
-
-
-def env_flag(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 logging.basicConfig(
@@ -46,567 +61,181 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 LOGGER = logging.getLogger(__name__)
-APP_TITLE = "AI Loop Engine"
-TEXT_ENCODING_OPTIONS = {
-    "Auto": "auto",
-    "UTF-8 / Western": "utf-8-or-western",
-    "UTF-8": "utf-8",
-    "Western (Windows-1252)": "cp1252",
-    "Latin-1 (ISO-8859-1)": "latin-1",
-    "Central European (Windows-1250)": "cp1250",
-    "Cyrillic (Windows-1251)": "cp1251",
-    "Turkish (Windows-1254)": "cp1254",
-    "Baltic (Windows-1257)": "cp1257",
-}
-
-# Initialize the AI loop runtime with the built-in document context provider.
-qa_system = AILoopEngine(fast_mode=env_flag("FAST_MODE", False))
+STATIC_DIR = Path(__file__).resolve().parent / "web_static"
+MAX_UPLOAD_FILENAME_LENGTH = 180
+MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+qa_system: Optional[AILoopEngine] = None
 
 
-def format_upload_status(uploaded_name: str, qa_status: DocumentQAStatus) -> str:
-    report = qa_status.processing_report
-    document_name = (
-        report.attempted_document_name
-        if report and report.attempted_document_name
-        else uploaded_name
-    )
-
-    if report and not report.success:
-        active_message = (
-            f"Active document remains `{report.active_document_name}`."
-            if report.active_document_name
-            else "No active document is loaded."
-        )
-        return (
-            f"Document context `{document_name}` failed during `{report.phase}`. "
-            f"{active_message} Error: {report.error_message}"
-        )
-
-    chunk_message = ""
-    if report:
-        chunk_message = f" Chunks: `{report.chunk_count}`"
-        if report.truncated:
-            chunk_message += f" (truncated at `{report.max_chunk_limit}`)."
-        else:
-            chunk_message += "."
-
-    if qa_status.mock_mode:
-        return (
-            f"Document context `{document_name}` processed in mock mode. "
-            f"Profile: `{qa_status.profile_label}`. "
-            f"Active model: `{qa_status.active_model_label}`. "
-            f"{chunk_message} "
-            "Answers will be demonstration responses until a real LLM backend is configured."
-        )
-    return (
-        f"Document context `{document_name}` indexed. "
-        f"Profile: `{qa_status.profile_label}`. "
-        f"Backend: `{qa_status.active_backend}`. "
-        f"Active model: `{qa_status.active_model_label}`. "
-        f"{chunk_message} "
-        "Inference will be validated on the first question."
-    )
+class QueryRequest(BaseModel):
+    message: str
 
 
-def format_runtime_status(qa_status: DocumentQAStatus) -> str:
-    report = qa_status.processing_report
-    runtime_status = {
-        "active_document": qa_status.document_name,
-        "last_attempted_document": (
-            report.attempted_document_name if report else None
-        ),
-        "backend": qa_status.active_backend,
-        "model": qa_status.active_model_label,
-        "profile": qa_status.profile_label,
-        "app_device": qa_status.device,
-        "embeddings_model": qa_status.embeddings_model,
-        "embeddings_device": qa_status.embeddings_device,
-        "ready_for_queries": qa_status.ready_for_queries,
-        "readiness_scope": "retrieval_pipeline",
-        "inference_validated": False,
-        "last_success": report.success if report else None,
-        "phase": report.phase if report else None,
-        "file_extension": report.file_extension if report else None,
-        "chunk_count": report.chunk_count if report else 0,
-        "truncated": report.truncated if report else False,
-        "max_chunk_limit": report.max_chunk_limit if report else None,
-        "text_encoding_mode": report.text_encoding_mode if report else None,
-        "last_error": report.error_message if report else None,
-    }
-    return json.dumps(runtime_status, indent=2)
+def get_engine() -> AILoopEngine:
+    global qa_system
+    if qa_system is None:
+        qa_system = AILoopEngine(fast_mode=env_flag("FAST_MODE", False))
+    return qa_system
 
 
-def status_with_unexpected_upload_error(
-    qa_status: DocumentQAStatus,
-    uploaded_name: str,
-    selected_encoding: str,
-    exc: Exception,
-) -> DocumentQAStatus:
-    previous_report = qa_status.processing_report
-    max_chunk_limit = (
-        previous_report.max_chunk_limit if previous_report else MAX_DOCUMENT_CHUNKS
-    )
-    failure_report = DocumentProcessingReport(
-        attempted_document_name=uploaded_name,
-        active_document_name=qa_status.document_name,
-        success=False,
-        phase="unexpected",
-        file_extension=os.path.splitext(uploaded_name)[1].lower() or None,
-        chunk_count=0,
-        truncated=False,
-        max_chunk_limit=max_chunk_limit,
-        text_encoding_mode=selected_encoding or "auto",
-        backend=qa_status.active_backend,
-        model_label=qa_status.active_model_label,
-        error_message=str(exc),
-    )
-    return replace(qa_status, processing_report=failure_report)
+def safe_upload_name(filename: str | None) -> str:
+    raw_name = filename or ""
+    raw_basename = os.path.basename(raw_name)
+    if any(ord(char) < 32 or ord(char) == 127 for char in raw_basename):
+        raise HTTPException(status_code=400, detail="Invalid upload filename.")
+    name = raw_basename.strip()
+    if raw_name and not name:
+        raise HTTPException(status_code=400, detail="Invalid upload filename.")
+    if name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="Invalid upload filename.")
+    if len(name.encode("utf-8")) > MAX_UPLOAD_FILENAME_LENGTH:
+        raise HTTPException(status_code=400, detail="Invalid upload filename.")
+    return name or "upload"
 
 
-def public_trace_error(
-    query_result: QueryResult,
-    public_loop_report: Optional[dict],
-) -> Optional[str]:
-    redaction = (public_loop_report or {}).get("public_redaction") or {}
-    if redaction.get("applied"):
-        return "terminal_guardrail_decision"
-    return query_result.trace.error_message
+async def write_upload_file(upload: UploadFile, upload_path: Path) -> None:
+    bytes_written = 0
+    with upload_path.open("wb") as output:
+        while chunk := await upload.read(1024 * 1024):
+            bytes_written += len(chunk)
+            if bytes_written > MAX_DOCUMENT_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail="Uploaded document exceeds the 25 MB limit.",
+                )
+            output.write(chunk)
 
 
-def public_loop_report_dict(query_result: QueryResult) -> Optional[dict]:
-    return (
-        query_result.loop_report.to_public_dict()
-        if query_result.loop_report
-        else None
-    )
+def create_app(engine: Optional[AILoopEngine] = None) -> FastAPI:
+    api = FastAPI(title=APP_TITLE)
+    api.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
+    def runtime() -> AILoopEngine:
+        return engine if engine is not None else get_engine()
 
-def format_loop_summary(query_result: Optional[QueryResult]) -> str:
-    if query_result is None:
-        return json.dumps(
-            {
-                "context_provider": None,
-                "document": None,
-                "backend": None,
-                "model": None,
-                "retrieved_chunk_count": 0,
-                "draft_attempt_count": 0,
-                "mechanical_check": None,
-                "verifier": None,
-                "retry_attempted": False,
-                "refused": False,
-                "final_decision": None,
-                "last_error": None,
-            },
-            indent=2,
-        )
+    @api.middleware("http")
+    async def reject_oversized_upload_request(request: Request, call_next):
+        if request.method.upper() == "POST" and request.url.path == "/api/documents":
+            content_length = request.headers.get("content-length")
+            if not content_length:
+                return JSONResponse(
+                    {"detail": "Content-Length is required for document uploads."},
+                    status_code=411,
+                )
+            try:
+                request_bytes = int(content_length)
+            except ValueError:
+                return JSONResponse(
+                    {"detail": "Invalid Content-Length."},
+                    status_code=400,
+                )
+            if request_bytes > MAX_DOCUMENT_BYTES + MAX_MULTIPART_OVERHEAD_BYTES:
+                return JSONResponse(
+                    {"detail": "Uploaded document exceeds the 25 MB limit."},
+                    status_code=413,
+                )
+        return await call_next(request)
 
-    public_loop_report = public_loop_report_dict(query_result)
-    run = (public_loop_report or {}).get("run") or {}
-    steps = run.get("steps") or []
-    trace = query_result.trace
-    mechanical_steps = [
-        step for step in steps if step.get("phase") == "mechanical_check"
-    ]
-    verify_steps = [step for step in steps if step.get("phase") == "verify"]
-    retry_attempted = any(step.get("phase") == "retry" for step in steps)
-    if trace.self_check:
-        retry_attempted = retry_attempted or trace.self_check.retry_attempted
-    final_decision = run.get("final_decision")
+    @api.get("/", include_in_schema=False)
+    def index() -> FileResponse:
+        return FileResponse(STATIC_DIR / "index.html")
 
-    verifier = None
-    if verify_steps:
-        verify_step = verify_steps[-1]
-        verification = verify_step.get("verification") or {}
-        verifier = {
-            "decision": verify_step.get("decision"),
-            "outcome": verification.get("outcome") or verify_step.get("output_summary"),
-            "reasons": verification.get("reasons") or verify_step.get("metadata", {}).get("reasons", []),
+    @api.get("/api/health")
+    def health() -> dict:
+        return {"ok": True, "app": APP_TITLE}
+
+    @api.get("/api/config")
+    def config() -> dict:
+        return {
+            "title": APP_TITLE,
+            "text_encodings": [
+                {"label": label, "value": value}
+                for label, value in TEXT_ENCODING_OPTIONS.items()
+            ],
         }
 
-    summary = {
-        "context_provider": run.get("context_provider"),
-        "document": trace.document_name,
-        "backend": trace.backend,
-        "model": trace.model_label,
-        "retrieved_chunk_count": trace.retrieved_chunk_count,
-        "draft_attempt_count": sum(
-            1 for step in steps if step.get("phase") == "draft"
-        ),
-        "mechanical_check": (
-            mechanical_steps[-1].get("output_summary") if mechanical_steps else None
-        ),
-        "verifier": verifier,
-        "retry_attempted": retry_attempted,
-        "refused": final_decision == "refuse"
-        or any(step.get("phase") == "refuse" for step in steps),
-        "final_decision": final_decision,
-        "last_error": public_trace_error(query_result, public_loop_report),
-    }
-    return json.dumps(summary, indent=2)
+    @api.get("/api/status")
+    def status() -> dict:
+        return runtime_status_dict(runtime().status())
+
+    @api.post("/api/documents")
+    async def upload_document(
+        file: UploadFile = File(...),
+        text_encoding: str = Form("auto"),
+    ) -> JSONResponse:
+        uploaded_name = safe_upload_name(file.filename)
+        selected_encoding = normalize_text_encoding(text_encoding)
+        if selected_encoding is None:
+            raise HTTPException(status_code=400, detail="Unsupported text encoding.")
+
+        with TemporaryDirectory(prefix="ai-loop-upload-") as temp_dir:
+            upload_path = Path(temp_dir) / uploaded_name
+            await write_upload_file(file, upload_path)
+            current_engine = runtime()
+            pre_upload_status = current_engine.status()
+            try:
+                qa_status = current_engine.process_document(
+                    str(upload_path),
+                    text_encoding=selected_encoding,
+                )
+                return JSONResponse(
+                    {
+                        "message": upload_status_message(uploaded_name, qa_status),
+                        "status": runtime_status_dict(qa_status),
+                    }
+                )
+            except DocumentProcessingError as exc:
+                LOGGER.warning("Document processing failed: %s", exc)
+                qa_status = exc.status
+                return JSONResponse(
+                    {
+                        "message": upload_status_message(uploaded_name, qa_status),
+                        "status": runtime_status_dict(qa_status),
+                    },
+                    status_code=400,
+                )
+            except RuntimeError as exc:
+                LOGGER.exception("Unexpected document processing failure: %s", exc)
+                qa_status = status_with_unexpected_upload_error(
+                    pre_upload_status,
+                    uploaded_name,
+                    selected_encoding,
+                    exc,
+                )
+                return JSONResponse(
+                    {
+                        "message": upload_status_message(uploaded_name, qa_status),
+                        "status": runtime_status_dict(qa_status),
+                    },
+                    status_code=500,
+                )
+
+    @api.post("/api/query")
+    def query(request: QueryRequest) -> dict:
+        message = request.message.strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="Message is required.")
+        return query_response_dict(runtime().query_with_trace(message))
+
+    @api.post("/api/chat/clear")
+    def clear_chat() -> dict:
+        current_engine = runtime()
+        current_engine.chat_history.clear()
+        if hasattr(current_engine, "clear_loop_session"):
+            current_engine.clear_loop_session("default")
+        return empty_query_response_dict()
+
+    return api
 
 
-def markdown_cell(value) -> str:
-    text = "" if value is None else str(value)
-    text = " ".join(text.split())
-    if len(text) > 140:
-        text = f"{text[:137]}..."
-    markdown_escapes = {
-        "\\": "\\\\",
-        "`": "\\`",
-        "*": "\\*",
-        "_": "\\_",
-        "{": "\\{",
-        "}": "\\}",
-        "[": "\\[",
-        "]": "\\]",
-        "(": "\\(",
-        ")": "\\)",
-        "#": "\\#",
-        "+": "\\+",
-        "-": "\\-",
-        ".": "\\.",
-        "!": "\\!",
-        "|": "\\|",
-        "<": "&lt;",
-        ">": "&gt;",
-    }
-    escaped = "".join(markdown_escapes.get(char, char) for char in text)
-    return (
-        escaped.replace("\n", " ")
-        or "-"
-    )
-
-
-def markdown_code(value) -> str:
-    text = "" if value is None else str(value)
-    text = " ".join(text.split())
-    if len(text) > 140:
-        text = f"{text[:137]}..."
-    safe_text = (text or "-").replace("`", "'")
-    return f"`{safe_text}`"
-
-
-def loop_phase_label(phase: Optional[str]) -> str:
-    labels = {
-        "input": "Input",
-        "context_select": "Context",
-        "retrieve": "Retrieve",
-        "draft": "Draft",
-        "mechanical_check": "Check",
-        "verify": "Verify",
-        "retry": "Retry",
-        "refuse": "Refuse",
-        "final": "Final",
-        "error": "Error",
-    }
-    return labels.get(
-        str(phase or ""),
-        str(phase or "step").replace("_", " ").title(),
-    )
-
-
-def loop_step_detail(step: dict) -> str:
-    parts = []
-    output_summary = step.get("output_summary")
-    if output_summary:
-        parts.append(output_summary)
-    error_message = step.get("error_message")
-    if error_message and error_message != output_summary:
-        parts.append(f"error: {error_message}")
-
-    metadata = step.get("metadata") or {}
-    reasons = metadata.get("reasons") or []
-    if reasons:
-        parts.append(f"reasons: {', '.join(str(reason) for reason in reasons)}")
-    if metadata.get("retrieved_chunk_count") is not None:
-        parts.append(f"chunks: {metadata.get('retrieved_chunk_count')}")
-    citation_ids = metadata.get("citation_ids") or []
-    if citation_ids:
-        parts.append(f"citations: {', '.join(str(value) for value in citation_ids)}")
-    inline_ids = metadata.get("inline_citation_ids") or []
-    if inline_ids:
-        parts.append(
-            f"inline citations: {', '.join(str(value) for value in inline_ids)}"
-        )
-
-    verification = step.get("verification") or {}
-    if verification.get("outcome"):
-        parts.append(f"verifier: {verification.get('outcome')}")
-    verification_reasons = verification.get("reasons") or []
-    if verification_reasons and not reasons:
-        parts.append(
-            "reasons: "
-            + ", ".join(str(reason) for reason in verification_reasons)
-        )
-
-    retry_count = step.get("retry_count") or 0
-    if retry_count:
-        parts.append(f"retry #{retry_count}")
-
-    return "; ".join(parts) or "-"
-
-
-def format_loop_timeline(query_result: Optional[QueryResult]) -> str:
-    if query_result is None:
-        return "### Loop Timeline\n\nNo loop run yet."
-
-    public_loop_report = public_loop_report_dict(query_result)
-    run = (public_loop_report or {}).get("run") or {}
-    steps = run.get("steps") or []
-    trace = query_result.trace
-
-    lines = [
-        "### Loop Timeline",
-        "",
-        "| # | Phase | Decision | Step | Signals |",
-        "|---:|---|---|---|---|",
-    ]
-
-    if steps:
-        for index, step in enumerate(steps, start=1):
-            step_name = step.get("name") or loop_phase_label(step.get("phase"))
-            lines.append(
-                "| "
-                f"{index} | "
-                f"{markdown_cell(loop_phase_label(step.get('phase')))} | "
-                f"{markdown_cell(step.get('decision'))} | "
-                f"{markdown_cell(step_name)} | "
-                f"{markdown_cell(loop_step_detail(step))} |"
-            )
-    else:
-        fallback_row = 1
-        lines.append(
-            f"| {fallback_row} | Context | continue | "
-            f"{markdown_cell(trace.document_name or 'No active context')} | "
-            f"{markdown_cell(trace.backend)} |"
-        )
-        fallback_row += 1
-        lines.append(
-            f"| {fallback_row} | Retrieve | continue | Prompt evidence | "
-            f"{markdown_cell(f'{trace.retrieved_chunk_count} chunks')} |"
-        )
-        fallback_row += 1
-        if trace.self_check:
-            lines.append(
-                f"| {fallback_row} | Check | "
-                f"{markdown_cell(trace.self_check.outcome)} | Self-check | "
-                f"{markdown_cell(', '.join(trace.self_check.reasons))} |"
-            )
-            fallback_row += 1
-        if trace.error_message:
-            lines.append(
-                f"| {fallback_row} | Error | error | Query error | "
-                f"{markdown_cell(trace.error_message)} |"
-            )
-
-    final_decision = run.get("final_decision")
-    if final_decision:
-        lines.extend(["", f"Final decision: {markdown_code(final_decision)}"])
-
-    error = public_trace_error(query_result, public_loop_report)
-    if error:
-        lines.append(f"Last error: {markdown_code(error)}")
-
-    return "\n".join(lines)
-
-
-def format_answer_trace(query_result: Optional[QueryResult]) -> str:
-    if query_result is None:
-        return json.dumps(
-            {
-                "question": None,
-                "answer": None,
-                "document": None,
-                "backend": None,
-                "model": None,
-                "retrieved_chunk_count": 0,
-                "citations": [],
-                "self_check": None,
-                "loop_report": None,
-                "error": None,
-            },
-            indent=2,
-        )
-
-    trace = query_result.trace
-    self_check = trace.self_check
-    public_loop_report = public_loop_report_dict(query_result)
-    return json.dumps(
-        {
-            "question": trace.question,
-            "answer": query_result.answer,
-            "document": trace.document_name,
-            "backend": trace.backend,
-            "model": trace.model_label,
-            "retrieved_chunk_count": trace.retrieved_chunk_count,
-            "citations": [
-                {
-                    "id": citation.citation_id,
-                    "source": citation.source_name,
-                    "page": citation.page,
-                    "chunk": (
-                        citation.chunk_index + 1
-                        if citation.chunk_index is not None
-                        else None
-                    ),
-                    "excerpt": citation.excerpt,
-                }
-                for citation in trace.citations
-            ],
-            "self_check": (
-                {
-                    "outcome": self_check.outcome,
-                    "reasons": self_check.reasons,
-                    "retry_attempted": self_check.retry_attempted,
-                }
-                if self_check
-                else None
-            ),
-            "loop_report": public_loop_report,
-            "error": public_trace_error(query_result, public_loop_report),
-        },
-        indent=2,
-    )
-
-
-def process_document(file, text_encoding="Auto"):
-    """Process the uploaded document."""
-    if file is None or not getattr(file, "name", None):
-        return "No document uploaded.", format_runtime_status(qa_system.status())
-
-    uploaded_name = os.path.basename(file.name)
-    selected_encoding = TEXT_ENCODING_OPTIONS.get(text_encoding, "auto")
-    pre_upload_status = qa_system.status()
-    try:
-        qa_status = qa_system.process_document(
-            file.name, text_encoding=selected_encoding
-        )
-        return format_upload_status(uploaded_name, qa_status), format_runtime_status(
-            qa_status
-        )
-    except DocumentProcessingError as exc:
-        LOGGER.warning("Document processing failed: %s", exc)
-        qa_status = exc.status
-        return format_upload_status(uploaded_name, qa_status), format_runtime_status(
-            qa_status
-        )
-    except RuntimeError as exc:
-        LOGGER.exception("Unexpected document processing failure: %s", exc)
-        qa_status = status_with_unexpected_upload_error(
-            pre_upload_status, uploaded_name, selected_encoding, exc
-        )
-        return format_upload_status(uploaded_name, qa_status), format_runtime_status(
-            qa_status
-        )
-
-
-def chat(message, history):
-    """Chat function to interact with the current document context loop."""
-    history = history or []
-    if message and message.strip():
-        query_result = qa_system.query_with_trace(message)
-        response = query_result.answer
-        history.append({"role": "user", "content": message})
-        history.append({"role": "assistant", "content": response})
-        return (
-            history,
-            "",
-            format_loop_timeline(query_result),
-            format_loop_summary(query_result),
-            format_answer_trace(query_result),
-        )
-    return (
-        history,
-        "",
-        format_loop_timeline(None),
-        format_loop_summary(None),
-        format_answer_trace(None),
-    )
-
-
-def clear_chat():
-    """Clear the chat history."""
-    qa_system.chat_history.clear()
-    if hasattr(qa_system, "clear_loop_session"):
-        qa_system.clear_loop_session("default")
-    return (
-        [],
-        format_loop_timeline(None),
-        format_loop_summary(None),
-        format_answer_trace(None),
-    )
-
-
-# Create the Gradio interface
-with gr.Blocks() as demo:
-    gr.Markdown(f"# {APP_TITLE}")
-
-    with gr.Row():
-        with gr.Column():
-            file_upload = gr.File(label="Upload Document Context")
-            text_encoding = gr.Dropdown(
-                choices=list(TEXT_ENCODING_OPTIONS),
-                value="Auto",
-                label="Text Encoding",
-            )
-            upload_button = gr.Button("Index Context")
-            upload_status = gr.Textbox(label="Context Status")
-            runtime_status = gr.Textbox(
-                label="Runtime Status",
-                value=format_runtime_status(qa_system.status()),
-                lines=12,
-                interactive=False,
-            )
-
-        with gr.Column():
-            chatbot = gr.Chatbot()
-            msg = gr.Textbox(label="Ask a question")
-            loop_timeline = gr.Markdown(
-                value=format_loop_timeline(None),
-                label="Loop Timeline",
-            )
-            loop_summary = gr.Textbox(
-                label="Loop Summary",
-                value=format_loop_summary(None),
-                lines=12,
-                interactive=False,
-            )
-            answer_trace = gr.Textbox(
-                label="Loop Trace",
-                value=format_answer_trace(None),
-                lines=12,
-                interactive=False,
-            )
-            clear = gr.Button("Clear")
-
-    upload_button.click(
-        process_document,
-        inputs=[file_upload, text_encoding],
-        outputs=[upload_status, runtime_status],
-    )
-    msg.submit(
-        chat,
-        [msg, chatbot],
-        [chatbot, msg, loop_timeline, loop_summary, answer_trace],
-    )
-    clear.click(
-        clear_chat,
-        None,
-        [chatbot, loop_timeline, loop_summary, answer_trace],
-        queue=False,
-    )
+app = create_app()
 
 
 def main() -> None:
-    server_name = os.getenv("GRADIO_SERVER_NAME", "0.0.0.0")
-    server_port = int(os.getenv("PORT", os.getenv("GRADIO_SERVER_PORT", "7860")))
-    demo.launch(
-        debug=env_flag("APP_DEBUG", False),
-        server_name=server_name,
-        server_port=server_port,
-        share=False,
-    )
+    host = os.getenv("WEB_HOST", os.getenv("HOST", "0.0.0.0"))
+    port = int(os.getenv("PORT", os.getenv("WEB_PORT", "7860")))
+    log_level = "debug" if env_flag("APP_DEBUG") else "info"
+    uvicorn.run(app, host=host, port=port, log_level=log_level)
 
 
 if __name__ == "__main__":
