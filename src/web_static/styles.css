@@ -237,6 +237,71 @@ textarea {
   text-transform: uppercase;
 }
 
+.message-thinking {
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 10px;
+}
+
+.message-thinking summary {
+  align-items: center;
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  list-style: none;
+}
+
+.message-thinking summary::-webkit-details-marker {
+  display: none;
+}
+
+.message-thinking summary span {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.message-thinking small {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  padding: 0.3rem 0.5rem;
+}
+
+.message-thinking small[data-state="captured"] {
+  border-color: rgb(99 210 151 / 55%);
+  color: var(--accent);
+}
+
+.message-thinking small[data-state="redacted"] {
+  border-color: rgb(240 189 97 / 55%);
+  color: var(--warn);
+}
+
+.message-thinking-note {
+  color: var(--subtle);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  margin-top: 8px;
+}
+
+.message-thinking pre {
+  background: #0a0c10;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: #d9e5f5;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  margin: 8px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
 .query-form {
   grid-template-columns: minmax(0, 1fr) auto;
   margin-top: 14px;

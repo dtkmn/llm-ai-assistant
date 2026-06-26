@@ -96,9 +96,46 @@ function renderMessages() {
     const content = document.createElement("p");
     content.textContent = message.content;
     bubble.append(role, content);
+    const thinking = renderMessageThinking(message.thinking);
+    if (thinking) {
+      bubble.append(thinking);
+    }
     elements.messages.append(bubble);
   }
   elements.messages.scrollTop = elements.messages.scrollHeight;
+}
+
+function renderMessageThinking(thinking) {
+  const data = thinking || {};
+  const hasThinking = Boolean(data.available && data.content);
+  const isRedacted = Boolean(data.redacted);
+  if (!hasThinking && !isRedacted) {
+    return null;
+  }
+
+  const details = document.createElement("details");
+  details.className = "message-thinking";
+  details.open = true;
+
+  const summary = document.createElement("summary");
+  const label = document.createElement("span");
+  label.textContent = data.label || "Model Thinking (unverified)";
+  const state = document.createElement("small");
+  state.textContent = isRedacted ? "redacted" : "captured";
+  state.dataset.state = isRedacted ? "redacted" : "captured";
+  summary.append(label, state);
+
+  const note = document.createElement("p");
+  note.className = "message-thinking-note";
+  note.textContent =
+    data.note ||
+    "Model-emitted thinking is useful for debugging the loop, but it is not verified evidence.";
+
+  const content = document.createElement("pre");
+  content.textContent = data.content || "[redacted]";
+
+  details.append(summary, note, content);
+  return details;
 }
 
 function renderTimeline(timeline) {
@@ -253,7 +290,11 @@ async function runQuery(event) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ message }),
     });
-    state.messages.push({ role: "assistant", content: result.answer });
+    state.messages.push({
+      role: "assistant",
+      content: result.answer,
+      thinking: result.trace?.model_thinking || null,
+    });
     renderMessages();
     renderLoopPayload(result);
   } catch (error) {

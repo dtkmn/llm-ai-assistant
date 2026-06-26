@@ -15,9 +15,9 @@ loop: making agent behavior visible, testable, and harder to fake.
 - **FastAPI Web App:** Real backend API plus a static browser UI for local loop
   sessions, context indexing, runtime status, a readable loop timeline, compact
   loop summaries, and answer traces
-- **Model Thinking Panel:** Shows Ollama model-emitted thinking when the model
-  supports it, clearly labeled as unverified debugging signal rather than
-  evidence
+- **Model Thinking in Chat:** Shows Ollama model-emitted thinking inline under
+  assistant messages and in the loop detail panel when the model supports it,
+  clearly labeled as unverified debugging signal rather than evidence
 - **External Model Runtime:** Uses Ollama or an OpenAI-compatible gateway for
   generation so Python document indexing stays lightweight and stable
 

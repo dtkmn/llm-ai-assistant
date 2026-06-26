@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -331,8 +332,257 @@ def test_static_frontend_is_served():
     assert script.status_code == 200
     assert "Ask a question, or add context" in script.text
     assert "direct mode" in script.text
+    assert "renderMessageThinking" in script.text
+    assert "result.trace?.model_thinking" in script.text
+    assert "message-thinking" in script.text
     assert "innerHTML" not in script.text
     assert styles.status_code == 200
+    assert ".message-thinking" in styles.text
+
+
+def test_static_frontend_renders_model_thinking_inside_assistant_message():
+    if shutil.which("node") is None:
+        pytest.skip("node is required for static frontend execution test")
+
+    script = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+class ClassList {
+  constructor(element) {
+    this.element = element;
+  }
+
+  toggle(name, force) {
+    const tokens = new Set(this.element.className.split(/\s+/).filter(Boolean));
+    const enabled = force === undefined ? !tokens.has(name) : Boolean(force);
+    if (enabled) {
+      tokens.add(name);
+    } else {
+      tokens.delete(name);
+    }
+    this.element.className = Array.from(tokens).join(" ");
+  }
+}
+
+class Element {
+  constructor(tagName) {
+    this.tagName = tagName.toUpperCase();
+    this.children = [];
+    this.className = "";
+    this.dataset = {};
+    this.disabled = false;
+    this.files = [];
+    this.listeners = {};
+    this.open = false;
+    this.scrollHeight = 0;
+    this.scrollTop = 0;
+    this.textContent = "";
+    this.value = "";
+    this.classList = new ClassList(this);
+  }
+
+  append(...nodes) {
+    for (const node of nodes) {
+      node.parentElement = this;
+      this.children.push(node);
+    }
+    this.scrollHeight = this.children.length;
+  }
+
+  replaceChildren(...nodes) {
+    this.children = [];
+    this.append(...nodes);
+  }
+
+  addEventListener(type, listener) {
+    this.listeners[type] = listener;
+  }
+
+  async dispatch(type) {
+    const listener = this.listeners[type];
+    if (!listener) {
+      return;
+    }
+    await listener({ preventDefault() {} });
+  }
+
+  querySelector(selector) {
+    if (selector === "summary span") {
+      const summary = findNode(this, (node) => node.tagName === "SUMMARY");
+      return summary ? findNode(summary, (node) => node.tagName === "SPAN") : null;
+    }
+    return findNode(this, (node) => matches(node, selector));
+  }
+}
+
+function matches(node, selector) {
+  if (selector.startsWith(".")) {
+    return node.className.split(/\s+/).includes(selector.slice(1));
+  }
+  return node.tagName === selector.toUpperCase();
+}
+
+function findNode(root, predicate) {
+  for (const child of root.children) {
+    if (predicate(child)) {
+      return child;
+    }
+    const nested = findNode(child, predicate);
+    if (nested) {
+      return nested;
+    }
+  }
+  return null;
+}
+
+function createDom() {
+  const ids = [
+    "backend-pill",
+    "model-pill",
+    "ready-pill",
+    "upload-form",
+    "upload-button",
+    "upload-status",
+    "document-file",
+    "text-encoding",
+    "refresh-status",
+    "runtime-grid",
+    "query-form",
+    "query-input",
+    "query-button",
+    "clear-chat",
+    "messages",
+    "timeline",
+    "final-decision",
+    "thinking-panel",
+    "thinking-state",
+    "thinking-note",
+    "thinking-content",
+    "summary-json",
+    "trace-json",
+  ];
+  const byId = Object.fromEntries(ids.map((id) => [id, new Element("div")]));
+  byId["query-input"].value = "";
+  const summary = new Element("summary");
+  summary.append(new Element("span"));
+  byId["thinking-panel"].append(summary);
+  const tabButtons = [new Element("button"), new Element("button")];
+  tabButtons[0].dataset.target = "summary-json";
+  tabButtons[1].dataset.target = "trace-json";
+
+  globalThis.document = {
+    createElement(tagName) {
+      return new Element(tagName);
+    },
+    querySelector(selector) {
+      if (!selector.startsWith("#")) {
+        return null;
+      }
+      return byId[selector.slice(1)] || null;
+    },
+    querySelectorAll(selector) {
+      return selector === ".tab-button" ? tabButtons : [];
+    },
+  };
+  return byId;
+}
+
+function jsonResponse(payload) {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => "application/json" },
+    async json() {
+      return payload;
+    },
+    async text() {
+      return JSON.stringify(payload);
+    },
+  };
+}
+
+async function runCase(modelThinking) {
+  const dom = createDom();
+  globalThis.fetch = async (url) => {
+    if (url === "/api/config") {
+      return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+    }
+    if (url === "/api/status") {
+      return jsonResponse({
+        backend: "ollama",
+        model: "thinking-model",
+        ready_for_queries: false,
+        query_mode: "direct",
+        chunk_count: 0,
+      });
+    }
+    if (url === "/api/query") {
+      return jsonResponse({
+        answer: "Loop answer",
+        timeline: { rows: [], final_decision: "not_verified" },
+        summary: {},
+        trace: { model_thinking: modelThinking },
+      });
+    }
+    if (url === "/api/chat/clear") {
+      return jsonResponse({
+        timeline: { rows: [], final_decision: null },
+        summary: {},
+        trace: {},
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  await import(`${pathToFileURL(process.env.APP_JS_PATH).href}?case=${Math.random()}`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  dom["query-input"].value = "What happened?";
+  await dom["query-form"].dispatch("submit");
+  return dom;
+}
+
+const capturedDom = await runCase({
+  available: true,
+  redacted: false,
+  label: "Model Thinking (unverified)",
+  content: "Captured thinking from model.",
+  note: "Model-emitted thinking is useful for debugging the loop.",
+});
+const capturedThinking = findNode(
+  capturedDom.messages,
+  (node) => node.className === "message-thinking",
+);
+assert.ok(capturedThinking, "assistant message should include thinking details");
+const capturedPre = findNode(capturedThinking, (node) => node.tagName === "PRE");
+assert.equal(capturedPre.textContent, "Captured thinking from model.");
+
+const emptyDom = await runCase({
+  available: false,
+  redacted: false,
+  label: "Model Thinking (unverified)",
+  content: null,
+  note: "Model-emitted thinking is useful for debugging the loop.",
+});
+const emptyThinking = findNode(
+  emptyDom.messages,
+  (node) => node.className === "message-thinking",
+);
+assert.equal(emptyThinking, null);
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "APP_JS_PATH": str(REPO_ROOT / "src" / "web_static" / "app.js"),
+        },
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stderr == ""
 
 
 def test_config_and_status_endpoints_return_runtime_contract():
