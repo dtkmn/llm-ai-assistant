@@ -496,6 +496,7 @@ class Element {
     this.files = [];
     this.listeners = {};
     this.open = false;
+    this.readOnly = false;
     this.scrollHeight = 0;
     this.scrollTop = 0;
     this.textContent = "";
@@ -516,6 +517,16 @@ class Element {
     this.append(...nodes);
   }
 
+  remove() {
+    if (!this.parentElement) {
+      return;
+    }
+    this.parentElement.children = this.parentElement.children.filter(
+      (child) => child !== this,
+    );
+    this.parentElement = null;
+  }
+
   addEventListener(type, listener) {
     this.listeners[type] = listener;
   }
@@ -526,6 +537,19 @@ class Element {
       return;
     }
     await listener({ preventDefault() {} });
+  }
+
+  async click() {
+    if (this.listeners.click) {
+      await this.dispatch("click");
+      return;
+    }
+    if (this.tagName === "A") {
+      globalThis.__downloads.push({
+        href: this.href || "",
+        download: this.download || "",
+      });
+    }
   }
 
   focus() {}
@@ -586,6 +610,26 @@ function createDom() {
     configurable: true,
     value: createMemoryStorage(),
   });
+  Object.defineProperty(globalThis, "__downloads", {
+    configurable: true,
+    value: [],
+  });
+  Object.defineProperty(globalThis, "__objectUrls", {
+    configurable: true,
+    value: [],
+  });
+  Object.defineProperty(globalThis, "__revokedObjectUrls", {
+    configurable: true,
+    value: [],
+  });
+  globalThis.URL.createObjectURL = (blob) => {
+    const url = `blob:test-${globalThis.__objectUrls.length + 1}`;
+    globalThis.__objectUrls.push({ url, blob });
+    return url;
+  };
+  globalThis.URL.revokeObjectURL = (url) => {
+    globalThis.__revokedObjectUrls.push(url);
+  };
   const ids = [
     "backend-pill",
     "model-pill",
@@ -641,6 +685,7 @@ function createDom() {
   tabButtons[1].dataset.target = "trace-json";
 
   globalThis.document = {
+    body: new Element("body"),
     createElement(tagName) {
       return new Element(tagName);
     },
@@ -1039,6 +1084,171 @@ await summaryOnlyDom["recipe-save"].dispatch("click");
 assert.equal(summaryOnlyPatchBodies.length, 0);
 assert.equal(summaryOnlyDom["recipe-save"].disabled, true);
 assert.ok(summaryOnlyDom["recipe-status"].textContent.includes("detail unavailable"));
+
+const recipeFlowDom = createDom();
+globalThis.localStorage.setItem(
+  "ai-loop-engine.active-recipe.v1",
+  "recipe_custom",
+);
+let deleteConfirmed = false;
+globalThis.confirm = (message) => {
+  deleteConfirmed = message.includes("Custom reviewer");
+  return true;
+};
+const recipeFlowRequests = {
+  deleted: [],
+  imported: [],
+  exported: [],
+};
+const recipeFlowRecipes = [
+  {
+    recipe_id: "recipe_general_loop",
+    name: "General assistant loop",
+    goal: "Answer the request clearly.",
+    instructions: "Default instructions.",
+    success_criteria: ["Default passes."],
+    stop_condition: "Stop when done.",
+    is_default: true,
+  },
+  {
+    recipe_id: "recipe_custom",
+    name: "Custom reviewer",
+    goal: "Find weak assumptions.",
+    instructions: "Be sharp.",
+    success_criteria: ["Names risk."],
+    stop_condition: "Stop after verdict.",
+    context_provider: "auto",
+    model_profile: "quality",
+    verifier: "default",
+    metadata: { source: "test" },
+    is_default: false,
+  },
+];
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({
+      backend: "ollama",
+      model: "thinking-model",
+      ready_for_queries: false,
+      query_mode: "direct",
+      chunk_count: 0,
+    });
+  }
+  if (url === "/api/recipes") {
+    if (method === "POST") {
+      const body = JSON.parse(options.body);
+      recipeFlowRequests.imported.push(body);
+      const imported = {
+        ...body,
+        is_default: false,
+        context_provider: body.context_provider || "auto",
+        model_profile: body.model_profile || "quality",
+        verifier: body.verifier || "default",
+        metadata: body.metadata || {},
+      };
+      recipeFlowRecipes.push(imported);
+      return jsonResponse(imported);
+    }
+    return jsonResponse({
+      default_recipe_id: "recipe_general_loop",
+      recipes: recipeFlowRecipes.map((recipe) => ({
+        recipe_id: recipe.recipe_id,
+        name: recipe.name,
+        goal: recipe.goal,
+        context_provider: recipe.context_provider || "auto",
+        model_profile: recipe.model_profile || "quality",
+        verifier: recipe.verifier || "default",
+        is_default: recipe.is_default,
+      })),
+    });
+  }
+  if (url === "/api/recipes/recipe_custom/export" && method === "GET") {
+    recipeFlowRequests.exported.push(url);
+    return jsonResponse({
+      ...recipeFlowRecipes.find((recipe) => recipe.recipe_id === "recipe_custom"),
+      exported_from: "AI Loop Engine",
+    });
+  }
+  if (url === "/api/recipes/recipe_custom" && method === "DELETE") {
+    recipeFlowRequests.deleted.push(url);
+    const index = recipeFlowRecipes.findIndex(
+      (recipe) => recipe.recipe_id === "recipe_custom",
+    );
+    if (index >= 0) {
+      recipeFlowRecipes.splice(index, 1);
+    }
+    return jsonResponse({ deleted: true, recipe_id: "recipe_custom" });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/recipes/".length));
+    const recipe = recipeFlowRecipes.find((item) => item.recipe_id === id);
+    if (recipe) {
+      return jsonResponse(recipe);
+    }
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: [createThreadPayload("thread_recipe_flow")] });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    return jsonResponse(createThreadPayload("thread_recipe_flow"));
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await importFreshApp();
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(recipeFlowDom["recipe-select"].value, "recipe_custom");
+assert.equal(recipeFlowDom["recipe-instructions"].value, "Be sharp.");
+
+await recipeFlowDom["recipe-export"].dispatch("click");
+assert.deepEqual(recipeFlowRequests.exported, ["/api/recipes/recipe_custom/export"]);
+assert.equal(globalThis.__downloads.length, 1);
+assert.equal(globalThis.__downloads[0].download, "recipe_custom.json");
+assert.equal(globalThis.__downloads[0].href, "blob:test-1");
+assert.deepEqual(globalThis.__revokedObjectUrls, ["blob:test-1"]);
+const exportedRecipe = JSON.parse(await globalThis.__objectUrls[0].blob.text());
+assert.equal(exportedRecipe.recipe_id, "recipe_custom");
+assert.equal(exportedRecipe.instructions, "Be sharp.");
+assert.deepEqual(exportedRecipe.success_criteria, ["Names risk."]);
+assert.deepEqual(exportedRecipe.metadata, { source: "test" });
+assert.equal(exportedRecipe.exported_from, "AI Loop Engine");
+assert.ok(recipeFlowDom["recipe-status"].textContent.includes("Exported Custom reviewer"));
+
+await recipeFlowDom["recipe-delete"].dispatch("click");
+assert.equal(deleteConfirmed, true);
+assert.deepEqual(recipeFlowRequests.deleted, ["/api/recipes/recipe_custom"]);
+assert.equal(recipeFlowDom["recipe-select"].value, "recipe_general_loop");
+assert.ok(recipeFlowDom["recipe-status"].textContent.includes("Deleted Custom reviewer"));
+
+recipeFlowDom["recipe-import"].files = [{
+  async text() {
+    return JSON.stringify({
+      recipe_id: "recipe_imported",
+      name: "Imported recipe",
+      goal: "Use imported loop guidance.",
+      instructions: "Preserve imported instructions.",
+      success_criteria: ["Imported criterion."],
+      stop_condition: "Stop after imported answer.",
+      metadata: { imported: true },
+    });
+  },
+}];
+await recipeFlowDom["recipe-import"].dispatch("change");
+assert.equal(recipeFlowRequests.imported.length, 1);
+assert.equal(recipeFlowRequests.imported[0].recipe_id, "recipe_imported");
+assert.deepEqual(recipeFlowRequests.imported[0].success_criteria, [
+  "Imported criterion.",
+]);
+assert.equal(recipeFlowDom["recipe-select"].value, "recipe_imported");
+assert.equal(
+  recipeFlowDom["recipe-instructions"].value,
+  "Preserve imported instructions.",
+);
+assert.ok(recipeFlowDom["recipe-status"].textContent.includes("Imported Imported recipe"));
+assert.equal(recipeFlowDom["recipe-import"].value, "");
 
 const staleDom = createDom();
 const staleQuery = deferred();
