@@ -13,6 +13,7 @@ from src.loop_engine import (
     LoopRun,
     LoopSession,
     LoopStep,
+    PUBLIC_REDACTION_TEXT,
     VerificationOutcome,
     VerificationResult,
 )
@@ -144,6 +145,47 @@ def test_loop_report_rejects_unknown_schema_version():
 
     with pytest.raises(ValueError, match="Unsupported loop report schema"):
         LoopReport.from_dict(report)
+
+
+def test_public_report_redacts_terminal_verification_reasons():
+    secret_reason = "SECRET_VERIFIER_REASON"
+    report = LoopReport(
+        run=LoopRun(
+            run_id="run_terminal_verifier",
+            user_input="Blocked prompt",
+            context_provider="document",
+            backend="mock",
+            model_label="MockLLM (explicit demo)",
+            steps=(
+                LoopStep(
+                    phase=LoopPhase.ERROR,
+                    decision=LoopDecision.BLOCK,
+                    name="Guardrail decision",
+                    output_summary="blocked",
+                    metadata={"guardrail_decision": "block"},
+                    verification=VerificationResult(
+                        outcome=VerificationOutcome.UNSUPPORTED,
+                        reasons=(secret_reason,),
+                        verifier="mock",
+                        raw_response=secret_reason,
+                        metadata={"debug": secret_reason},
+                    ),
+                ),
+            ),
+            final_decision=LoopDecision.BLOCK,
+            final_answer="Blocked.",
+            error_message=secret_reason,
+        )
+    )
+
+    public_payload = report.to_public_dict()
+    public_json = json.dumps(public_payload)
+    verification = public_payload["run"]["steps"][0]["verification"]
+
+    assert secret_reason not in public_json
+    assert verification["reasons"] == [PUBLIC_REDACTION_TEXT]
+    assert verification["raw_response"] is None
+    assert verification["metadata"]["redacted"] is True
 
 
 @pytest.mark.parametrize("field_name", ["allow_tool_calls", "allow_mock_supported"])

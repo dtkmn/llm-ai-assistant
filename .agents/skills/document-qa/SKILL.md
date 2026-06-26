@@ -1,6 +1,6 @@
 ---
 name: loop-engineering
-description: Use when changing loop contracts, document context, retrieval, LLM backend routing, Gradio upload/query behavior, evals, or CI release policy for AI Loop Engine.
+description: Use when changing loop contracts, document context, retrieval, LLM backend routing, FastAPI/web upload/query behavior, evals, or CI release policy for AI Loop Engine.
 ---
 
 # Loop Engineering
@@ -44,9 +44,14 @@ first context provider, not the product boundary.
   embedding backend variable. Configure the chat model with `LLM_MODEL` and the
   retrieval model with `EMBEDDINGS_MODEL`; provider-specific model env vars are
   compatibility aliases only.
-- Native runtime defaults must be installed before Gradio, NumPy, FAISS,
+- Native runtime defaults must be installed before FastAPI, NumPy, FAISS,
   or other native-heavy imports in app entrypoints. Use `src.native_runtime`
   instead of duplicating env setup in modules that may be imported too late.
+- Local `.env` and `.env.local` files are loaded before native defaults in the
+  app entrypoint. They must not override shell environment variables and must
+  stay disabled under tests.
+- Runtime imports must not eagerly load FAISS or `src.retrieval`; keep retrieval
+  lazy to indexing/search paths or explicit compatibility imports.
 - Embedding runtime follows the selected provider. Ollama uses `/api/embed`;
   OpenAI-compatible gateways use `/embeddings`; mock mode uses built-in local
   hashing for deterministic demos/tests.
@@ -56,6 +61,10 @@ first context provider, not the product boundary.
   the first context provider capability, not the repo's strategic identity.
 - Document context is the first `ContextProvider`; keep provider identity in
   loop reports instead of hardcoding document-specific assumptions in UI code.
+- Document context is optional at query time. No-context answers may draft with
+  the selected LLM backend, but they must report `context_provider="none"`,
+  zero citations, and `not_verified`; do not run document verifier support
+  claims without prompt evidence.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopPolicy`,
   `LoopSession`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and
@@ -78,10 +87,18 @@ first context provider, not the product boundary.
 - Answer traces and citations must come from the same retrieved chunks used in
   the prompt. Keep `query()` string-compatible and expose richer evidence
   through structured APIs such as `query_with_trace()`.
+- Answer-loop policy belongs in `src.answer_loop`; runtime should orchestrate
+  loop state and middleware, not re-own mechanical citation validation,
+  verifier parsing, retry instructions, or fail-closed self-check decisions.
 - Answer self-checking should inspect the generated answer and trace. Cheap
   mechanical checks and deterministic refutation prefilters may reject bad
   answers, but only a real backend verifier may label an answer `supported`.
   Mock/demo mode must report mechanically valid answers as `not_verified`.
+- Ollama model thinking is model-emitted debug signal. Show it only when the
+  provider exposes it, label it as unverified, keep it out of final answer text,
+  and drop/redact it for refused, blocked, or terminal-guardrail-redacted
+  results. GPT-OSS thinking must use `OLLAMA_THINK_LEVEL` with `low`, `medium`,
+  or `high`; boolean `think` values are ignored by that model family.
 - Golden document evals must exercise the full provider-free QA loop: upload,
   retrieval, cited answer, self-check, retry, and fail-closed refusal. Do not
   require a live Ollama backend for these CI checks.
@@ -117,16 +134,21 @@ first context provider, not the product boundary.
 ## Files To Inspect First
 
 - `src/ai_loop_engine.py`
+- `src/app.py`
+- `src/web_contract.py`
 - `src/ai_loop_runtime.py`
 - `src/context_providers.py`
+- `src/retrieval.py`
+- `src/retrieval_types.py`
 - `src/document_config.py`
 - `src/document_text.py`
 - `src/document_ingestion.py`
+- `src/env_file.py`
 - `src/runtime_config.py`
 - `src/model_adapters.py`
+- `src/answer_loop.py`
 - `src/DocumentQA.py`
 - `src/loop_engine.py`
-- `src/app.py`
 - `src/golden_eval.py`
 - `src/loop_eval.py`
 - `src/ollama_model_eval.py`

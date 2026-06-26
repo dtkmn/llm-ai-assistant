@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Optional, Protocol, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .ai_loop_runtime import FaissVectorStore
+    from .retrieval import FaissVectorStore
 
 
 class ContextProvider(Protocol):

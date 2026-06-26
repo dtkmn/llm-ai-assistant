@@ -53,9 +53,28 @@ def test_console_scripts_are_declared():
     assert scripts["ai-loop-ollama-eval"] == "src.ollama_model_eval:main"
 
 
+def test_static_frontend_assets_are_packaged():
+    package_data = pyproject()["tool"]["setuptools"]["package-data"]
+
+    assert "web_static/*" in package_data["src"]
+    assert (PROJECT_ROOT / "src" / "web_static" / "index.html").exists()
+    assert (PROJECT_ROOT / "src" / "web_static" / "app.js").exists()
+    assert (PROJECT_ROOT / "src" / "web_static" / "styles.css").exists()
+
+
+def test_docker_build_context_excludes_local_env_files():
+    dockerignore = (PROJECT_ROOT / ".dockerignore").read_text().splitlines()
+
+    assert ".env" in dockerignore
+    assert ".env.*" in dockerignore
+    assert "!.env.example" in dockerignore
+    assert (PROJECT_ROOT / ".env.example").exists()
+
+
 def test_removed_model_stack_is_not_direct_dependency():
     removed_direct_dependencies = {
         "accelerate",
+        "gradio",
         "huggingface-hub",
         "langchain-huggingface",
         "sentence-transformers",
@@ -68,6 +87,7 @@ def test_removed_model_stack_is_not_direct_dependency():
     }
 
     assert direct_dependency_names.isdisjoint(removed_direct_dependencies)
+    assert {"fastapi", "uvicorn"}.issubset(direct_dependency_names)
 
 
 def test_uv_lock_matches_project_metadata():

@@ -1,6 +1,6 @@
 """Native runtime bootstrap helpers.
 
-Keep this module free of NumPy, FAISS, Gradio, or other native imports. It
+Keep this module free of NumPy, FAISS, web frameworks, or other native imports. It
 exists so entrypoints can set conservative process defaults before native
 libraries initialize their thread pools.
 """

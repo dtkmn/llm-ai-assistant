@@ -17,10 +17,12 @@ LOGGER = logging.getLogger(__name__)
 FAST_MODE_ENV_VAR = "FAST_MODE"
 LLM_BACKEND_ENV_VAR = "LLM_BACKEND"
 LLM_MODEL_ENV_VAR = "LLM_MODEL"
+MODEL_THINKING_ENV_VAR = "MODEL_THINKING"
 EMBEDDINGS_MODEL_ENV_VAR = "EMBEDDINGS_MODEL"
 OLLAMA_BASE_URL_ENV_VAR = "OLLAMA_BASE_URL"
 OLLAMA_MODEL_ENV_VAR = "OLLAMA_MODEL"
 OLLAMA_EMBEDDINGS_MODEL_ENV_VAR = "OLLAMA_EMBED_MODEL"
+OLLAMA_THINK_LEVEL_ENV_VAR = "OLLAMA_THINK_LEVEL"
 OLLAMA_TIMEOUT_ENV_VAR = "OLLAMA_TIMEOUT"
 OPENAI_COMPAT_BASE_URL_ENV_VAR = "OPENAI_COMPAT_BASE_URL"
 OPENAI_COMPAT_API_KEY_ENV_VAR = "OPENAI_COMPAT_API_KEY"
@@ -41,6 +43,9 @@ SUPPORTED_LLM_BACKENDS = {
     "openai-compatible",
 }
 SUPPORTED_EMBEDDINGS_MODELS = {DEFAULT_EMBEDDINGS_MODEL}
+SUPPORTED_OLLAMA_THINK_LEVELS = {"low", "medium", "high", "max"}
+GPT_OSS_OLLAMA_THINK_LEVELS = {"low", "medium", "high"}
+DEFAULT_GPT_OSS_OLLAMA_THINK_LEVEL = "medium"
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -67,6 +72,32 @@ def first_env_value(*names: str) -> Optional[str]:
         if value:
             return value
     return None
+
+
+def is_gpt_oss_model(model: str) -> bool:
+    model_name = model.strip().lower().split("/")[-1]
+    return model_name.startswith("gpt-oss")
+
+
+def normalize_ollama_think_level(
+    value: Optional[str],
+    *,
+    model: str,
+) -> Optional[str]:
+    level = (value or "").strip().lower()
+    if level in {"", "auto"}:
+        return DEFAULT_GPT_OSS_OLLAMA_THINK_LEVEL if is_gpt_oss_model(model) else None
+    if level not in SUPPORTED_OLLAMA_THINK_LEVELS:
+        raise RuntimeError(
+            f"{OLLAMA_THINK_LEVEL_ENV_VAR} must be one of auto, low, medium, "
+            "high, or max."
+        )
+    if is_gpt_oss_model(model) and level not in GPT_OSS_OLLAMA_THINK_LEVELS:
+        raise RuntimeError(
+            f"{OLLAMA_THINK_LEVEL_ENV_VAR}=max is not supported for GPT-OSS "
+            "models. Use low, medium, or high."
+        )
+    return level
 
 
 def is_loopback_host(hostname: str) -> bool:

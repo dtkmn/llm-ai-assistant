@@ -40,7 +40,7 @@ def test_native_runtime_defaults_respect_existing_overrides(monkeypatch):
     assert os.environ["TOKENIZERS_PARALLELISM"] == "false"
 
 
-def test_document_qa_bootstraps_native_defaults_before_native_imports():
+def test_retrieval_bootstraps_native_defaults_before_native_imports():
     env = os.environ.copy()
     for name in NATIVE_THREAD_ENV_VARS:
         env.pop(name, None)
@@ -68,8 +68,8 @@ def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):
     return real_import(name, globals, locals, fromlist, level)
 
 builtins.__import__ = tracking_import
-import src.DocumentQA
-raise SystemExit("src.DocumentQA did not import a tracked native module")
+import src.retrieval
+raise SystemExit("src.retrieval did not import a tracked native module")
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -189,25 +189,20 @@ print(json.dumps({
     assert observed == EXPECTED_NATIVE_DEFAULTS
 
 
-def test_ai_loop_runtime_does_not_eagerly_import_document_ingestion_stack():
+def test_answer_loop_import_is_native_light():
     code = """
 import json
 import sys
 
-import src.ai_loop_runtime
-
-qa = src.ai_loop_runtime.AILoopEngine(fast_mode=True, llm_backend="mock")
-try:
-    qa._validate_document("/definitely/missing.txt")
-except ValueError:
-    pass
+import src.answer_loop
 
 watched_modules = [
+    "faiss",
+    "numpy",
+    "src.retrieval",
     "docx2txt",
     "langchain_text_splitters",
     "pypdf",
-    "src.document_ingestion",
-    "src.document_text",
 ]
 print(json.dumps({
     name: name in sys.modules
@@ -224,9 +219,67 @@ print(json.dumps({
     observed = json.loads(result.stdout)
 
     assert observed == {
+        "faiss": False,
+        "numpy": False,
+        "src.retrieval": False,
+        "docx2txt": False,
+        "langchain_text_splitters": False,
+        "pypdf": False,
+    }
+
+
+def test_ai_loop_runtime_does_not_eagerly_import_document_ingestion_stack():
+    env = os.environ.copy()
+    for name in (
+        "EMBEDDINGS_MODEL",
+        "LLM_BACKEND",
+        "LLM_MODEL",
+        "OLLAMA_EMBED_MODEL",
+        "OLLAMA_MODEL",
+    ):
+        env.pop(name, None)
+    code = """
+import json
+import sys
+
+import src.ai_loop_runtime
+
+qa = src.ai_loop_runtime.AILoopEngine(fast_mode=True, llm_backend="mock")
+try:
+    qa._validate_document("/definitely/missing.txt")
+except ValueError:
+    pass
+
+watched_modules = [
+    "faiss",
+    "docx2txt",
+    "langchain_text_splitters",
+    "pypdf",
+    "src.document_ingestion",
+    "src.document_text",
+    "src.retrieval",
+]
+print(json.dumps({
+    name: name in sys.modules
+    for name in watched_modules
+}, sort_keys=True))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    observed = json.loads(result.stdout)
+
+    assert observed == {
+        "faiss": False,
         "docx2txt": False,
         "langchain_text_splitters": False,
         "pypdf": False,
         "src.document_ingestion": False,
         "src.document_text": False,
+        "src.retrieval": False,
     }

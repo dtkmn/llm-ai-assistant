@@ -118,6 +118,6 @@
 
   <rect class="box" x="54" y="520" rx="14" ry="14" width="294" height="82"/>
   <text class="label" x="80" y="553">User Surface</text>
-  <text class="small" x="80" y="580">Gradio chat, loop summary, trace</text>
+  <text class="small" x="80" y="580">FastAPI web app, timeline, trace</text>
   <text class="tiny" x="80" y="596">Upload means indexed</text>
 </svg>

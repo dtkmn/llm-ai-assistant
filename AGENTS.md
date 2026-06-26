@@ -14,10 +14,17 @@ Primary runtime files:
 - `src/ai_loop_engine.py`: canonical public runtime API. New code should import
   `AILoopEngine` from this module.
 - `src/ai_loop_runtime.py`: current runtime implementation module during the
-  refactor. It owns loop orchestration, embeddings, vector search, LLM backend
-  selection, retrieval chain construction, and query handling.
+  refactor. It owns loop orchestration, embeddings, LLM backend selection,
+  document upload transactionality, and query handling.
 - `src/context_providers.py`: provider protocol, current document context
   provider, and active context state records.
+- `src/retrieval.py`: FAISS vector store, retriever, document retrieval chain,
+  prompt evidence formatting, and citation assembly. It is lazy-loaded by the
+  runtime indexing/query path and must keep native bootstrap before FAISS/NumPy
+  imports.
+- `src/retrieval_types.py`: lightweight citation and retrieval result records
+  shared by the runtime and retrieval stack. Keep it free of native-heavy
+  imports.
 - `src/document_config.py`: document validation, limits, supported extensions,
   encoding constants, and pure text heuristics. Keep it free of native-heavy
   imports.
@@ -29,9 +36,14 @@ Primary runtime files:
 - `src/runtime_config.py`: provider/runtime environment names, defaults, safe
   URL display helpers, URL normalization, and lightweight env parsing. Keep it
   free of native-heavy imports.
+- `src/env_file.py`: dependency-free `.env` / `.env.local` loader for local
+  development startup. Shell environment values must remain authoritative.
 - `src/model_adapters.py`: Ollama and OpenAI-compatible LLM/embedding adapters,
   provider request helpers, and provider embedding response validation.
   `src/ai_loop_runtime.py` re-exports these names for compatibility.
+- `src/answer_loop.py`: answer self-check policy, citation mechanics, deterministic
+  refutation prefilters, verifier prompt parsing, retry/refusal helpers, and
+  verification result mapping. Keep it free of native-heavy imports.
 - `src/DocumentQA.py`: legacy compatibility module for old imports and
   monkeypatch targets. Do not add new implementation code here.
 - `src/loop_engine.py`: provider-neutral loop primitives for typed run, step,
@@ -44,7 +56,11 @@ Primary runtime files:
   data over the network.
 - `src/loop_export.py`: local JSONL-to-adapter export CLI for OpenAI trace and
   LangGraph manifest artifacts.
-- `src/app.py`: Gradio UI wiring and user-facing status messages.
+- `src/app.py`: FastAPI backend, static frontend serving, upload/query routes,
+  and user-facing status messages.
+- `src/web_contract.py`: shared API/frontend response shaping for runtime
+  status, upload messages, loop timeline, loop summary, and redacted trace
+  payloads.
 - `docs/framework-adapter-strategy.md`: dependency-free adapter strategy for
   OpenAI trace-shaped export, LangGraph manifest export, and Microsoft workflow
   event export.
@@ -57,7 +73,7 @@ Primary runtime files:
 - Pip fallback: `python -m pip install -r requirements-dev.txt`
 - Run the app locally: `uv run ai-loop-engine` or `python -m src.app`
 - Run tests: `uv run pytest` or `python -m pytest`
-- Compile check: `python -m py_compile src/__init__.py src/app.py src/ai_loop_engine.py src/ai_loop_runtime.py src/context_providers.py src/document_config.py src/document_text.py src/document_ingestion.py src/runtime_config.py src/model_adapters.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
+- Compile check: `python -m py_compile src/__init__.py src/app.py src/web_contract.py src/env_file.py src/ai_loop_engine.py src/ai_loop_runtime.py src/context_providers.py src/retrieval.py src/retrieval_types.py src/answer_loop.py src/document_config.py src/document_text.py src/document_ingestion.py src/runtime_config.py src/model_adapters.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/ollama_model_eval.py tests/conftest.py tests/test_app.py tests/test_env_file.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_ollama_model_eval.py tests/test_packaging_metadata.py`
 - Dependency checks: `python -m pip check` and `python -m pip_audit -r requirements.txt --strict`
 
 ## Non-Negotiable Contracts
@@ -77,10 +93,23 @@ Primary runtime files:
   UI status. UI code and tests should not inspect random internal attributes.
 - Answer traces and citations must come from the retrieved chunks used to build
   the LLM prompt. Do not bolt on citations from a separate post-answer lookup.
+- Answer-loop policy belongs in `src.answer_loop`; `src.ai_loop_runtime` should
+  orchestrate middleware and loop report state, not re-own citation validation,
+  verifier parsing, retry instructions, or fail-closed self-check decisions.
 - Answer self-checking must remain document-only. Cheap mechanical checks and
   deterministic refutation prefilters may reject bad answers, but only a real
   backend verifier may label an answer `supported`. Mock/demo mode must report
   mechanically valid answers as `not_verified`, not `supported`.
+- Document context is optional at query time. A no-context answer may run through
+  the selected LLM backend, but it must be reported as `not_verified`, have zero
+  citations, skip document verifier support claims, and show
+  `context_provider="none"` in the loop report.
+- Ollama model-emitted thinking is a UI/debugging signal, not evidence. Keep it
+  separate from the final answer, label it as unverified, never synthesize it in
+  mock mode, and redact/drop it whenever the final answer is refused, blocked,
+  or hidden by terminal guardrail redaction. GPT-OSS thinking must use a
+  validated `OLLAMA_THINK_LEVEL` of `low`, `medium`, or `high`; do not send
+  boolean `think` values to GPT-OSS models.
 - Golden document evals must remain provider-free and deterministic. They should
   exercise upload, retrieval, citation trace, self-check, retry, and fail-closed
   behavior without requiring a live Ollama backend in CI. The
@@ -112,12 +141,18 @@ Primary runtime files:
   embedding backend variable. Configure the chat model with `LLM_MODEL` and the
   retrieval model with `EMBEDDINGS_MODEL`; provider-specific model env vars are
   compatibility aliases only.
-- Native runtime defaults must be installed before Gradio, NumPy, FAISS,
+- Native runtime defaults must be installed before FastAPI, NumPy, FAISS,
   or other native-heavy imports in app entrypoints. Use `src.native_runtime`
   instead of duplicating env setup in modules that may be imported too late.
+- Local `.env` and `.env.local` files are developer conveniences loaded before
+  native defaults in the app entrypoint. They must not override shell
+  environment variables and must stay disabled under tests.
 - Runtime imports must not eagerly load the document parser stack. Keep
   `docx2txt`, `pypdf`, `langchain_text_splitters`, and `document_ingestion`
   lazy to upload/indexing paths.
+- Runtime imports must not eagerly load the retrieval stack. Keep FAISS and
+  `src.retrieval` lazy to indexing/search paths or explicit compatibility
+  imports.
 - Embedding runtime follows the selected provider. Ollama uses `/api/embed`;
   OpenAI-compatible gateways use `/embeddings`; mock mode uses built-in local
   hashing for deterministic demos/tests.
@@ -213,7 +248,7 @@ For Python behavior changes:
 - `uv run pytest tests/test_langgraph_manifest_adapter.py -q`
 - `uv run pytest tests/test_loop_export.py -q`
 - `uv lock --check`
-- `python -m py_compile src/__init__.py src/app.py src/ai_loop_engine.py src/ai_loop_runtime.py src/context_providers.py src/document_config.py src/document_text.py src/document_ingestion.py src/runtime_config.py src/model_adapters.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/test_app.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
+- `python -m py_compile src/__init__.py src/app.py src/web_contract.py src/env_file.py src/ai_loop_engine.py src/ai_loop_runtime.py src/context_providers.py src/retrieval.py src/retrieval_types.py src/answer_loop.py src/document_config.py src/document_text.py src/document_ingestion.py src/runtime_config.py src/model_adapters.py src/DocumentQA.py src/native_runtime.py src/golden_eval.py src/loop_engine.py src/loop_eval.py src/loop_export.py src/ollama_model_eval.py src/adapters/__init__.py src/adapters/base.py src/adapters/redaction.py src/adapters/openai_trace.py src/adapters/langgraph_manifest.py tests/conftest.py tests/test_app.py tests/test_env_file.py tests/test_document_qa.py tests/test_native_runtime.py tests/test_golden_document_eval.py tests/test_loop_engine.py tests/test_loop_eval.py tests/test_loop_export.py tests/test_ollama_model_eval.py tests/test_openai_trace_adapter.py tests/test_langgraph_manifest_adapter.py tests/test_packaging_metadata.py`
 - `python -m pip check`
 
 For dependency or security-sensitive changes:

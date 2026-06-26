@@ -1,15 +1,20 @@
+import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
-from src import app
+from fastapi.testclient import TestClient
+import pytest
+
+from src import app as web_app
 from src.DocumentQA import (
     AnswerCitation,
     AnswerSelfCheck,
     AnswerTrace,
+    DocumentQA,
     DocumentProcessingError,
     DocumentProcessingReport,
     DocumentQAStatus,
@@ -23,6 +28,13 @@ from src.loop_engine import (
     LoopStep,
     VerificationOutcome,
     VerificationResult,
+)
+from src.web_contract import (
+    answer_trace_dict,
+    loop_summary_dict,
+    loop_timeline_dict,
+    query_response_dict,
+    runtime_status_dict,
 )
 
 
@@ -48,7 +60,8 @@ class FakeQA:
     def process_document(self, document_path, text_encoding=None):
         self.document_path = document_path
         self.text_encoding = text_encoding
-        self.current_document_name = document_path.split("/")[-1]
+        self.uploaded_text = Path(document_path).read_text(encoding="utf-8")
+        self.current_document_name = Path(document_path).name
         active_backend = self.active_llm_backend or self.llm_backend
         active_model_label = (
             self.loaded_model_label
@@ -72,6 +85,7 @@ class FakeQA:
         return self.status()
 
     def status(self):
+        self.status_calls = getattr(self, "status_calls", 0) + 1
         active_backend = self.active_llm_backend or self.llm_backend
         active_model_label = (
             self.loaded_model_label
@@ -89,7 +103,7 @@ class FakeQA:
             embeddings_device="cpu",
             device="cpu",
             document_name=self.current_document_name,
-            ready_for_queries=True,
+            ready_for_queries=bool(self.current_document_name),
             processing_report=self.latest_processing_report,
         )
 
@@ -101,6 +115,32 @@ class FakeQA:
             or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
         answer = "Project Phoenix is described in the uploaded document."
+        loop_report = LoopReport(
+            run=LoopRun(
+                run_id="run_fake",
+                user_input=message,
+                context_provider="document",
+                backend=active_backend,
+                model_label=active_model_label,
+                steps=(
+                    LoopStep(
+                        phase=LoopPhase.RETRIEVE,
+                        decision=LoopDecision.CONTINUE,
+                        name="Retrieve prompt evidence",
+                        output_summary="1 prompt chunks",
+                        metadata={"retrieved_chunk_count": 1, "citation_ids": [1]},
+                    ),
+                    LoopStep(
+                        phase=LoopPhase.MECHANICAL_CHECK,
+                        decision=LoopDecision.NOT_VERIFIED,
+                        name="Mechanical checks",
+                        output_summary="mechanical_checks_passed",
+                    ),
+                ),
+                final_decision=LoopDecision.NOT_VERIFIED,
+                final_answer=answer,
+            )
+        )
         return QueryResult(
             answer=answer,
             trace=AnswerTrace(
@@ -126,25 +166,13 @@ class FakeQA:
                     ],
                     retry_attempted=False,
                 ),
+                model_thinking="I matched Project Phoenix against citation [1].",
             ),
+            loop_report=loop_report,
         )
 
     def clear_loop_session(self, session_id="default"):
         self.cleared_loop_session_id = session_id
-
-
-class FakeOllamaQA(FakeQA):
-    loaded_model_id = "nemotron-3-nano:4b"
-    loaded_model_label = "Ollama (nemotron-3-nano:4b)"
-    active_llm_backend = "ollama"
-    llm_backend = "ollama"
-
-
-class FakeOpenAICompatibleQA(FakeQA):
-    loaded_model_id = "gpt-oss:20b"
-    loaded_model_label = "OpenAI-compatible (gpt-oss:20b)"
-    active_llm_backend = "openai-compatible"
-    llm_backend = "openai-compatible"
 
 
 def processed_report(
@@ -170,37 +198,7 @@ def processed_report(
     )
 
 
-def test_process_document_reports_mock_mode_without_success_claim(monkeypatch, tmp_path):
-    document = tmp_path / "demo.txt"
-    document.write_text("demo", encoding="utf-8")
-    fake_qa = FakeQA()
-    monkeypatch.setattr(app, "qa_system", fake_qa)
-
-    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
-
-    assert "processed in mock mode" in status
-    assert "processed successfully" not in status
-    assert "demonstration responses" in status
-    assert "Chunks: `1`" in status
-    runtime = json.loads(runtime_status)
-    assert runtime["active_document"] == "demo.txt"
-    assert runtime["last_attempted_document"] == "demo.txt"
-    assert runtime["app_device"] == "cpu"
-    assert "model_device" not in runtime
-    assert runtime["embeddings_model"] == "fake-embeddings"
-    assert runtime["embeddings_device"] == "cpu"
-    assert runtime["ready_for_queries"] is True
-    assert runtime["readiness_scope"] == "retrieval_pipeline"
-    assert runtime["inference_validated"] is False
-    assert runtime["last_success"] is True
-    assert runtime["file_extension"] == ".txt"
-    assert runtime["chunk_count"] == 1
-    assert runtime["max_chunk_limit"] == 2000
-    assert runtime["last_error"] is None
-    assert fake_qa.text_encoding == "auto"
-
-
-def test_app_bootstraps_native_defaults_before_gradio_import():
+def test_app_bootstraps_native_defaults_before_fastapi_import():
     env = os.environ.copy()
     for name in NATIVE_THREAD_ENV_VARS:
         env.pop(name, None)
@@ -213,7 +211,7 @@ import os
 real_import = builtins.__import__
 
 def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):
-    if name == "gradio" or name.startswith("gradio."):
+    if name == "fastapi" or name.startswith("fastapi."):
         print(json.dumps({
             "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
             "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
@@ -226,7 +224,7 @@ def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 builtins.__import__ = tracking_import
 import src.app
-raise SystemExit("src.app did not import gradio")
+raise SystemExit("src.app did not import fastapi")
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -246,106 +244,546 @@ raise SystemExit("src.app did not import gradio")
     }
 
 
-def test_text_encoding_dropdown_defaults_to_auto():
-    assert app.text_encoding.value == "Auto"
-
-
-def test_app_copy_frames_document_as_context():
-    assert app.APP_TITLE == "AI Loop Engine"
-    assert app.file_upload.label == "Upload Document Context"
-    assert app.upload_button.value == "Index Context"
-    assert app.upload_status.label == "Context Status"
-    assert app.loop_summary.label == "Loop Summary"
-    assert app.answer_trace.label == "Loop Trace"
-
-
-def test_process_document_passes_selected_text_encoding(monkeypatch, tmp_path):
-    document = tmp_path / "demo.txt"
-    document.write_text("demo", encoding="utf-8")
-    fake_qa = FakeQA()
-    monkeypatch.setattr(app, "qa_system", fake_qa)
-
-    status, _runtime_status = app.process_document(
-        SimpleNamespace(name=str(document)), "Cyrillic (Windows-1251)"
+def test_app_loads_env_file_before_native_defaults_and_fastapi_import(tmp_path):
+    env = os.environ.copy()
+    env.pop("AI_LOOP_DISABLE_ENV_FILE", None)
+    env.pop("FAST_MODE", None)
+    env.pop("LLM_BACKEND", None)
+    for name in NATIVE_THREAD_ENV_VARS:
+        env.pop(name, None)
+    env["PYTHONPATH"] = (
+        f"{REPO_ROOT}{os.pathsep}{env['PYTHONPATH']}"
+        if env.get("PYTHONPATH")
+        else str(REPO_ROOT)
+    )
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "OMP_NUM_THREADS=7",
+                "LLM_BACKEND=mock",
+                "FAST_MODE=true",
+            ]
+        ),
+        encoding="utf-8",
     )
 
-    assert "processed in mock mode" in status
+    code = """
+import builtins
+import json
+import os
+
+real_import = builtins.__import__
+
+def tracking_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "fastapi" or name.startswith("fastapi."):
+        print(json.dumps({
+            "FAST_MODE": os.environ.get("FAST_MODE"),
+            "LLM_BACKEND": os.environ.get("LLM_BACKEND"),
+            "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+            "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
+            "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS"),
+            "VECLIB_MAXIMUM_THREADS": os.environ.get("VECLIB_MAXIMUM_THREADS"),
+            "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM"),
+        }, sort_keys=True))
+        raise SystemExit(0)
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = tracking_import
+import src.app
+raise SystemExit("src.app did not import fastapi")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert json.loads(result.stdout) == {
+        "FAST_MODE": "true",
+        "LLM_BACKEND": "mock",
+        "OMP_NUM_THREADS": "7",
+        "MKL_NUM_THREADS": "1",
+        "OPENBLAS_NUM_THREADS": "1",
+        "VECLIB_MAXIMUM_THREADS": "1",
+        "TOKENIZERS_PARALLELISM": "false",
+    }
+
+
+def test_app_import_keeps_engine_lazy():
+    assert web_app.qa_system is None
+
+
+def test_static_frontend_is_served():
+    client = TestClient(web_app.create_app(FakeQA()))
+
+    response = client.get("/")
+    script = client.get("/assets/app.js")
+    styles = client.get("/assets/styles.css")
+
+    assert response.status_code == 200
+    assert "AI Loop Engine" in response.text
+    assert "Optional Context" in response.text
+    assert "You can still run the loop without documents" in response.text
+    assert "Model Thinking" in response.text
+    assert "/assets/app.js" in response.text
+    assert script.status_code == 200
+    assert "Ask a question, or add context" in script.text
+    assert "direct mode" in script.text
+    assert "renderMessageThinking" in script.text
+    assert "result.trace?.model_thinking" in script.text
+    assert "message-thinking" in script.text
+    assert "innerHTML" not in script.text
+    assert styles.status_code == 200
+    assert ".message-thinking" in styles.text
+
+
+def test_static_frontend_renders_model_thinking_inside_assistant_message():
+    if shutil.which("node") is None:
+        pytest.skip("node is required for static frontend execution test")
+
+    script = r"""
+import assert from "node:assert/strict";
+import { pathToFileURL } from "node:url";
+
+class ClassList {
+  constructor(element) {
+    this.element = element;
+  }
+
+  toggle(name, force) {
+    const tokens = new Set(this.element.className.split(/\s+/).filter(Boolean));
+    const enabled = force === undefined ? !tokens.has(name) : Boolean(force);
+    if (enabled) {
+      tokens.add(name);
+    } else {
+      tokens.delete(name);
+    }
+    this.element.className = Array.from(tokens).join(" ");
+  }
+}
+
+class Element {
+  constructor(tagName) {
+    this.tagName = tagName.toUpperCase();
+    this.children = [];
+    this.className = "";
+    this.dataset = {};
+    this.disabled = false;
+    this.files = [];
+    this.listeners = {};
+    this.open = false;
+    this.scrollHeight = 0;
+    this.scrollTop = 0;
+    this.textContent = "";
+    this.value = "";
+    this.classList = new ClassList(this);
+  }
+
+  append(...nodes) {
+    for (const node of nodes) {
+      node.parentElement = this;
+      this.children.push(node);
+    }
+    this.scrollHeight = this.children.length;
+  }
+
+  replaceChildren(...nodes) {
+    this.children = [];
+    this.append(...nodes);
+  }
+
+  addEventListener(type, listener) {
+    this.listeners[type] = listener;
+  }
+
+  async dispatch(type) {
+    const listener = this.listeners[type];
+    if (!listener) {
+      return;
+    }
+    await listener({ preventDefault() {} });
+  }
+
+  querySelector(selector) {
+    if (selector === "summary span") {
+      const summary = findNode(this, (node) => node.tagName === "SUMMARY");
+      return summary ? findNode(summary, (node) => node.tagName === "SPAN") : null;
+    }
+    return findNode(this, (node) => matches(node, selector));
+  }
+}
+
+function matches(node, selector) {
+  if (selector.startsWith(".")) {
+    return node.className.split(/\s+/).includes(selector.slice(1));
+  }
+  return node.tagName === selector.toUpperCase();
+}
+
+function findNode(root, predicate) {
+  for (const child of root.children) {
+    if (predicate(child)) {
+      return child;
+    }
+    const nested = findNode(child, predicate);
+    if (nested) {
+      return nested;
+    }
+  }
+  return null;
+}
+
+function createDom() {
+  const ids = [
+    "backend-pill",
+    "model-pill",
+    "ready-pill",
+    "upload-form",
+    "upload-button",
+    "upload-status",
+    "document-file",
+    "text-encoding",
+    "refresh-status",
+    "runtime-grid",
+    "query-form",
+    "query-input",
+    "query-button",
+    "clear-chat",
+    "messages",
+    "timeline",
+    "final-decision",
+    "thinking-panel",
+    "thinking-state",
+    "thinking-note",
+    "thinking-content",
+    "summary-json",
+    "trace-json",
+  ];
+  const byId = Object.fromEntries(ids.map((id) => [id, new Element("div")]));
+  byId["query-input"].value = "";
+  const summary = new Element("summary");
+  summary.append(new Element("span"));
+  byId["thinking-panel"].append(summary);
+  const tabButtons = [new Element("button"), new Element("button")];
+  tabButtons[0].dataset.target = "summary-json";
+  tabButtons[1].dataset.target = "trace-json";
+
+  globalThis.document = {
+    createElement(tagName) {
+      return new Element(tagName);
+    },
+    querySelector(selector) {
+      if (!selector.startsWith("#")) {
+        return null;
+      }
+      return byId[selector.slice(1)] || null;
+    },
+    querySelectorAll(selector) {
+      return selector === ".tab-button" ? tabButtons : [];
+    },
+  };
+  return byId;
+}
+
+function jsonResponse(payload) {
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => "application/json" },
+    async json() {
+      return payload;
+    },
+    async text() {
+      return JSON.stringify(payload);
+    },
+  };
+}
+
+async function runCase(modelThinking) {
+  const dom = createDom();
+  globalThis.fetch = async (url) => {
+    if (url === "/api/config") {
+      return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+    }
+    if (url === "/api/status") {
+      return jsonResponse({
+        backend: "ollama",
+        model: "thinking-model",
+        ready_for_queries: false,
+        query_mode: "direct",
+        chunk_count: 0,
+      });
+    }
+    if (url === "/api/query") {
+      return jsonResponse({
+        answer: "Loop answer",
+        timeline: { rows: [], final_decision: "not_verified" },
+        summary: {},
+        trace: { model_thinking: modelThinking },
+      });
+    }
+    if (url === "/api/chat/clear") {
+      return jsonResponse({
+        timeline: { rows: [], final_decision: null },
+        summary: {},
+        trace: {},
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  await import(`${pathToFileURL(process.env.APP_JS_PATH).href}?case=${Math.random()}`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  dom["query-input"].value = "What happened?";
+  await dom["query-form"].dispatch("submit");
+  return dom;
+}
+
+const capturedDom = await runCase({
+  available: true,
+  redacted: false,
+  label: "Model Thinking (unverified)",
+  content: "Captured thinking from model.",
+  note: "Model-emitted thinking is useful for debugging the loop.",
+});
+const capturedThinking = findNode(
+  capturedDom.messages,
+  (node) => node.className === "message-thinking",
+);
+assert.ok(capturedThinking, "assistant message should include thinking details");
+const capturedPre = findNode(capturedThinking, (node) => node.tagName === "PRE");
+assert.equal(capturedPre.textContent, "Captured thinking from model.");
+
+const emptyDom = await runCase({
+  available: false,
+  redacted: false,
+  label: "Model Thinking (unverified)",
+  content: null,
+  note: "Model-emitted thinking is useful for debugging the loop.",
+});
+const emptyThinking = findNode(
+  emptyDom.messages,
+  (node) => node.className === "message-thinking",
+);
+assert.equal(emptyThinking, null);
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "APP_JS_PATH": str(REPO_ROOT / "src" / "web_static" / "app.js"),
+        },
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stderr == ""
+
+
+def test_config_and_status_endpoints_return_runtime_contract():
+    fake_qa = FakeQA()
+    client = TestClient(web_app.create_app(fake_qa))
+
+    config = client.get("/api/config").json()
+    status = client.get("/api/status").json()
+
+    assert config["title"] == "AI Loop Engine"
+    assert {"label": "Auto", "value": "auto"} in config["text_encodings"]
+    assert status["active_document"] is None
+    assert status["backend"] == "mock"
+    assert status["ready_for_queries"] is False
+    assert status["readiness_scope"] == "retrieval_pipeline"
+    assert status["direct_query_available"] is True
+    assert status["query_mode"] == "direct"
+    assert status["context_optional"] is True
+
+
+def test_upload_document_indexes_context_and_reports_status():
+    fake_qa = FakeQA()
+    client = TestClient(web_app.create_app(fake_qa))
+
+    response = client.post(
+        "/api/documents",
+        data={"text_encoding": "cp1251"},
+        files={"file": ("demo.txt", b"Project Phoenix", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "processed in mock mode" in payload["message"]
+    assert payload["status"]["active_document"] == "demo.txt"
+    assert payload["status"]["text_encoding_mode"] == "cp1251"
     assert fake_qa.text_encoding == "cp1251"
+    assert fake_qa.uploaded_text == "Project Phoenix"
 
 
-def test_process_document_passes_utf8_or_western_only_when_selected(
-    monkeypatch, tmp_path
-):
-    document = tmp_path / "demo.txt"
-    document.write_text("demo", encoding="utf-8")
-    fake_qa = FakeQA()
-    monkeypatch.setattr(app, "qa_system", fake_qa)
+def test_upload_document_rejects_unknown_encoding():
+    client = TestClient(web_app.create_app(FakeQA()))
 
-    status, _runtime_status = app.process_document(
-        SimpleNamespace(name=str(document)), "UTF-8 / Western"
+    response = client.post(
+        "/api/documents",
+        data={"text_encoding": "not-real"},
+        files={"file": ("demo.txt", b"Project Phoenix", "text/plain")},
     )
 
-    assert "processed in mock mode" in status
-    assert fake_qa.text_encoding == "utf-8-or-western"
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Unsupported text encoding."
 
 
-def test_process_document_reports_ollama_as_indexed_not_mock(monkeypatch, tmp_path):
-    document = tmp_path / "demo.txt"
-    document.write_text("demo", encoding="utf-8")
-    monkeypatch.setattr(app, "qa_system", FakeOllamaQA())
+def test_upload_document_rejects_oversized_body_before_processing(monkeypatch):
+    fake_qa = FakeQA()
+    client = TestClient(web_app.create_app(fake_qa))
+    monkeypatch.setattr(web_app, "MAX_DOCUMENT_BYTES", 8)
 
-    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
+    response = client.post(
+        "/api/documents",
+        data={"text_encoding": "auto"},
+        files={"file": ("too-large.txt", b"more than eight", "text/plain")},
+    )
 
-    assert "indexed" in status
-    assert "processed in mock mode" not in status
-    assert "Ollama (nemotron-3-nano:4b)" in status
-    runtime = json.loads(runtime_status)
-    assert runtime["backend"] == "ollama"
-    assert runtime["model"] == "Ollama (nemotron-3-nano:4b)"
-    assert runtime["ready_for_queries"] is True
-    assert runtime["inference_validated"] is False
-
-
-def test_process_document_reports_openai_compatible_as_indexed(
-    monkeypatch, tmp_path
-):
-    document = tmp_path / "demo.txt"
-    document.write_text("demo", encoding="utf-8")
-    monkeypatch.setattr(app, "qa_system", FakeOpenAICompatibleQA())
-
-    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
-
-    assert "indexed" in status
-    assert "processed in mock mode" not in status
-    assert "OpenAI-compatible (gpt-oss:20b)" in status
-    runtime = json.loads(runtime_status)
-    assert runtime["backend"] == "openai-compatible"
-    assert runtime["model"] == "OpenAI-compatible (gpt-oss:20b)"
-    assert runtime["ready_for_queries"] is True
-    assert runtime["inference_validated"] is False
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Uploaded document exceeds the 25 MB limit."
+    assert getattr(fake_qa, "status_calls", 0) == 0
+    assert not hasattr(fake_qa, "document_path")
 
 
-def test_process_document_reports_failure_without_losing_active_status(
-    monkeypatch, tmp_path
-):
-    document = tmp_path / "bad.txt"
-    document.write_text("bad", encoding="utf-8")
+def test_upload_document_rejects_oversized_request_before_status(monkeypatch):
+    fake_qa = FakeQA()
+    client = TestClient(web_app.create_app(fake_qa))
+    monkeypatch.setattr(web_app, "MAX_DOCUMENT_BYTES", 8)
+    monkeypatch.setattr(web_app, "MAX_MULTIPART_OVERHEAD_BYTES", 0)
+
+    response = client.post(
+        "/api/documents",
+        data={"text_encoding": "auto"},
+        files={"file": ("too-large.txt", b"too-large", "text/plain")},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Uploaded document exceeds the 25 MB limit."
+    assert getattr(fake_qa, "status_calls", 0) == 0
+    assert not hasattr(fake_qa, "document_path")
+
+
+def test_upload_document_rejects_missing_content_length_before_parsing():
+    fake_qa = FakeQA()
+    api = web_app.create_app(fake_qa)
+    sent_messages = []
+
+    async def receive():
+        return {
+            "type": "http.request",
+            "body": b"unparsed multipart body",
+            "more_body": False,
+        }
+
+    async def send(message):
+        sent_messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/documents",
+        "raw_path": b"/api/documents",
+        "query_string": b"",
+        "headers": [],
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+
+    asyncio.run(api(scope, receive, send))
+
+    response_start = next(
+        message for message in sent_messages if message["type"] == "http.response.start"
+    )
+    response_body = b"".join(
+        message.get("body", b"")
+        for message in sent_messages
+        if message["type"] == "http.response.body"
+    )
+    assert response_start["status"] == 411
+    assert json.loads(response_body)["detail"] == (
+        "Content-Length is required for document uploads."
+    )
+    assert getattr(fake_qa, "status_calls", 0) == 0
+    assert not hasattr(fake_qa, "document_path")
+
+
+def test_upload_document_rejects_directory_like_filenames():
+    fake_qa = FakeQA()
+    client = TestClient(web_app.create_app(fake_qa))
+
+    for filename in (".", ".."):
+        response = client.post(
+            "/api/documents",
+            data={"text_encoding": "auto"},
+            files={"file": (filename, b"content", "text/plain")},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Invalid upload filename."
+    assert getattr(fake_qa, "status_calls", 0) == 0
+    assert not hasattr(fake_qa, "document_path")
+
+
+def test_safe_upload_name_rejects_control_and_overlong_names():
+    for filename in (
+        "bad\0.txt",
+        "bad\n.txt",
+        "bad\x7f.txt",
+        "\nbad.txt",
+        "bad.txt\n",
+        "\tbad.txt",
+        "a" * 181,
+    ):
+        with pytest.raises(web_app.HTTPException) as exc_info:
+            web_app.safe_upload_name(filename)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Invalid upload filename."
+
+
+def test_upload_document_rejects_overlong_filename_before_filesystem():
+    fake_qa = FakeQA()
+    client = TestClient(web_app.create_app(fake_qa))
+
+    response = client.post(
+        "/api/documents",
+        data={"text_encoding": "auto"},
+        files={"file": ("a" * 181, b"content", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid upload filename."
+    assert getattr(fake_qa, "status_calls", 0) == 0
+    assert not hasattr(fake_qa, "document_path")
+
+
+def test_visually_hidden_label_remains_accessible_to_assistive_tech():
+    css = (REPO_ROOT / "src" / "web_static" / "styles.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert ".hidden {\n  display: none;\n}" in css
+    assert ".visually-hidden {" in css
+    assert "clip-path: inset(50%);" in css
+    assert "position: absolute;" in css
+    assert ".hidden,\n.visually-hidden" not in css
+
+
+def test_upload_document_reports_processing_failure_without_losing_active_status():
     fake_qa = FakeQA()
     fake_qa.current_document_name = "good.txt"
-    fake_qa.latest_processing_report = DocumentProcessingReport(
-        attempted_document_name="good.txt",
-        active_document_name="good.txt",
-        success=True,
-        phase="complete",
-        file_extension=".txt",
-        chunk_count=1,
-        truncated=False,
-        max_chunk_limit=2000,
-        text_encoding_mode="auto",
-        backend="mock",
-        model_label="MockLLM (explicit demo)",
-        error_message=None,
-    )
+    fake_qa.latest_processing_report = processed_report()
 
     def fail_process_document(document_path, text_encoding=None):
         fake_qa.text_encoding = text_encoding
@@ -369,27 +807,24 @@ def test_process_document_reports_failure_without_losing_active_status(
         )
 
     fake_qa.process_document = fail_process_document
-    monkeypatch.setattr(app, "qa_system", fake_qa)
+    client = TestClient(web_app.create_app(fake_qa))
 
-    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
+    response = client.post(
+        "/api/documents",
+        data={"text_encoding": "auto"},
+        files={"file": ("bad.txt", b"bad", "text/plain")},
+    )
 
-    assert "Document context `bad.txt` failed during `load`" in status
-    assert "Active document remains `good.txt`" in status
-    assert "Could not decode text document" in status
-    runtime = json.loads(runtime_status)
-    assert runtime["active_document"] == "good.txt"
-    assert runtime["last_attempted_document"] == "bad.txt"
-    assert runtime["last_success"] is False
-    assert runtime["file_extension"] == ".txt"
-    assert runtime["last_error"] == "Could not decode text document"
+    assert response.status_code == 400
+    payload = response.json()
+    assert "failed during load" in payload["message"]
+    assert "Active document remains good.txt" in payload["message"]
+    assert payload["status"]["active_document"] == "good.txt"
+    assert payload["status"]["last_attempted_document"] == "bad.txt"
+    assert payload["status"]["last_error"] == "Could not decode text document"
 
 
-def test_process_document_unexpected_error_uses_pre_upload_status(
-    monkeypatch, tmp_path
-):
-    document = tmp_path / "bad.txt"
-    document.write_text("bad", encoding="utf-8")
-
+def test_upload_document_unexpected_error_uses_pre_upload_status():
     class UnexpectedFailureQA(FakeQA):
         def __init__(self):
             self.current_document_name = "good.txt"
@@ -403,227 +838,111 @@ def test_process_document_unexpected_error_uses_pre_upload_status(
             )
             raise RuntimeError("unexpected boom")
 
-        def status(self):
-            self.status_calls += 1
-            return super().status()
-
     fake_qa = UnexpectedFailureQA()
-    monkeypatch.setattr(app, "qa_system", fake_qa)
+    client = TestClient(web_app.create_app(fake_qa))
 
-    status, runtime_status = app.process_document(SimpleNamespace(name=str(document)))
+    response = client.post(
+        "/api/documents",
+        data={"text_encoding": "auto"},
+        files={"file": ("bad.txt", b"bad", "text/plain")},
+    )
 
+    assert response.status_code == 500
+    payload = response.json()
     assert fake_qa.status_calls == 1
-    assert "Document context `bad.txt` failed during `unexpected`" in status
-    assert "Active document remains `good.txt`" in status
-    assert "unexpected boom" in status
-    runtime = json.loads(runtime_status)
-    assert runtime["active_document"] == "good.txt"
-    assert runtime["last_attempted_document"] == "bad.txt"
-    assert runtime["phase"] == "unexpected"
-    assert runtime["last_success"] is False
-    assert runtime["last_error"] == "unexpected boom"
+    assert "failed during unexpected" in payload["message"]
+    assert "Active document remains good.txt" in payload["message"]
+    assert payload["status"]["active_document"] == "good.txt"
+    assert payload["status"]["phase"] == "unexpected"
+    assert payload["status"]["last_error"] == "unexpected boom"
 
 
-def test_format_answer_trace_includes_citations():
-    result = QueryResult(
-        answer="Project Phoenix launches in June 2026 [1].",
-        trace=AnswerTrace(
-            question="When does it launch?",
-            document_name="phoenix.txt",
-            backend="mock",
-            model_label="MockLLM (explicit demo)",
-            retrieved_chunk_count=1,
-            citations=[
-                AnswerCitation(
-                    citation_id=1,
-                    source_name="phoenix.txt",
-                    page=None,
-                    chunk_index=0,
-                    excerpt="The launch date is June 2026.",
-                )
-            ],
-            self_check=AnswerSelfCheck(
-                outcome="not_verified",
-                reasons=[
-                    "mechanical_checks_passed",
-                    "verifier_unavailable_mock_backend",
-                ],
-                retry_attempted=True,
-            ),
+def test_query_endpoint_returns_visible_loop_payload():
+    fake_qa = FakeQA()
+    fake_qa.current_document_name = "demo.txt"
+    client = TestClient(web_app.create_app(fake_qa))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "What is Project Phoenix?"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "Project Phoenix" in payload["answer"]
+    assert payload["timeline"]["rows"][0]["phase"] == "Retrieve"
+    assert payload["timeline"]["rows"][0]["signals"] == "1 prompt chunks; chunks: 1; citations: 1"
+    assert payload["summary"]["document"] == "demo.txt"
+    assert payload["summary"]["final_decision"] == "not_verified"
+    assert payload["trace"]["question"] == "What is Project Phoenix?"
+    assert payload["trace"]["citations"][0]["source"] == "demo.txt"
+    assert payload["trace"]["model_thinking"] == {
+        "available": True,
+        "redacted": False,
+        "label": "Model Thinking (unverified)",
+        "content": "I matched Project Phoenix against citation [1].",
+        "note": (
+            "Model-emitted thinking is useful for debugging the loop, but it is "
+            "not verified evidence."
         ),
-    )
-
-    trace = json.loads(app.format_answer_trace(result))
-
-    assert trace["question"] == "When does it launch?"
-    assert trace["answer"] == "Project Phoenix launches in June 2026 [1]."
-    assert trace["document"] == "phoenix.txt"
-    assert trace["retrieved_chunk_count"] == 1
-    assert trace["citations"][0]["id"] == 1
-    assert trace["citations"][0]["source"] == "phoenix.txt"
-    assert trace["citations"][0]["chunk"] == 1
-    assert "June 2026" in trace["citations"][0]["excerpt"]
-    assert trace["self_check"]["outcome"] == "not_verified"
-    assert trace["self_check"]["reasons"] == [
-        "mechanical_checks_passed",
-        "verifier_unavailable_mock_backend",
-    ]
-    assert trace["self_check"]["retry_attempted"] is True
-    assert trace["loop_report"] is None
-    assert trace["error"] is None
-
-
-def test_format_answer_trace_includes_loop_report():
-    loop_report = LoopReport(
-        run=LoopRun(
-            run_id="run_ui",
-            user_input="When does it launch?",
-            context_provider="document",
-            backend="mock",
-            model_label="MockLLM (explicit demo)",
-            final_decision=LoopDecision.NOT_VERIFIED,
-            final_answer="Project Phoenix launches in June 2026 [1].",
-        )
-    )
-    result = QueryResult(
-        answer="Project Phoenix launches in June 2026 [1].",
-        trace=AnswerTrace(
-            question="When does it launch?",
-            document_name="phoenix.txt",
-            backend="mock",
-            model_label="MockLLM (explicit demo)",
-            retrieved_chunk_count=0,
-            citations=[],
-        ),
-        loop_report=loop_report,
-    )
-
-    trace = json.loads(app.format_answer_trace(result))
-
-    assert trace["loop_report"]["schema_version"] == "loop-report/v1"
-    assert trace["loop_report"]["run"]["run_id"] == "run_ui"
-    assert trace["loop_report"]["run"]["final_decision"] == "not_verified"
-
-
-def test_format_loop_summary_empty_state():
-    summary = json.loads(app.format_loop_summary(None))
-
-    assert summary == {
-        "context_provider": None,
-        "document": None,
-        "backend": None,
-        "model": None,
-        "retrieved_chunk_count": 0,
-        "draft_attempt_count": 0,
-        "mechanical_check": None,
-        "verifier": None,
-        "retry_attempted": False,
-        "refused": False,
-        "final_decision": None,
-        "last_error": None,
     }
 
 
-def test_format_loop_summary_shows_compact_loop_fields():
-    loop_report = LoopReport(
-        run=LoopRun(
-            run_id="run_summary",
-            user_input="When does it launch?",
-            context_provider="document",
-            backend="ollama",
-            model_label="Ollama (nemotron-3-nano:4b)",
-            steps=(
-                LoopStep(
-                    phase=LoopPhase.RETRIEVE,
-                    decision=LoopDecision.CONTINUE,
-                    metadata={"retrieved_chunk_count": 1},
-                ),
-                LoopStep(
-                    phase=LoopPhase.DRAFT,
-                    decision=LoopDecision.CONTINUE,
-                ),
-                LoopStep(
-                    phase=LoopPhase.RETRY,
-                    decision=LoopDecision.RETRY,
-                    metadata={"reasons": ["missing_inline_citation"]},
-                ),
-                LoopStep(
-                    phase=LoopPhase.DRAFT,
-                    decision=LoopDecision.CONTINUE,
-                    retry_count=1,
-                ),
-                LoopStep(
-                    phase=LoopPhase.MECHANICAL_CHECK,
-                    decision=LoopDecision.CONTINUE,
-                    output_summary="mechanical_checks_passed",
-                    retry_count=1,
-                ),
-                LoopStep(
-                    phase=LoopPhase.VERIFY,
-                    decision=LoopDecision.SUPPORTED,
-                    output_summary="supported",
-                    retry_count=1,
-                    verification=VerificationResult(
-                        outcome=VerificationOutcome.SUPPORTED,
-                        reasons=(
-                            "mechanical_checks_passed",
-                            "llm_verifier_supported",
-                        ),
-                        verifier="ollama",
-                    ),
-                ),
-                LoopStep(
-                    phase=LoopPhase.FINAL,
-                    decision=LoopDecision.SUPPORTED,
-                ),
-            ),
-            final_decision=LoopDecision.SUPPORTED,
-            final_answer="Project Phoenix launches in June 2026 [1].",
-        )
-    )
-    result = QueryResult(
-        answer="Project Phoenix launches in June 2026 [1].",
-        trace=AnswerTrace(
-            question="When does it launch?",
-            document_name="phoenix.txt",
-            backend="ollama",
-            model_label="Ollama (nemotron-3-nano:4b)",
-            retrieved_chunk_count=1,
-            citations=[],
-            self_check=AnswerSelfCheck(
-                outcome="supported",
-                reasons=["mechanical_checks_passed", "llm_verifier_supported"],
-                retry_attempted=True,
-            ),
-        ),
-        loop_report=loop_report,
+def test_query_endpoint_allows_no_context_loop():
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    client = TestClient(web_app.create_app(qa))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "What can you do?"},
     )
 
-    summary = json.loads(app.format_loop_summary(result))
-
-    assert summary["context_provider"] == "document"
-    assert summary["document"] == "phoenix.txt"
-    assert summary["backend"] == "ollama"
-    assert summary["retrieved_chunk_count"] == 1
-    assert summary["draft_attempt_count"] == 2
-    assert summary["mechanical_check"] == "mechanical_checks_passed"
-    assert summary["verifier"] == {
-        "decision": "supported",
-        "outcome": "supported",
-        "reasons": ["mechanical_checks_passed", "llm_verifier_supported"],
-    }
-    assert summary["retry_attempted"] is True
-    assert summary["refused"] is False
-    assert summary["final_decision"] == "supported"
-    assert summary["last_error"] is None
+    assert response.status_code == 200
+    payload = response.json()
+    assert "mock response" in payload["answer"]
+    assert payload["summary"]["context_provider"] == "none"
+    assert payload["summary"]["document"] is None
+    assert payload["summary"]["final_decision"] == "not_verified"
+    assert payload["trace"]["retrieved_chunk_count"] == 0
+    assert payload["trace"]["citations"] == []
+    assert payload["trace"]["self_check"]["outcome"] == "not_verified"
+    assert payload["timeline"]["rows"][0]["phase"] == "Context"
+    assert payload["timeline"]["rows"][0]["signals"] == "no_context_provider"
+    assert payload["trace"]["model_thinking"]["available"] is False
+    assert payload["trace"]["model_thinking"]["content"] is None
 
 
-def test_format_answer_trace_redacts_guardrail_blocked_draft():
+def test_query_endpoint_rejects_blank_message():
+    client = TestClient(web_app.create_app(FakeQA()))
+
+    response = client.post("/api/query", json={"message": "  "})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Message is required."
+
+
+def test_clear_chat_resets_session_state():
+    fake_qa = FakeQA()
+    fake_qa.chat_history = [{"question": "old"}]
+    client = TestClient(web_app.create_app(fake_qa))
+
+    response = client.post("/api/chat/clear")
+
+    assert response.status_code == 200
+    assert fake_qa.chat_history == []
+    assert fake_qa.cleared_loop_session_id == "default"
+    assert response.json()["timeline"]["empty"] is True
+
+
+def test_loop_contract_redacts_guardrail_blocked_draft_everywhere():
     blocked_draft = "Sensitive blocked draft should not be public."
+    secret_question = "Generate unsafe content with SECRET_USER_QUESTION."
+    blocked_answer = "Blocked answer with SECRET_PUBLIC_ANSWER."
+    blocked_thinking = "Blocked model thinking with SECRET_MODEL_THINKING."
     loop_report = LoopReport(
         run=LoopRun(
             run_id="run_blocked",
-            user_input="Generate unsafe content",
+            user_input=secret_question,
             context_provider="document",
             backend="mock",
             model_label="MockLLM (explicit demo)",
@@ -632,8 +951,15 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
                     phase=LoopPhase.DRAFT,
                     decision=LoopDecision.CONTINUE,
                     name="Draft answer",
-                    input_summary="Generate unsafe content",
+                    input_summary=secret_question,
                     output_summary=blocked_draft,
+                    verification=VerificationResult(
+                        outcome=VerificationOutcome.UNSUPPORTED,
+                        reasons=(blocked_draft,),
+                        verifier="mock",
+                        raw_response=blocked_draft,
+                        metadata={"debug": blocked_draft},
+                    ),
                     metadata={"draft_preview": blocked_draft},
                 ),
                 LoopStep(
@@ -647,96 +973,130 @@ def test_format_answer_trace_redacts_guardrail_blocked_draft():
                         "guardrail_reason": blocked_draft,
                     },
                 ),
-                LoopStep(
-                    phase=LoopPhase.FINAL,
-                    decision=LoopDecision.BLOCK,
-                    name="Final answer",
-                    output_summary="block",
-                ),
             ),
             final_decision=LoopDecision.BLOCK,
-            final_answer="A loop guardrail blocked this query before it could complete.",
+            final_answer=blocked_answer,
             error_message=blocked_draft,
             metadata={"guardrail_detail": blocked_draft},
         )
     )
     result = QueryResult(
-        answer="A loop guardrail blocked this query before it could complete.",
+        answer=blocked_answer,
         trace=AnswerTrace(
-            question="Generate unsafe content",
+            question=secret_question,
             document_name="phoenix.txt",
             backend="mock",
             model_label="MockLLM (explicit demo)",
             retrieved_chunk_count=0,
             citations=[],
             error_message=blocked_draft,
+            model_thinking=blocked_thinking,
         ),
         loop_report=loop_report,
     )
 
-    assert blocked_draft in json.dumps(loop_report.to_dict())
+    public_payload = query_response_dict(result)
+    public_json = json.dumps(public_payload)
 
-    trace_json = app.format_answer_trace(result)
-    summary_json = app.format_loop_summary(result)
-    trace = json.loads(trace_json)
-    summary = json.loads(summary_json)
-    redacted_step = trace["loop_report"]["run"]["steps"][0]
-    guardrail_step = trace["loop_report"]["run"]["steps"][1]
-
-    assert blocked_draft not in trace_json
-    assert blocked_draft not in summary_json
-    assert summary["last_error"] == "terminal_guardrail_decision"
-    assert summary["final_decision"] == "block"
-    assert trace["error"] == "terminal_guardrail_decision"
-    assert trace["loop_report"]["run"]["error_message"] == (
-        "terminal_guardrail_decision"
+    raw_report_json = json.dumps(loop_report.to_dict())
+    assert blocked_draft in raw_report_json
+    assert blocked_answer in raw_report_json
+    assert secret_question in raw_report_json
+    assert blocked_draft not in public_json
+    assert blocked_answer not in public_json
+    assert secret_question not in public_json
+    assert blocked_thinking not in public_json
+    assert public_payload["summary"]["last_error"] == "terminal_guardrail_decision"
+    assert public_payload["timeline"]["rows"][0]["signals"] == (
+        "[redacted: terminal guardrail decision]; "
+        "verifier: unsupported; "
+        "reasons: [redacted: terminal guardrail decision]"
     )
-    assert trace["loop_report"]["public_redaction"]["applied"] is True
-    assert redacted_step["output_summary"] == (
+    assert public_payload["trace"]["question"] == (
         "[redacted: terminal guardrail decision]"
     )
-    assert redacted_step["metadata"]["redacted"] is True
-    assert guardrail_step["output_summary"] == (
+    assert public_payload["answer"] == "[redacted: terminal guardrail decision]"
+    assert public_payload["trace"]["answer"] == (
         "[redacted: terminal guardrail decision]"
     )
-    assert guardrail_step["error_message"] == "terminal_guardrail_decision"
-    assert guardrail_step["metadata"]["redacted"] is True
+    assert public_payload["trace"]["model_thinking"] == {
+        "available": False,
+        "redacted": True,
+        "label": "Model Thinking (unverified)",
+        "content": "[redacted: terminal loop decision]",
+        "note": (
+            "Model-emitted thinking is useful for debugging the loop, but it is "
+            "not verified evidence."
+        ),
+    }
+    assert public_payload["trace"]["loop_report"]["public_redaction"]["applied"] is True
 
 
-def test_chat_returns_answer_and_trace(monkeypatch):
-    fake_qa = FakeQA()
-    fake_qa.current_document_name = "demo.txt"
-    monkeypatch.setattr(app, "qa_system", fake_qa)
-
-    history, message, loop_summary, answer_trace = app.chat(
-        "What is Project Phoenix?", []
+def test_answer_trace_redacts_model_thinking_for_refused_results_without_guardrail():
+    secret_thinking = "SECRET_REFUSED_MODEL_THINKING"
+    result = QueryResult(
+        answer="I could not find enough relevant information in the document.",
+        trace=AnswerTrace(
+            question="What is unsupported?",
+            document_name="phoenix.txt",
+            backend="ollama",
+            model_label="Ollama (nemotron-3-nano:4b)",
+            retrieved_chunk_count=1,
+            citations=[],
+            model_thinking=secret_thinking,
+        ),
+        loop_report=LoopReport(
+            run=LoopRun(
+                run_id="run_refused",
+                user_input="What is unsupported?",
+                context_provider="document",
+                backend="ollama",
+                model_label="Ollama (nemotron-3-nano:4b)",
+                final_decision=LoopDecision.REFUSE,
+                final_answer="I could not find enough relevant information in the document.",
+            )
+        ),
     )
 
-    assert message == ""
-    assert history[-1]["role"] == "assistant"
-    assert "Project Phoenix" in history[-1]["content"]
-    summary = json.loads(loop_summary)
-    assert summary["document"] == "demo.txt"
-    assert summary["retrieved_chunk_count"] == 1
-    assert summary["draft_attempt_count"] == 0
-    assert summary["final_decision"] is None
-    trace = json.loads(answer_trace)
-    assert trace["question"] == "What is Project Phoenix?"
-    assert trace["document"] == "demo.txt"
-    assert trace["retrieved_chunk_count"] == 1
-    assert trace["citations"][0]["source"] == "demo.txt"
-    assert trace["self_check"]["outcome"] == "not_verified"
+    trace = answer_trace_dict(result)
+
+    assert secret_thinking not in json.dumps(trace)
+    assert trace["model_thinking"] == {
+        "available": False,
+        "redacted": True,
+        "label": "Model Thinking (unverified)",
+        "content": "[redacted: terminal loop decision]",
+        "note": (
+            "Model-emitted thinking is useful for debugging the loop, but it is "
+            "not verified evidence."
+        ),
+    }
 
 
-def test_clear_chat_resets_answer_trace(monkeypatch):
+def test_loop_timeline_fallback_error_rows_are_sequential():
+    result = QueryResult(
+        answer="A query error occurred.",
+        trace=AnswerTrace(
+            question="What failed?",
+            document_name="demo.txt",
+            backend="mock",
+            model_label="MockLLM (explicit demo)",
+            retrieved_chunk_count=0,
+            citations=[],
+            error_message="backend unavailable",
+        ),
+    )
+
+    timeline = loop_timeline_dict(result)
+
+    assert [row["index"] for row in timeline["rows"]] == [1, 2, 3]
+    assert timeline["rows"][-1]["phase"] == "Error"
+
+
+def test_runtime_status_dict_preserves_honest_readiness_scope():
     fake_qa = FakeQA()
-    fake_qa.chat_history = [{"question": "old"}]
-    monkeypatch.setattr(app, "qa_system", fake_qa)
+    status = runtime_status_dict(fake_qa.status())
 
-    history, loop_summary, answer_trace = app.clear_chat()
-
-    assert history == []
-    assert fake_qa.chat_history == []
-    assert fake_qa.cleared_loop_session_id == "default"
-    assert json.loads(loop_summary)["draft_attempt_count"] == 0
-    assert json.loads(answer_trace)["citations"] == []
+    assert status["ready_for_queries"] is False
+    assert status["readiness_scope"] == "retrieval_pipeline"
+    assert status["inference_validated"] is False

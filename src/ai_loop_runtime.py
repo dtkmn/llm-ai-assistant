@@ -1,11 +1,12 @@
+from __future__ import annotations
+
 import hashlib
-import json
 import logging
 import math
 import os
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -16,16 +17,8 @@ except ImportError:
 
 apply_native_runtime_defaults()
 
-import faiss
-import numpy as np
-from langchain_core.callbacks import CallbackManagerForRetrieverRun
-from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models.llms import LLM
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.retrievers import BaseRetriever
-from pydantic import ConfigDict, Field
 
 try:
     from .context_providers import (
@@ -104,7 +97,6 @@ try:
         LoopRun,
         LoopSession,
         LoopStep,
-        VerificationOutcome,
         VerificationResult,
     )
 except ImportError:
@@ -118,7 +110,6 @@ except ImportError:
         LoopRun,
         LoopSession,
         LoopStep,
-        VerificationOutcome,
         VerificationResult,
     )
 
@@ -133,9 +124,11 @@ try:
         FAST_MODE_ENV_VAR,
         LLM_BACKEND_ENV_VAR,
         LLM_MODEL_ENV_VAR,
+        MODEL_THINKING_ENV_VAR,
         OLLAMA_BASE_URL_ENV_VAR,
         OLLAMA_EMBEDDINGS_MODEL_ENV_VAR,
         OLLAMA_MODEL_ENV_VAR,
+        OLLAMA_THINK_LEVEL_ENV_VAR,
         OLLAMA_TIMEOUT_ENV_VAR,
         OPENAI_COMPAT_API_KEY_ENV_VAR,
         OPENAI_COMPAT_BASE_URL_ENV_VAR,
@@ -148,6 +141,7 @@ try:
         env_int,
         first_env_value,
         normalize_ollama_base_url,
+        normalize_ollama_think_level,
         normalize_openai_compatible_base_url,
         safe_ollama_base_url_for_error,
         safe_openai_compatible_base_url_for_error,
@@ -163,9 +157,11 @@ except ImportError:
         FAST_MODE_ENV_VAR,
         LLM_BACKEND_ENV_VAR,
         LLM_MODEL_ENV_VAR,
+        MODEL_THINKING_ENV_VAR,
         OLLAMA_BASE_URL_ENV_VAR,
         OLLAMA_EMBEDDINGS_MODEL_ENV_VAR,
         OLLAMA_MODEL_ENV_VAR,
+        OLLAMA_THINK_LEVEL_ENV_VAR,
         OLLAMA_TIMEOUT_ENV_VAR,
         OPENAI_COMPAT_API_KEY_ENV_VAR,
         OPENAI_COMPAT_BASE_URL_ENV_VAR,
@@ -178,9 +174,29 @@ except ImportError:
         env_int,
         first_env_value,
         normalize_ollama_base_url,
+        normalize_ollama_think_level,
         normalize_openai_compatible_base_url,
         safe_ollama_base_url_for_error,
         safe_openai_compatible_base_url_for_error,
+    )
+
+try:
+    from . import answer_loop as _answer_loop
+    from .answer_loop import (
+        ANSWER_SUPPORT_STOPWORDS,
+        SELF_CHECK_PASS_OUTCOMES,
+        SELF_CHECK_REFUSAL_ANSWER,
+        VERIFIER_OUTCOMES,
+        AnswerSelfCheck,
+    )
+except ImportError:
+    import answer_loop as _answer_loop
+    from answer_loop import (
+        ANSWER_SUPPORT_STOPWORDS,
+        SELF_CHECK_PASS_OUTCOMES,
+        SELF_CHECK_REFUSAL_ANSWER,
+        VERIFIER_OUTCOMES,
+        AnswerSelfCheck,
     )
 
 try:
@@ -208,8 +224,19 @@ except ImportError:
         open_openai_compatible_request,
     )
 
+try:
+    from .retrieval_types import AnswerCitation, RetrievalChainResult, RetrievedContext
+except ImportError:
+    from retrieval_types import AnswerCitation, RetrievalChainResult, RetrievedContext
+
 LOGGER = logging.getLogger(__name__)
 DEFAULT_MAX_SESSION_REPORTS = 200
+_RETRIEVAL_EXPORTS = {
+    "DocumentRetrievalChain",
+    "FaissRetriever",
+    "FaissVectorStore",
+    "build_document_retrieval_chain",
+}
 LOCAL_HASHING_EMBEDDINGS_DIMENSIONS = 384
 LOCAL_HASHING_ALIASES = {
     "go_live": ("launch", "launch_date", "release", "release_date"),
@@ -256,69 +283,14 @@ DOCUMENT_IDENTITY_QUESTION_HINTS = (
     "what file",
     "which file",
 )
-SELF_CHECK_REFUSAL_ANSWER = (
-    "I could not find enough relevant information in the document to answer that."
+SELF_CHECK_REFUSAL_ANSWER = _answer_loop.SELF_CHECK_REFUSAL_ANSWER
+NO_CONTEXT_SELF_CHECK_REASONS = [
+    "no_context_provider",
+    "verifier_requires_prompt_evidence",
+]
+DIRECT_STANDALONE_CITATION_MARKER_PATTERN = re.compile(
+    r"(?<!\S)\[(\d+)\](?=$|[\s.,;:!?)])"
 )
-SELF_CHECK_PASS_OUTCOMES = {"supported", "not_verified"}
-VERIFIER_OUTCOMES = {"supported", "unsupported", "insufficient"}
-
-
-ANSWER_SUPPORT_STOPWORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "based",
-    "be",
-    "because",
-    "by",
-    "can",
-    "configured",
-    "context",
-    "currently",
-    "demonstration",
-    "did",
-    "do",
-    "does",
-    "document",
-    "for",
-    "from",
-    "has",
-    "have",
-    "how",
-    "i",
-    "identify",
-    "in",
-    "information",
-    "is",
-    "it",
-    "language",
-    "model",
-    "no",
-    "of",
-    "on",
-    "or",
-    "provided",
-    "real",
-    "related",
-    "response",
-    "that",
-    "the",
-    "this",
-    "to",
-    "using",
-    "was",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "who",
-    "why",
-    "with",
-}
 
 
 def _document_ingestion_module():
@@ -337,6 +309,29 @@ def _document_text_module():
         import document_text
 
     return document_text
+
+
+def _retrieval_module():
+    try:
+        from . import retrieval
+    except ImportError:
+        import retrieval
+
+    return retrieval
+
+
+def _retrieval_export(name: str):
+    if name in globals():
+        return globals()[name]
+    return getattr(_retrieval_module(), name)
+
+
+def __getattr__(name):
+    if name in _RETRIEVAL_EXPORTS:
+        value = _retrieval_export(name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def decode_text_file(
@@ -414,15 +409,6 @@ class DocumentQAStatus:
 
 
 @dataclass(frozen=True)
-class AnswerCitation:
-    citation_id: int
-    source_name: str
-    page: Optional[int]
-    chunk_index: Optional[int]
-    excerpt: str
-
-
-@dataclass(frozen=True)
 class AnswerTrace:
     question: str
     document_name: Optional[str]
@@ -432,6 +418,7 @@ class AnswerTrace:
     citations: List[AnswerCitation]
     self_check: Optional["AnswerSelfCheck"] = None
     error_message: Optional[str] = None
+    model_thinking: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -441,288 +428,10 @@ class QueryResult:
     loop_report: Optional[LoopReport] = None
 
 
-@dataclass(frozen=True)
-class AnswerSelfCheck:
-    outcome: str
-    reasons: List[str]
-    retry_attempted: bool = False
-
-
 class DocumentProcessingError(RuntimeError):
     def __init__(self, message: str, status: DocumentQAStatus):
         super().__init__(message)
         self.status = status
-
-
-class FaissVectorStore:
-    def __init__(self, documents: List[Document], embeddings, vectors: np.ndarray):
-        if vectors.ndim != 2:
-            raise ValueError("Embedding vectors must be a 2D array.")
-        self.documents = documents
-        self.embeddings = embeddings
-        self.vectors = vectors.astype("float32")
-        self.index = faiss.IndexFlatL2(self.vectors.shape[1])
-        self.index.add(self.vectors)
-
-    @classmethod
-    def from_documents(cls, documents: List[Document], embedding) -> "FaissVectorStore":
-        texts = [document.page_content for document in documents]
-        vectors = np.asarray(embedding.embed_documents(texts), dtype="float32")
-        if len(vectors) != len(documents):
-            raise ValueError("Embedding count does not match document count.")
-        if len(documents) == 0:
-            raise ValueError("Cannot build a vector store from zero documents.")
-        return cls(documents, embedding, vectors)
-
-    def as_retriever(
-        self, search_type: str = "similarity", search_kwargs: Optional[Dict] = None
-    ) -> "FaissRetriever":
-        return FaissRetriever(
-            vector_store=self,
-            search_type=search_type,
-            search_kwargs=search_kwargs or {},
-        )
-
-    def search(self, query: str, search_type: str, search_kwargs: Dict) -> List[Document]:
-        k = int(search_kwargs.get("k", 4))
-        if k <= 0:
-            return []
-
-        query_vector = np.asarray([self.embeddings.embed_query(query)], dtype="float32")
-        if search_type == "mmr":
-            fetch_k = min(int(search_kwargs.get("fetch_k", max(k, 20))), len(self.documents))
-            _, indices = self.index.search(query_vector, fetch_k)
-            candidate_indices = [int(index) for index in indices[0] if index >= 0]
-            selected_indices = self._maximal_marginal_relevance(
-                query_vector[0],
-                candidate_indices,
-                k,
-                float(search_kwargs.get("lambda_mult", 0.5)),
-            )
-            return [self.documents[index] for index in selected_indices]
-
-        search_k = min(k, len(self.documents))
-        _, indices = self.index.search(query_vector, search_k)
-        return [self.documents[int(index)] for index in indices[0] if index >= 0]
-
-    def _maximal_marginal_relevance(
-        self,
-        query_vector: np.ndarray,
-        candidate_indices: List[int],
-        k: int,
-        lambda_mult: float,
-    ) -> List[int]:
-        if not candidate_indices:
-            return []
-
-        selected: List[int] = []
-        query_norm = self._normalize(query_vector)
-        candidate_vectors = self.vectors[candidate_indices]
-        candidate_norms = self._normalize_rows(candidate_vectors)
-        query_similarities = candidate_norms @ query_norm
-
-        while candidate_indices and len(selected) < k:
-            if not selected:
-                best_position = int(np.argmax(query_similarities))
-            else:
-                selected_vectors = self._normalize_rows(self.vectors[selected])
-                diversity_penalties = candidate_norms @ selected_vectors.T
-                max_diversity_penalties = diversity_penalties.max(axis=1)
-                scores = (
-                    lambda_mult * query_similarities
-                    - (1.0 - lambda_mult) * max_diversity_penalties
-                )
-                best_position = int(np.argmax(scores))
-
-            selected.append(candidate_indices.pop(best_position))
-            candidate_norms = np.delete(candidate_norms, best_position, axis=0)
-            query_similarities = np.delete(query_similarities, best_position, axis=0)
-
-        return selected
-
-    def _normalize(self, vector: np.ndarray) -> np.ndarray:
-        norm = np.linalg.norm(vector)
-        if norm == 0:
-            return vector
-        return vector / norm
-
-    def _normalize_rows(self, vectors: np.ndarray) -> np.ndarray:
-        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-        return np.divide(vectors, norms, out=np.zeros_like(vectors), where=norms != 0)
-
-
-class FaissRetriever(BaseRetriever):
-    vector_store: FaissVectorStore
-    search_type: str = "similarity"
-    search_kwargs: Dict = Field(default_factory=dict)
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    def _get_relevant_documents(
-        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
-    ) -> List[Document]:
-        return self.vector_store.search(query, self.search_type, self.search_kwargs)
-
-
-@dataclass(frozen=True)
-class RetrievalChainResult:
-    answer: str
-    retrieved_chunk_count: int
-    citations: List[AnswerCitation]
-    context: str = ""
-
-
-@dataclass(frozen=True)
-class RetrievedContext:
-    retrieved_chunk_count: int
-    citations: List[AnswerCitation]
-    context: str
-
-
-class DocumentRetrievalChain:
-    def __init__(
-        self,
-        *,
-        retriever: FaissRetriever,
-        prompt: ChatPromptTemplate,
-        llm: LLM,
-        document_name: Optional[str],
-        profile: Dict,
-    ):
-        self.retriever = retriever
-        self.answer_chain = prompt | llm | StrOutputParser()
-        self.document_name = document_name
-        self.profile = profile
-
-    def invoke(self, question: str) -> str:
-        return self.invoke_with_trace(question).answer
-
-    def invoke_with_trace(
-        self, question: str, self_check_instruction: str = ""
-    ) -> RetrievalChainResult:
-        retrieved_context = self.retrieve_with_trace(question)
-        return self.draft_with_trace(
-            question,
-            retrieved_context,
-            self_check_instruction=self_check_instruction,
-        )
-
-    def retrieve_with_trace(self, question: str) -> RetrievedContext:
-        docs = self.retriever.invoke(question)
-        context, citations = self._format_context_and_citations(docs)
-        return RetrievedContext(
-            retrieved_chunk_count=len(citations),
-            citations=citations,
-            context=context,
-        )
-
-    def draft_with_trace(
-        self,
-        question: str,
-        retrieved_context: RetrievedContext,
-        self_check_instruction: str = "",
-    ) -> RetrievalChainResult:
-        response = self._generate_answer(
-            question=question,
-            context=retrieved_context.context,
-            self_check_instruction=self_check_instruction,
-        )
-        return RetrievalChainResult(
-            answer=response,
-            retrieved_chunk_count=retrieved_context.retrieved_chunk_count,
-            citations=retrieved_context.citations,
-            context=retrieved_context.context,
-        )
-
-    def retry_with_trace(
-        self,
-        question: str,
-        previous_result: RetrievalChainResult,
-        self_check_instruction: str,
-    ) -> RetrievalChainResult:
-        response = self._generate_answer(
-            question=question,
-            context=previous_result.context,
-            self_check_instruction=self_check_instruction,
-        )
-        return RetrievalChainResult(
-            answer=response,
-            retrieved_chunk_count=previous_result.retrieved_chunk_count,
-            citations=previous_result.citations,
-            context=previous_result.context,
-        )
-
-    def _generate_answer(
-        self, *, question: str, context: str, self_check_instruction: str = ""
-    ) -> str:
-        response = self.answer_chain.invoke(
-            {
-                "context": context,
-                "question": question,
-                "document_name": self.document_name or "unknown",
-                "self_check_instruction": self_check_instruction,
-            }
-        )
-        return str(response).strip()
-
-    def _format_context_and_citations(
-        self, docs: List[Document]
-    ) -> Tuple[str, List[AnswerCitation]]:
-        context_parts = []
-        citations = []
-        remaining_chars = self.profile["context_total_chars"]
-
-        for doc in docs:
-            if len(citations) >= self.profile["context_chunks"] or remaining_chars <= 0:
-                break
-
-            content = doc.page_content.strip()
-            if not content:
-                continue
-
-            citation_id = len(citations) + 1
-            metadata = doc.metadata or {}
-            source_name = self._source_name(metadata)
-            page = metadata.get("page")
-            display_page = page + 1 if isinstance(page, int) else None
-            chunk_index = metadata.get("chunk_index")
-            if not isinstance(chunk_index, int):
-                chunk_index = None
-
-            source_label = f"[{citation_id}] Source: {source_name}"
-            if display_page is not None:
-                source_label = f"{source_label} (page {display_page})"
-            if chunk_index is not None:
-                source_label = f"{source_label}, chunk {chunk_index + 1}"
-
-            allowed_content_chars = min(
-                self.profile["context_chars_per_chunk"],
-                max(0, remaining_chars - len(source_label) - 1),
-            )
-            if allowed_content_chars <= 0:
-                break
-
-            excerpt = content[:allowed_content_chars]
-            context_entry = f"{source_label}\n{excerpt}"
-            context_parts.append(context_entry)
-            remaining_chars -= len(context_entry) + 2
-            citations.append(
-                AnswerCitation(
-                    citation_id=citation_id,
-                    source_name=source_name,
-                    page=display_page,
-                    chunk_index=chunk_index,
-                    excerpt=" ".join(excerpt.split()),
-                )
-            )
-
-        return "\n\n".join(context_parts), citations
-
-    def _source_name(self, metadata: Dict) -> str:
-        source = metadata.get("source")
-        if source:
-            return os.path.basename(str(source))
-        return self.document_name or "uploaded document"
 
 
 class LocalHashingEmbeddings(Embeddings):
@@ -838,6 +547,7 @@ class AILoopEngine:
             OPENAI_COMPAT_MODEL_ENV_VAR, ""
         ).strip()
         self.openai_compat_timeout = env_int(OPENAI_COMPAT_TIMEOUT_ENV_VAR, 120)
+        self.model_thinking_enabled = env_flag(MODEL_THINKING_ENV_VAR, True)
         self.embeddings_model = self._resolve_embeddings_model(embeddings_model)
         self.embeddings_device = self._normalize_embeddings_device(embeddings_device)
 
@@ -975,10 +685,20 @@ class AILoopEngine:
     def _load_ollama_model(self, model_id: str) -> OllamaLLM:
         base_url = normalize_ollama_base_url(self.ollama_base_url)
         LOGGER.info("Configuring Ollama model %s at %s", model_id, base_url)
+        think_level = (
+            normalize_ollama_think_level(
+                os.getenv(OLLAMA_THINK_LEVEL_ENV_VAR),
+                model=model_id,
+            )
+            if self.model_thinking_enabled
+            else None
+        )
         llm = OllamaLLM(
             model=model_id,
             base_url=base_url,
             timeout=self.ollama_timeout,
+            enable_thinking=self.model_thinking_enabled,
+            think_level=think_level,
             options={
                 "temperature": 0,
                 "num_predict": self.profile["max_new_tokens"],
@@ -1182,7 +902,7 @@ class AILoopEngine:
         self,
         *,
         document_name: str,
-        vector_store: FaissVectorStore,
+        vector_store: Any,
         retrieval_chain,
         processing_report: DocumentProcessingReport,
     ) -> DocumentQAStatus:
@@ -1350,35 +1070,15 @@ class AILoopEngine:
         )
 
     def _build_retrieval_chain(
-        self, vector_store: FaissVectorStore, document_name: Optional[str]
+        self, vector_store: Any, document_name: Optional[str]
     ):
         if not self.llm:
             raise RuntimeError("LLM is not initialized.")
         if not vector_store:
             raise RuntimeError("Vector store is not initialized.")
 
-        retriever = vector_store.as_retriever(
-            search_type="mmr",
-            search_kwargs={
-                "k": self.profile["retrieval_k"],
-                "fetch_k": self.profile["retrieval_fetch_k"],
-                "lambda_mult": self.profile["retrieval_lambda_mult"],
-            },
-        )
-        prompt = ChatPromptTemplate.from_template(
-            "You are a helpful AI assistant. Answer using only the provided context. "
-            "Cite relevant sources inline with bracketed numbers like [1]. "
-            "If the answer is not in the context, say that clearly and do not invent citations.\n\n"
-            "Uploaded document name: {document_name}\n\n"
-            "Context:\n{context}\n\n"
-            "Question: {question}\n\n"
-            "{self_check_instruction}\n\n"
-            "Answer:"
-        )
-
-        return DocumentRetrievalChain(
-            retriever=retriever,
-            prompt=prompt,
+        return _retrieval_export("build_document_retrieval_chain")(
+            vector_store=vector_store,
             llm=self.llm,
             document_name=document_name,
             profile=self.profile,
@@ -1392,7 +1092,7 @@ class AILoopEngine:
         document_path: str,
         file_extension: str,
         text_encoding: Optional[str] = None,
-    ) -> List[Document]:
+    ) -> List[Any]:
         return _document_ingestion_module().load_documents(
             document_path,
             file_extension,
@@ -1494,7 +1194,7 @@ class AILoopEngine:
                 chunk_count = len(chunks)
 
                 phase = "index"
-                vector_store = FaissVectorStore.from_documents(
+                vector_store = _retrieval_export("FaissVectorStore").from_documents(
                     documents=chunks,
                     embedding=self.embeddings,
                 )
@@ -1539,69 +1239,29 @@ class AILoopEngine:
         return any(hint in lowered for hint in DOCUMENT_IDENTITY_QUESTION_HINTS)
 
     def _answer_is_refusal(self, answer: str) -> bool:
-        lowered = answer.lower()
-        refusal_markers = (
-            "could not find",
-            "not in the context",
-            "not enough relevant information",
-            "not provided in the context",
-            "cannot answer",
-            "can't answer",
-            "insufficient information",
-        )
-        return any(marker in lowered for marker in refusal_markers)
+        return _answer_loop.answer_is_refusal(answer)
 
     def _inline_citation_ids(self, answer: str) -> List[int]:
-        citation_ids = []
-        for match in re.findall(r"\[(\d+)\]", answer):
-            try:
-                citation_ids.append(int(match))
-            except ValueError:
-                continue
-        return citation_ids
+        return _answer_loop.inline_citation_ids(answer)
 
     def _citation_ids_are_valid(
         self, inline_citation_ids: List[int], citations: List[AnswerCitation]
     ) -> bool:
-        valid_citation_ids = {citation.citation_id for citation in citations}
-        return set(inline_citation_ids).issubset(valid_citation_ids)
+        return _answer_loop.citation_ids_are_valid(inline_citation_ids, citations)
 
     def _cited_citations_for_answer(
         self, answer: str, citations: List[AnswerCitation]
     ) -> List[AnswerCitation]:
-        inline_citation_ids = set(self._inline_citation_ids(answer))
-        return [
-            citation for citation in citations if citation.citation_id in inline_citation_ids
-        ]
+        return _answer_loop.cited_citations_for_answer(answer, citations)
 
     def _support_token(self, token: str) -> str:
-        if len(token) > 4 and token.endswith("ies"):
-            return f"{token[:-3]}y"
-        if len(token) > 4 and token.endswith("es"):
-            return token[:-2]
-        if len(token) > 3 and token.endswith("s"):
-            return token[:-1]
-        return token
+        return _answer_loop.support_token(token)
 
     def _support_tokens(self, text: str) -> set:
-        normalized_text = re.sub(r"\[\d+\]", " ", text.lower())
-        tokens = re.findall(r"\w+", normalized_text, flags=re.UNICODE)
-        return {
-            self._support_token(token)
-            for token in tokens
-            if (not token.isascii() or len(token) > 2)
-            and token not in ANSWER_SUPPORT_STOPWORDS
-        }
+        return _answer_loop.support_tokens(text)
 
     def _normalize_support_text(self, text: str) -> str:
-        without_citations = re.sub(r"\[\d+\]", " ", text.lower())
-        normalized_chars = []
-        for char in without_citations:
-            if char.isalnum():
-                normalized_chars.append(char)
-            else:
-                normalized_chars.append(" ")
-        return " ".join("".join(normalized_chars).split())
+        return _answer_loop.normalize_support_text(text)
 
     def _matched_claim_is_denied(
         self,
@@ -1609,282 +1269,14 @@ class AILoopEngine:
         normalized_evidence: str,
         raw_evidence: str = "",
     ) -> bool:
-        if not normalized_answer:
-            return False
-
-        match_starts = []
-        search_start = 0
-        while True:
-            start = normalized_evidence.find(normalized_answer, search_start)
-            if start < 0:
-                break
-            match_starts.append(start)
-            search_start = start + len(normalized_answer)
-
-        if not match_starts:
-            return False
-
-        if raw_evidence:
-            claim_pattern = r"\b" + r"\W+".join(
-                re.escape(token) for token in normalized_answer.split()
-            )
-            qa_denial_pattern = (
-                rf"{claim_pattern}\b\s*(?:\?|\:|[-–—])\s*"
-                r"(?:no|nope)\b(?=\s*(?:[.!?,;:]|$))"
-            )
-            if re.search(qa_denial_pattern, raw_evidence, flags=re.IGNORECASE):
-                return True
-
-        prefix_denial_markers = (
-            "it is false that",
-            "it is not true that",
-            "it is incorrect that",
-            "it is wrong that",
-            "it was false that",
-            "it was not true that",
-            "it was incorrect that",
-            "it was wrong that",
-            "false that",
-            "not true that",
-            "incorrect that",
-            "wrong that",
-            "denied that",
-            "refuted that",
+        return _answer_loop.matched_claim_is_denied(
+            normalized_answer, normalized_evidence, raw_evidence
         )
-
-        denial_markers = (
-            "is false",
-            "is not true",
-            "is incorrect",
-            "is wrong",
-            "is denied",
-            "is refuted",
-            "is rejected",
-            "is debunked",
-            "is contradicted",
-            "is untrue",
-            "is unsupported",
-            "is not supported",
-            "is disputed",
-            "is inaccurate",
-            "is baseless",
-            "is unfounded",
-            "is disproven",
-            "is disproved",
-            "has been denied",
-            "has been refuted",
-            "has been rejected",
-            "has been debunked",
-            "has been contradicted",
-            "has been unsupported",
-            "has been disputed",
-            "has been disproven",
-            "has been disproved",
-            "have been denied",
-            "have been refuted",
-            "have been rejected",
-            "have been debunked",
-            "have been contradicted",
-            "have been unsupported",
-            "have been disputed",
-            "have been disproven",
-            "have been disproved",
-            "had been denied",
-            "had been refuted",
-            "had been rejected",
-            "had been debunked",
-            "had been contradicted",
-            "had been unsupported",
-            "had been disputed",
-            "had been disproven",
-            "had been disproved",
-            "was false",
-            "was not true",
-            "was incorrect",
-            "was wrong",
-            "was denied",
-            "was refuted",
-            "was rejected",
-            "was debunked",
-            "was contradicted",
-            "was untrue",
-            "was unsupported",
-            "was not supported",
-            "was disputed",
-            "was inaccurate",
-            "was baseless",
-            "was unfounded",
-            "was disproven",
-            "was disproved",
-            "are false",
-            "are not true",
-            "are incorrect",
-            "are wrong",
-            "are denied",
-            "are refuted",
-            "are rejected",
-            "are debunked",
-            "are contradicted",
-            "are untrue",
-            "are unsupported",
-            "are not supported",
-            "are disputed",
-            "are inaccurate",
-            "are baseless",
-            "are unfounded",
-            "are disproven",
-            "are disproved",
-            "were false",
-            "were not true",
-            "were incorrect",
-            "were wrong",
-            "were denied",
-            "were refuted",
-            "were rejected",
-            "were debunked",
-            "were contradicted",
-            "were untrue",
-            "were unsupported",
-            "were not supported",
-            "were disputed",
-            "were inaccurate",
-            "were baseless",
-            "were unfounded",
-            "were disproven",
-            "were disproved",
-            "not true",
-            "not supported",
-            "false",
-            "incorrect",
-            "wrong",
-            "denied",
-            "refuted",
-            "rejected",
-            "debunked",
-            "contradicted",
-            "untrue",
-            "unsupported",
-            "disputed",
-            "inaccurate",
-            "baseless",
-            "unfounded",
-            "disproven",
-            "disproved",
-        )
-
-        def has_denial_marker(tokens: List[str]) -> bool:
-            text = " ".join(tokens[:8])
-            return any(
-                text == marker or text.startswith(f"{marker} ")
-                for marker in denial_markers
-            )
-
-        referent_tokens = {"it", "that", "this", "they", "these", "those"}
-        referential_determiners = {"a", "an", "the"}
-        referential_nouns = {
-            "answer",
-            "assertion",
-            "assertions",
-            "claim",
-            "claims",
-            "idea",
-            "ideas",
-            "premise",
-            "premises",
-            "report",
-            "reports",
-            "statement",
-            "statements",
-        }
-        referential_modifiers = {"above", "previous", "prior", "same"}
-
-        def has_referential_denial_marker(tokens: List[str]) -> bool:
-            if has_denial_marker(tokens):
-                return True
-
-            if tokens and tokens[0] in referent_tokens:
-                if has_denial_marker(tokens[1:]):
-                    return True
-                if len(tokens) > 1 and tokens[1] in referential_nouns:
-                    return has_denial_marker(tokens[2:])
-
-            if tokens and tokens[0] in referential_determiners:
-                noun_tokens = tokens[1:]
-                if noun_tokens and noun_tokens[0] in referential_modifiers:
-                    noun_tokens = noun_tokens[1:]
-                if noun_tokens and noun_tokens[0] in referential_nouns:
-                    return has_denial_marker(noun_tokens[1:])
-
-            return False
-
-        discourse_connectors = {
-            "although",
-            "but",
-            "however",
-            "that",
-            "this",
-            "though",
-            "which",
-            "yet",
-        }
-
-        for start in match_starts:
-            before_match = normalized_evidence[:start]
-            previous_tokens = before_match.split()[-6:]
-            previous_text = " ".join(previous_tokens)
-            if any(
-                previous_text == marker or previous_text.endswith(f" {marker}")
-                for marker in prefix_denial_markers
-            ):
-                return True
-
-            after_match = normalized_evidence[start + len(normalized_answer) :]
-            following_tokens = after_match.split()[:8]
-            following_text = " ".join(following_tokens)
-            if following_tokens and following_tokens[0] in {"no", "nope"}:
-                if len(following_tokens) == 1:
-                    return True
-                if following_tokens[1] in {"it", "this", "that", "instead", "rather"}:
-                    return True
-                if following_text.startswith(
-                    ("no not true", "no false", "no incorrect")
-                ):
-                    return True
-
-            if has_referential_denial_marker(following_tokens):
-                return True
-
-            if following_tokens and following_tokens[0] in discourse_connectors:
-                connector_tail = following_tokens[1:]
-                if has_referential_denial_marker(connector_tail):
-                    return True
-
-        return False
 
     def _citation_text_refutes_answer(
         self, answer: str, citations: List[AnswerCitation], question: str
     ) -> bool:
-        cited_citations = self._cited_citations_for_answer(answer, citations)
-        if not cited_citations:
-            return False
-
-        evidence_text_parts = []
-        for citation in cited_citations:
-            evidence_text_parts.append(citation.excerpt)
-
-        answer_tokens = self._support_tokens(answer)
-        if not answer_tokens:
-            return False
-
-        normalized_answer = self._normalize_support_text(answer)
-        normalized_evidence = self._normalize_support_text(" ".join(evidence_text_parts))
-        if not normalized_answer or normalized_answer not in normalized_evidence:
-            return False
-        return self._matched_claim_is_denied(
-            normalized_answer,
-            normalized_evidence,
-            " ".join(evidence_text_parts),
-        )
+        return _answer_loop.citation_text_refutes_answer(answer, citations, question)
 
     def _mechanical_self_check_answer(
         self,
@@ -1894,101 +1286,21 @@ class AILoopEngine:
         question: str = "",
         retry_attempted: bool = False,
     ) -> AnswerSelfCheck:
-        clean_answer = answer.strip()
-        if len(clean_answer) < 3:
-            return AnswerSelfCheck(
-                outcome="needs_retry",
-                reasons=["answer_too_short"],
-                retry_attempted=retry_attempted,
-            )
-
-        if not citations:
-            if self._answer_is_refusal(clean_answer):
-                return AnswerSelfCheck(
-                    outcome="not_verified",
-                    reasons=["refused_without_prompt_evidence"],
-                    retry_attempted=retry_attempted,
-                )
-            return AnswerSelfCheck(
-                outcome="needs_refusal",
-                reasons=["no_prompt_evidence"],
-                retry_attempted=retry_attempted,
-            )
-
-        if self._answer_is_refusal(clean_answer):
-            return AnswerSelfCheck(
-                outcome="needs_retry",
-                reasons=["answer_refused_despite_prompt_evidence"],
-                retry_attempted=retry_attempted,
-            )
-
-        inline_citation_ids = self._inline_citation_ids(clean_answer)
-        if not inline_citation_ids:
-            return AnswerSelfCheck(
-                outcome="needs_retry",
-                reasons=["missing_inline_citation"],
-                retry_attempted=retry_attempted,
-            )
-
-        if not self._citation_ids_are_valid(inline_citation_ids, citations):
-            return AnswerSelfCheck(
-                outcome="needs_retry",
-                reasons=["invalid_inline_citation"],
-                retry_attempted=retry_attempted,
-            )
-
-        if self._citation_text_refutes_answer(clean_answer, citations, question):
-            return AnswerSelfCheck(
-                outcome="needs_refusal",
-                reasons=[
-                    "citation_text_does_not_support_answer",
-                    "deterministic_refutation_detected",
-                ],
-                retry_attempted=retry_attempted,
-            )
-
-        return AnswerSelfCheck(
-            outcome="mechanical_checks_passed",
-            reasons=["mechanical_checks_passed"],
+        return _answer_loop.mechanical_self_check_answer(
+            answer,
+            citations,
+            question=question,
             retry_attempted=retry_attempted,
         )
 
     def _loop_decision_for_self_check(self, self_check: AnswerSelfCheck) -> LoopDecision:
-        if self_check.outcome == "mechanical_checks_passed":
-            return LoopDecision.CONTINUE
-        if self_check.outcome == "supported":
-            return LoopDecision.SUPPORTED
-        if self_check.outcome == "not_verified":
-            return LoopDecision.NOT_VERIFIED
-        if self_check.outcome == "needs_retry":
-            return LoopDecision.RETRY
-        if self_check.outcome == "needs_refusal":
-            return LoopDecision.REFUSE
-        return LoopDecision.ERROR
+        return _answer_loop.loop_decision_for_self_check(self_check)
 
     def _verification_result_for_self_check(
         self, self_check: AnswerSelfCheck
     ) -> VerificationResult:
-        reasons = tuple(self_check.reasons)
-        if self_check.outcome == "supported":
-            outcome = VerificationOutcome.SUPPORTED
-        elif self_check.outcome == "not_verified":
-            outcome = VerificationOutcome.NOT_VERIFIED
-        elif "llm_verifier_unsupported" in reasons:
-            outcome = VerificationOutcome.UNSUPPORTED
-        elif "llm_verifier_insufficient" in reasons:
-            outcome = VerificationOutcome.INSUFFICIENT
-        else:
-            outcome = VerificationOutcome.ERROR
-
-        return VerificationResult(
-            outcome=outcome,
-            reasons=reasons,
-            verifier=self._active_backend(),
-            metadata={
-                "retry_attempted": self_check.retry_attempted,
-                "self_check_outcome": self_check.outcome,
-            },
+        return _answer_loop.verification_result_for_self_check(
+            self_check, verifier=self._active_backend()
         )
 
     def _loop_step(
@@ -2128,39 +1440,12 @@ class AILoopEngine:
     def _verifier_prompt(
         self, *, question: str, answer: str, citations: List[AnswerCitation]
     ) -> str:
-        cited_citations = self._cited_citations_for_answer(answer, citations)
-        cited_excerpts = "\n\n".join(
-            f"[{citation.citation_id}] {citation.excerpt.strip()}"
-            for citation in cited_citations
-        )
-        return (
-            "You are a strict citation verifier for a document QA system.\n"
-            "Use only the cited excerpts. Do not use outside knowledge.\n"
-            "Decide whether every factual claim in the answer is directly supported "
-            "by the cited excerpts.\n"
-            "Return only JSON with this schema: "
-            '{"outcome":"supported|unsupported|insufficient","reason":"short reason"}.\n'
-            "Use unsupported when the cited excerpts contradict any answer claim.\n"
-            "Use insufficient when the cited excerpts do not contain enough evidence.\n\n"
-            f"Question:\n{question}\n\n"
-            f"Answer:\n{answer}\n\n"
-            f"Cited excerpts:\n{cited_excerpts}"
+        return _answer_loop.verifier_prompt(
+            question=question, answer=answer, citations=citations
         )
 
     def _parse_verifier_response(self, raw_response: str) -> Tuple[Optional[str], str]:
-        json_match = re.search(r"\{.*\}", raw_response, flags=re.DOTALL)
-        if not json_match:
-            return None, "missing_json"
-        try:
-            payload = json.loads(json_match.group(0))
-        except json.JSONDecodeError:
-            return None, "invalid_json"
-
-        outcome = str(payload.get("outcome", "")).strip().lower()
-        if outcome not in VERIFIER_OUTCOMES:
-            return None, "invalid_outcome"
-        reason = str(payload.get("reason", "")).strip()
-        return outcome, reason
+        return _answer_loop.parse_verifier_response(raw_response)
 
     def _verify_answer_with_llm(
         self,
@@ -2170,67 +1455,20 @@ class AILoopEngine:
         citations: List[AnswerCitation],
         retry_attempted: bool,
     ) -> AnswerSelfCheck:
-        if self.llm is None:
-            return AnswerSelfCheck(
-                outcome="needs_refusal",
-                reasons=["llm_verifier_unavailable"],
-                retry_attempted=retry_attempted,
-            )
-
-        prompt = self._verifier_prompt(
+        return _answer_loop.verify_answer_with_llm(
+            llm=self.llm,
             question=question,
             answer=answer,
             citations=citations,
-        )
-        try:
-            raw_response = str(self.llm.invoke(prompt)).strip()
-        except Exception as exc:
-            LOGGER.warning("LLM verifier failed: %s", exc)
-            return AnswerSelfCheck(
-                outcome="needs_refusal",
-                reasons=["llm_verifier_error"],
-                retry_attempted=retry_attempted,
-            )
-
-        verifier_outcome, parse_reason = self._parse_verifier_response(raw_response)
-        if verifier_outcome is None:
-            return AnswerSelfCheck(
-                outcome="needs_refusal",
-                reasons=["llm_verifier_parse_failed", parse_reason],
-                retry_attempted=retry_attempted,
-            )
-
-        if verifier_outcome == "supported":
-            return AnswerSelfCheck(
-                outcome="supported",
-                reasons=["mechanical_checks_passed", "llm_verifier_supported"],
-                retry_attempted=retry_attempted,
-            )
-
-        return AnswerSelfCheck(
-            outcome="needs_refusal",
-            reasons=[f"llm_verifier_{verifier_outcome}"],
             retry_attempted=retry_attempted,
+            logger=LOGGER,
         )
 
     def _fail_closed_self_check(self, self_check: AnswerSelfCheck) -> AnswerSelfCheck:
-        reasons = list(self_check.reasons)
-        if "self_check_failed_closed" not in reasons:
-            reasons.insert(0, "self_check_failed_closed")
-        return AnswerSelfCheck(
-            outcome="needs_refusal",
-            reasons=reasons,
-            retry_attempted=self_check.retry_attempted,
-        )
+        return _answer_loop.fail_closed_self_check(self_check)
 
     def _self_check_retry_instruction(self, self_check: AnswerSelfCheck) -> str:
-        reasons = ", ".join(self_check.reasons)
-        return (
-            "Self-check retry instruction: the previous answer failed checks "
-            f"({reasons}). Answer again using only the context above. Include at least "
-            "one bracketed citation like [1] for supported claims. If the context does "
-            "not contain the answer, say that clearly."
-        )
+        return _answer_loop.self_check_retry_instruction(self_check)
 
     def _query_result(
         self,
@@ -2243,6 +1481,7 @@ class AILoopEngine:
         self_check: Optional[AnswerSelfCheck] = None,
         error_message: Optional[str] = None,
         loop_report: Optional[LoopReport] = None,
+        model_thinking: Optional[str] = None,
     ) -> QueryResult:
         return QueryResult(
             answer=answer,
@@ -2255,8 +1494,98 @@ class AILoopEngine:
                 citations=citations or [],
                 self_check=self_check,
                 error_message=error_message,
+                model_thinking=model_thinking,
             ),
             loop_report=loop_report,
+        )
+
+    def _active_context_provider_for_run(
+        self, active_state: ActiveDocumentState
+    ) -> Optional[ContextProvider]:
+        context_provider = active_state.context_provider
+        if (
+            active_state.retrieval_chain
+            and context_provider
+            and getattr(context_provider, "ready", bool(active_state.retrieval_chain))
+        ):
+            return context_provider
+        return None
+
+    def _context_provider_type_for_run(
+        self, active_state: ActiveDocumentState
+    ) -> str:
+        context_provider = self._active_context_provider_for_run(active_state)
+        return context_provider.provider_type if context_provider else "none"
+
+    def _direct_answer_prompt(self, question: str) -> str:
+        return (
+            "You are AI Loop Engine running without an external context provider. "
+            "Answer the user's question directly. Be concise, do not invent "
+            "citations, and say when you are unsure.\n\n"
+            f"Question: {question}\n"
+            "Answer:"
+        )
+
+    def _strip_direct_answer_citations(self, answer: str) -> str:
+        cleaned = DIRECT_STANDALONE_CITATION_MARKER_PATTERN.sub(
+            "", answer or ""
+        )
+        cleaned = cleaned.strip()
+        cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned)
+        return re.sub(r"\s{2,}", " ", cleaned).strip()
+
+    def _direct_citation_marker_ids(self, answer: str) -> List[int]:
+        standalone_ids = [
+            int(match.group(1))
+            for match in DIRECT_STANDALONE_CITATION_MARKER_PATTERN.finditer(
+                answer or ""
+            )
+        ]
+        return standalone_ids
+
+    def _last_model_thinking(self) -> Optional[str]:
+        llm_thinking = getattr(self.llm, "last_thinking", None)
+        return (
+            llm_thinking.strip()
+            if isinstance(llm_thinking, str) and llm_thinking.strip()
+            else None
+        )
+
+    def _refresh_run_model_identity(self, run: LoopRun) -> LoopRun:
+        return replace(
+            run,
+            backend=self._active_backend(),
+            model_label=self._active_model_label(),
+        )
+
+    def _record_chat_history_entry(
+        self, *, session_id: str, question: str, result: QueryResult
+    ) -> None:
+        self.chat_history.append(
+            {
+                "session_id": session_id,
+                "question": question,
+                "answer": result.answer,
+                "citations": [
+                    {
+                        "id": citation.citation_id,
+                        "source_name": citation.source_name,
+                        "page": citation.page,
+                        "chunk_index": citation.chunk_index,
+                        "excerpt": citation.excerpt,
+                    }
+                    for citation in result.trace.citations
+                ],
+                "self_check": (
+                    {
+                        "outcome": result.trace.self_check.outcome,
+                        "reasons": result.trace.self_check.reasons,
+                        "retry_attempted": result.trace.self_check.retry_attempted,
+                    }
+                    if result.trace.self_check
+                    else None
+                ),
+            }
         )
 
     def _start_loop_run(
@@ -2266,10 +1595,11 @@ class AILoopEngine:
         session_id: str,
         active_state: ActiveDocumentState,
     ) -> LoopRun:
-        context_provider = active_state.context_provider
-        context_provider_type = (
-            context_provider.provider_type if context_provider else "document"
-        )
+        context_provider = self._active_context_provider_for_run(active_state)
+        context_provider_type = self._context_provider_type_for_run(active_state)
+        untrusted_inputs = ["model_output", "future_tool_output"]
+        if context_provider_type == "document":
+            untrusted_inputs = ["document_text", "retrieved_chunks", *untrusted_inputs]
         return LoopRun(
             user_input=prompt,
             context_provider=context_provider_type,
@@ -2285,12 +1615,7 @@ class AILoopEngine:
                 ),
                 "profile": "FAST" if self.fast_mode else "QUALITY",
                 "allow_tool_calls": False,
-                "untrusted_inputs": [
-                    "document_text",
-                    "retrieved_chunks",
-                    "model_output",
-                    "future_tool_output",
-                ],
+                "untrusted_inputs": untrusted_inputs,
             },
         )
 
@@ -2562,6 +1887,7 @@ class AILoopEngine:
         self_check: Optional[AnswerSelfCheck] = None,
         error_message: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        model_thinking: Optional[str] = None,
     ) -> QueryResult:
         (
             loop_report,
@@ -2580,6 +1906,7 @@ class AILoopEngine:
             retrieved_chunk_count = 0
             citations = []
             self_check = None
+            model_thinking = None
         result = self._query_result(
             answer=answer,
             question=question,
@@ -2589,6 +1916,7 @@ class AILoopEngine:
             self_check=self_check,
             error_message=error_message,
             loop_report=loop_report,
+            model_thinking=model_thinking,
         )
         self._record_loop_report(loop_report)
         return result
@@ -2659,42 +1987,63 @@ class AILoopEngine:
                 error_message="empty_question",
             )
 
-        if not active_state.retrieval_chain:
-            run, guardrail_decision = self._append_loop_step(
-                run,
-                self._loop_step(
-                    LoopPhase.CONTEXT_SELECT,
-                    decision=LoopDecision.BLOCK,
-                    name="Select document context",
-                    output_summary="document_not_loaded",
-                    error_message="document_not_loaded",
-                    metadata={"document_name": active_state.document_name},
-                ),
-            )
-            if guardrail_decision:
-                return self._finish_guardrail_query_result(
-                    decision=guardrail_decision,
+        if not self.llm:
+            try:
+                self._ensure_llm_initialized()
+            except Exception as exc:
+                LOGGER.exception("LLM initialization failed during query.")
+                run, guardrail_decision = self._append_loop_step(
+                    run,
+                    self._loop_step(
+                        LoopPhase.ERROR,
+                        decision=LoopDecision.ERROR,
+                        name="LLM readiness",
+                        output_summary="llm_initialization_failed",
+                        error_message="llm_initialization_failed",
+                        metadata={"error_type": exc.__class__.__name__},
+                    ),
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                return self._finish_query_result(
+                    answer=(
+                        "Language model could not be initialized. Please check "
+                        "your LLM backend setup."
+                    ),
                     question=clean_prompt,
                     active_state=active_state,
                     run=run,
+                    final_decision=LoopDecision.ERROR,
+                    error_message="llm_initialization_failed",
                 )
-            return self._finish_query_result(
-                answer="Please upload and process a document first.",
-                question=clean_prompt,
-                active_state=active_state,
-                run=run,
-                final_decision=LoopDecision.BLOCK,
-                error_message="document_not_loaded",
-            )
+            run = self._refresh_run_model_identity(run)
 
+        context_provider_type = self._context_provider_type_for_run(active_state)
+        context_provider = self._active_context_provider_for_run(active_state)
+        context_output = (
+            active_state.document_name
+            if context_provider_type == "document"
+            else "no_context_provider"
+        )
         run, guardrail_decision = self._append_loop_step(
             run,
             self._loop_step(
                 LoopPhase.CONTEXT_SELECT,
                 decision=LoopDecision.CONTINUE,
-                name="Select document context",
-                output_summary=active_state.document_name,
-                metadata={"document_name": active_state.document_name},
+                name="Select context provider",
+                output_summary=context_output,
+                metadata={
+                    "document_name": active_state.document_name,
+                    "context_provider": context_provider_type,
+                    "context_provider_name": (
+                        context_provider.display_name if context_provider else None
+                    ),
+                },
             ),
         )
         if guardrail_decision:
@@ -2745,8 +2094,128 @@ class AILoopEngine:
                 metadata={"identity_answer": True},
             )
 
+        model_thinking = None
+        direct_context = not active_state.retrieval_chain
         try:
-            if hasattr(active_state.retrieval_chain, "invoke_with_trace"):
+            if direct_context:
+                planned_draft_step = self._planned_loop_step(
+                    LoopPhase.DRAFT,
+                    name="Draft direct answer",
+                    input_summary=clean_prompt,
+                )
+                guardrail_decision = self._prepare_loop_step(run, planned_draft_step)
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                raw_response = str(
+                    self.llm.invoke(self._direct_answer_prompt(clean_prompt))
+                ).strip()
+                model_thinking = self._last_model_thinking()
+                removed_inline_citation_ids = self._direct_citation_marker_ids(
+                    raw_response
+                )
+                response = self._strip_direct_answer_citations(raw_response)
+                if len(response) < 3:
+                    model_thinking = None
+                    error_metadata = {
+                        "context_provider": "none",
+                        "raw_answer_chars": len(raw_response),
+                        "removed_inline_citation_ids": removed_inline_citation_ids,
+                    }
+                    run, guardrail_decision = self._record_loop_step(
+                        run,
+                        self._loop_step(
+                            LoopPhase.DRAFT,
+                            decision=LoopDecision.ERROR,
+                            name="Draft direct answer",
+                            input_summary=clean_prompt,
+                            output_summary="empty_direct_answer",
+                            error_message="empty_direct_answer",
+                            metadata=error_metadata,
+                        ),
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    return self._finish_query_result(
+                        answer=(
+                            "The model returned an empty answer. Please try again "
+                            "or check your LLM backend."
+                        ),
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                        final_decision=LoopDecision.ERROR,
+                        error_message="empty_direct_answer",
+                    )
+                retrieved_chunk_count = 0
+                citations = []
+                self_check = AnswerSelfCheck(
+                    outcome="not_verified",
+                    reasons=list(NO_CONTEXT_SELF_CHECK_REASONS),
+                    retry_attempted=False,
+                )
+                draft_metadata = {
+                    "answer_chars": len(response),
+                    "context_provider": "none",
+                    "inline_citation_ids": self._direct_citation_marker_ids(response),
+                    "model_thinking_available": bool(model_thinking),
+                    "removed_inline_citation_ids": removed_inline_citation_ids,
+                    "trace_available": True,
+                }
+                if model_thinking:
+                    draft_metadata["model_thinking_chars"] = len(model_thinking)
+                run, guardrail_decision = self._record_loop_step(
+                    run,
+                    self._loop_step(
+                        LoopPhase.DRAFT,
+                        decision=LoopDecision.CONTINUE,
+                        name="Draft direct answer",
+                        input_summary=clean_prompt,
+                        output_summary=str(response).strip()[:500],
+                        metadata=draft_metadata,
+                    ),
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                verify_step = self._loop_step(
+                    LoopPhase.VERIFY,
+                    decision=LoopDecision.NOT_VERIFIED,
+                    name="No-context verification boundary",
+                    input_summary="answer without prompt evidence",
+                    output_summary=self_check.outcome,
+                    verification=self._verification_result_for_self_check(
+                        self_check
+                    ),
+                    metadata={
+                        "reasons": list(self_check.reasons),
+                        "citation_count": 0,
+                        "retry_attempted": False,
+                        "verifier_skipped": True,
+                    },
+                )
+                run, guardrail_decision = self._record_loop_step(run, verify_step)
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+            elif hasattr(active_state.retrieval_chain, "invoke_with_trace"):
                 supports_split_trace = (
                     hasattr(active_state.retrieval_chain, "retrieve_with_trace")
                     and hasattr(active_state.retrieval_chain, "draft_with_trace")
@@ -2840,10 +2309,14 @@ class AILoopEngine:
                 response = chain_result.answer
                 retrieved_chunk_count = chain_result.retrieved_chunk_count
                 citations = chain_result.citations
+                model_thinking = getattr(chain_result, "model_thinking", None)
                 draft_metadata = {
                     "answer_chars": len(str(response).strip()),
                     "inline_citation_ids": self._inline_citation_ids(str(response)),
+                    "model_thinking_available": bool(model_thinking),
                 }
+                if model_thinking:
+                    draft_metadata["model_thinking_chars"] = len(model_thinking)
                 if not supports_split_trace:
                     draft_metadata.update(
                         {
@@ -2939,6 +2412,18 @@ class AILoopEngine:
                     response = retry_result.answer
                     retrieved_chunk_count = retry_result.retrieved_chunk_count
                     citations = retry_result.citations
+                    model_thinking = getattr(retry_result, "model_thinking", None)
+                    retry_draft_metadata = {
+                        "answer_chars": len(str(response).strip()),
+                        "inline_citation_ids": self._inline_citation_ids(
+                            str(response)
+                        ),
+                        "model_thinking_available": bool(model_thinking),
+                    }
+                    if model_thinking:
+                        retry_draft_metadata["model_thinking_chars"] = len(
+                            model_thinking
+                        )
                     run, guardrail_decision = self._record_loop_step(
                         run,
                         self._loop_step(
@@ -2948,12 +2433,7 @@ class AILoopEngine:
                             input_summary=clean_prompt,
                             output_summary=str(response).strip()[:500],
                             retry_count=1,
-                            metadata={
-                                "answer_chars": len(str(response).strip()),
-                                "inline_citation_ids": self._inline_citation_ids(
-                                    str(response)
-                                ),
-                            },
+                            metadata=retry_draft_metadata,
                         ),
                     )
                     if guardrail_decision:
@@ -3002,6 +2482,7 @@ class AILoopEngine:
                         run=run,
                     )
                 response = active_state.retrieval_chain.invoke(clean_prompt)
+                model_thinking = self._last_model_thinking()
                 retrieved_chunk_count = 0
                 citations = []
                 self_check = None
@@ -3025,8 +2506,9 @@ class AILoopEngine:
                     )
 
             response = str(response).strip()
-            if len(response) < 3:
+            if len(response) < 3 and not direct_context:
                 response = SELF_CHECK_REFUSAL_ANSWER
+                model_thinking = None
                 run, guardrail_decision, self_check = self._run_self_check_with_loop(
                     run=run,
                     answer=response,
@@ -3048,6 +2530,7 @@ class AILoopEngine:
 
             if self_check and self_check.outcome not in SELF_CHECK_PASS_OUTCOMES:
                 response = SELF_CHECK_REFUSAL_ANSWER
+                model_thinking = None
                 if self_check.outcome != "needs_refusal":
                     self_check = self._fail_closed_self_check(self_check)
                 run, guardrail_decision = self._append_loop_step(
@@ -3087,7 +2570,9 @@ class AILoopEngine:
                 retrieved_chunk_count=retrieved_chunk_count,
                 citations=citations,
                 self_check=self_check,
+                model_thinking=model_thinking,
                 metadata={
+                    "context_provider": run.context_provider,
                     "self_check_outcome": self_check.outcome if self_check else None,
                     "retry_attempted": (
                         self_check.retry_attempted if self_check else False
@@ -3095,31 +2580,10 @@ class AILoopEngine:
                 },
             )
 
-            self.chat_history.append(
-                {
-                    "session_id": session_id,
-                    "question": clean_prompt,
-                    "answer": result.answer,
-                    "citations": [
-                        {
-                            "id": citation.citation_id,
-                            "source_name": citation.source_name,
-                            "page": citation.page,
-                            "chunk_index": citation.chunk_index,
-                            "excerpt": citation.excerpt,
-                        }
-                        for citation in result.trace.citations
-                    ],
-                    "self_check": (
-                        {
-                            "outcome": result.trace.self_check.outcome,
-                            "reasons": result.trace.self_check.reasons,
-                            "retry_attempted": result.trace.self_check.retry_attempted,
-                        }
-                        if result.trace.self_check
-                        else None
-                    ),
-                }
+            self._record_chat_history_entry(
+                session_id=session_id,
+                question=clean_prompt,
+                result=result,
             )
             return result
         except Exception as exc:
@@ -3159,3 +2623,12 @@ class AILoopEngine:
 # Backward-compatible class name. New code should import AILoopEngine from
 # src.ai_loop_engine, but existing callers may still use DocumentQA.
 DocumentQA = AILoopEngine
+
+__all__ = sorted(
+    {
+        name
+        for name in globals()
+        if not name.startswith("_")
+    }
+    | _RETRIEVAL_EXPORTS
+)

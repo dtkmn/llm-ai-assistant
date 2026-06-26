@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Loop Engine</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Local-first loop runtime</p>
+          <h1>AI Loop Engine</h1>
+        </div>
+        <div class="status-pills" aria-label="Runtime status">
+          <span class="pill" id="backend-pill">backend</span>
+          <span class="pill" id="model-pill">model</span>
+          <span class="pill" id="ready-pill">direct mode</span>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="context-panel" aria-labelledby="context-title">
+          <div class="panel-heading">
+            <h2 id="context-title">Optional Context</h2>
+            <button class="ghost-button" id="refresh-status" type="button">Refresh</button>
+          </div>
+          <form id="upload-form" class="upload-form">
+            <label>
+              Document
+              <input id="document-file" name="file" type="file" accept=".pdf,.docx,.txt,.md" />
+            </label>
+            <label>
+              Text encoding
+              <select id="text-encoding" name="text_encoding"></select>
+            </label>
+            <button id="upload-button" type="submit">Index Context</button>
+          </form>
+          <p class="status-message" id="upload-status">
+            No context indexed. You can still run the loop without documents.
+          </p>
+          <dl class="runtime-grid" id="runtime-grid"></dl>
+        </section>
+
+        <section class="chat-panel" aria-labelledby="chat-title">
+          <div class="panel-heading">
+            <h2 id="chat-title">Session</h2>
+            <button class="ghost-button" id="clear-chat" type="button">Clear</button>
+          </div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+          <form id="query-form" class="query-form">
+            <label class="visually-hidden" for="query-input">Question</label>
+            <textarea id="query-input" rows="3" placeholder="Ask anything, or ask against indexed context"></textarea>
+            <button id="query-button" type="submit">Run Loop</button>
+          </form>
+        </section>
+
+        <section class="loop-panel" aria-labelledby="timeline-title">
+          <div class="panel-heading">
+            <h2 id="timeline-title">Loop Timeline</h2>
+            <span class="decision-chip" id="final-decision">idle</span>
+          </div>
+          <div class="timeline" id="timeline"></div>
+          <details class="thinking-panel" id="thinking-panel">
+            <summary>
+              <span>Model Thinking</span>
+              <small id="thinking-state">not captured</small>
+            </summary>
+            <p id="thinking-note" class="thinking-note">
+              Model-emitted thinking is useful for debugging the loop, but it is not verified evidence.
+            </p>
+            <pre id="thinking-content">No model thinking captured for this run.</pre>
+          </details>
+          <div class="details-tabs" role="tablist" aria-label="Loop details">
+            <button class="tab-button active" type="button" data-target="summary-json">Summary</button>
+            <button class="tab-button" type="button" data-target="trace-json">Trace</button>
+          </div>
+          <pre class="json-panel" id="summary-json"></pre>
+          <pre class="json-panel hidden" id="trace-json"></pre>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

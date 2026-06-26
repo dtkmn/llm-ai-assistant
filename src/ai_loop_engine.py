@@ -12,6 +12,7 @@ try:
         MAX_DOCUMENT_CHUNKS,
         OLLAMA_BASE_URL_ENV_VAR,
         OLLAMA_MODEL_ENV_VAR,
+        OLLAMA_THINK_LEVEL_ENV_VAR,
         SELF_CHECK_REFUSAL_ANSWER,
         AILoopEngine,
         DocumentProcessingError,
@@ -28,6 +29,7 @@ except ImportError:
         MAX_DOCUMENT_CHUNKS,
         OLLAMA_BASE_URL_ENV_VAR,
         OLLAMA_MODEL_ENV_VAR,
+        OLLAMA_THINK_LEVEL_ENV_VAR,
         SELF_CHECK_REFUSAL_ANSWER,
         AILoopEngine,
         DocumentProcessingError,
@@ -51,5 +53,6 @@ __all__ = [
     "LLM_MODEL_ENV_VAR",
     "OLLAMA_BASE_URL_ENV_VAR",
     "OLLAMA_MODEL_ENV_VAR",
+    "OLLAMA_THINK_LEVEL_ENV_VAR",
     "SELF_CHECK_REFUSAL_ANSWER",
 ]

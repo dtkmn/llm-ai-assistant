@@ -39,11 +39,11 @@ USER appuser
 EXPOSE 7860
 
 # Set environment variables for the application
-ENV GRADIO_SERVER_NAME="0.0.0.0"
-ENV GRADIO_SERVER_PORT="7860"
+ENV WEB_HOST="0.0.0.0"
+ENV WEB_PORT="7860"
 ENV FAST_MODE="true"
 ENV LLM_BACKEND="auto"
 ENV APP_DEBUG="false"
 
-# Command to run the Gradio app
+# Command to run the FastAPI web app
 CMD ["python", "-m", "src.app"]
