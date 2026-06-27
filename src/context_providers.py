@@ -29,6 +29,18 @@ class DocumentContextProvider:
 
 
 @dataclass(frozen=True)
+class WebSearchContextProvider:
+    display_name: Optional[str] = "DuckDuckGo Instant Answer"
+    vector_store: Optional["FaissVectorStore"] = None
+    retrieval_chain: Optional[object] = None
+    provider_type: str = "web"
+
+    @property
+    def ready(self) -> bool:
+        return self.retrieval_chain is not None
+
+
+@dataclass(frozen=True)
 class ActiveDocumentState:
     document_name: Optional[str]
     vector_store: Optional["FaissVectorStore"]

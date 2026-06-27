@@ -90,6 +90,7 @@ class QueryRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
     recipe_id: Optional[str] = None
+    context_provider: Optional[str] = None
 
 
 class ClearChatRequest(BaseModel):
@@ -631,6 +632,7 @@ def create_app(
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
                 loop_recipe=recipe.runtime_dict(),
+                context_provider=request.context_provider,
             )
         )
         raw_loop_report = (

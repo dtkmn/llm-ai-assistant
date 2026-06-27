@@ -20,6 +20,8 @@ import src.model_adapters as model_adapters_module
 import src.retrieval as retrieval_module
 import src.retrieval_types as retrieval_types_module
 import src.runtime_config as runtime_config_module
+import src.web_contract as web_contract_module
+import src.web_search as web_search_module
 from src.ai_loop_engine import AILoopEngine, DocumentQA as PublicDocumentQA
 from src.DocumentQA import (
     DEFAULT_OLLAMA_EMBEDDINGS_MODEL,
@@ -801,6 +803,341 @@ def test_query_with_trace_returns_retrieved_citations(tmp_path):
     assert qa.chat_history[-1]["citations"][0]["source_name"] == "phoenix.txt"
 
 
+def test_query_with_trace_uses_explicit_web_search_context():
+    captured_prompts = []
+
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://www.python.org/doc/",
+                    snippet="Python is a programming language with readable syntax.",
+                )
+            ]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = SimpleNamespace(
+        invoke=lambda prompt: captured_prompts.append(prompt)
+        or "Python is a programming language [1].",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace(
+        "What is Python?",
+        session_id="web_context",
+        context_provider="web",
+    )
+
+    assert result.answer == "Python is a programming language [1]."
+    assert qa.web_search_client.calls == [("What is Python?", qa.web_search_max_results)]
+    assert captured_prompts
+    assert "Web search context" in captured_prompts[0]
+    assert "Python is a programming language with readable syntax." in captured_prompts[0]
+    assert result.trace.retrieved_chunk_count == 1
+    assert len(result.trace.citations) == 1
+    citation = result.trace.citations[0]
+    assert citation.source_name == "Python — https://www.python.org/doc/"
+    assert citation.excerpt == "Python is a programming language with readable syntax."
+    assert result.trace.self_check.outcome == "not_verified"
+
+    run = result.loop_report.run
+    assert run.context_provider == "web"
+    assert run.metadata["requested_context_provider"] == "web"
+    assert run.metadata["context_provider"] == "web"
+    assert run.metadata["context_provider_name"] == "DuckDuckGo Instant Answer"
+    assert "web_search_results" in run.metadata["untrusted_inputs"]
+    assert "document_text" not in run.metadata["untrusted_inputs"]
+    retrieve_step = next(step for step in run.steps if step.phase == LoopPhase.RETRIEVE)
+    assert retrieve_step.metadata["retrieved_chunk_count"] == 1
+    assert retrieve_step.metadata["citation_ids"] == [1]
+
+
+def test_query_with_trace_web_search_works_with_real_mock_llm():
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://www.python.org/",
+                    snippet="Python is a programming language with readable syntax.",
+                )
+            ]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace("What is Python?", context_provider="web")
+
+    assert result.answer == "Python is a programming language with readable syntax. [1]"
+    assert qa.web_search_client.calls == [("What is Python?", qa.web_search_max_results)]
+    assert result.trace.error_message is None
+    assert result.trace.retrieved_chunk_count == 1
+    assert result.trace.self_check.outcome == "not_verified"
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.final_decision == LoopDecision.NOT_VERIFIED
+
+
+def test_web_search_query_does_not_send_thread_memory_to_provider():
+    class RecordingWebSearchClient:
+        def __init__(self):
+            self.queries = []
+
+        def search(self, query, *, max_results=5):
+            self.queries.append(query)
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://www.python.org/",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = RecordingWebSearchClient()
+    qa.llm = SimpleNamespace(
+        invoke=lambda _prompt: "Python is a programming language [1].",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace(
+        "What is Python?",
+        context_provider="web",
+        conversation_history=[
+            {"role": "user", "content": "SECRET_CONVO should stay local."},
+            {"role": "assistant", "content": "Previous answer."},
+        ],
+        semantic_memory=[
+            {"role": "user", "content": "SECRET_MEMORY should stay local."},
+        ],
+        semantic_memory_status="retrieved",
+    )
+
+    assert result.answer == "Python is a programming language [1]."
+    assert qa.web_search_client.queries == ["What is Python?"]
+    assert "SECRET_CONVO" not in qa.web_search_client.queries[0]
+    assert "SECRET_MEMORY" not in qa.web_search_client.queries[0]
+
+
+def test_web_search_trace_omits_unrelated_active_document(tmp_path):
+    document = tmp_path / "old-doc.txt"
+    document.write_text("Project Phoenix is local document evidence.", encoding="utf-8")
+
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://www.python.org/",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    assert qa.status().document_name == "old-doc.txt"
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = SimpleNamespace(
+        invoke=lambda _prompt: "Python is a programming language [1].",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace("What is Python?", context_provider="web")
+    public_report = result.loop_report.to_public_dict()
+    answer_payload = web_contract_module.answer_trace_dict(result)
+    summary_payload = web_contract_module.loop_summary_dict(result)
+
+    assert result.loop_report.run.context_provider == "web"
+    assert result.trace.document_name is None
+    assert result.loop_report.run.metadata["document_name"] is None
+    context_step = next(
+        step for step in result.loop_report.run.steps if step.phase == LoopPhase.CONTEXT_SELECT
+    )
+    assert context_step.metadata["document_name"] is None
+    assert answer_payload["document"] is None
+    assert summary_payload["document"] is None
+    assert "old-doc.txt" not in json.dumps(public_report)
+
+
+def test_auto_context_provider_does_not_call_web_search_without_document():
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("auto context must not call web search")
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace("What is Python?", session_id="auto_direct")
+
+    assert "mock response" in result.answer
+    assert result.loop_report.run.context_provider == "none"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "auto"
+
+
+def test_recipe_context_provider_applies_when_query_provider_is_omitted():
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://www.python.org/",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    recipe = {
+        "recipe_id": "recipe_web",
+        "name": "Web evidence recipe",
+        "goal": "Use web evidence.",
+        "context_provider": "web",
+    }
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace("What is Python?", loop_recipe=recipe)
+
+    assert qa.web_search_client.calls == [("What is Python?", qa.web_search_max_results)]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "web"
+    assert result.answer == "Python is a programming language. [1]"
+
+
+def test_web_search_provider_failure_reports_query_error():
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise web_search_module.WebSearchError("SECRET_PROVIDER_DETAIL")
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What changed today?",
+        context_provider="web",
+    )
+
+    assert result.answer == (
+        "Web search evidence is unavailable right now. Try again or switch "
+        "Evidence to Auto or No external context."
+    )
+    assert result.trace.error_message == "web_search_failed"
+    assert result.trace.citations == []
+    assert result.loop_report.run.final_decision == LoopDecision.ERROR
+    assert result.loop_report.run.error_message == "web_search_failed"
+    assert "SECRET_PROVIDER_DETAIL" not in json.dumps(result.loop_report.to_public_dict())
+
+
+def test_web_search_result_with_malformed_url_does_not_leak_or_fail():
+    class MalformedUrlWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Example",
+                    url="https://example.com:SECRET_PORT/path",
+                    snippet="Example evidence is available.",
+                )
+            ]
+
+    captured_prompts = []
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = MalformedUrlWebSearchClient()
+    qa.llm = SimpleNamespace(
+        invoke=lambda prompt: captured_prompts.append(prompt)
+        or "Example evidence is available [1].",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace("What is available?", context_provider="web")
+    public_payload = json.dumps(result.loop_report.to_public_dict())
+
+    assert result.trace.error_message is None
+    assert result.loop_report.run.final_decision == LoopDecision.NOT_VERIFIED
+    assert result.trace.citations[0].source_name == "Example"
+    assert "SECRET_PORT" not in captured_prompts[0]
+    assert "SECRET_PORT" not in public_payload
+
+
+def test_web_search_refusal_uses_provider_neutral_evidence_wording():
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://www.python.org/",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = SimpleNamespace(
+        invoke=lambda _prompt: "Python is useful.",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace("What is Python?", context_provider="web")
+
+    assert result.answer == answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
+    assert "provided evidence" in result.answer
+    assert "document" not in result.answer.lower()
+    assert result.loop_report.run.final_decision == LoopDecision.REFUSE
+
+
+def test_invalid_context_provider_fails_closed():
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+
+    result = qa.query_with_trace("What is Python?", context_provider="internettt")
+
+    assert result.answer == "Invalid context provider. Choose auto, none, document, or web."
+    assert result.trace.error_message == "invalid_context_provider"
+    assert result.loop_report.run.final_decision == LoopDecision.BLOCK
+    assert result.loop_report.run.error_message == "invalid_context_provider"
+    assert result.loop_report.run.context_provider == "none"
+    assert result.loop_report.run.steps[0].name == "Context provider validation"
+
+
+def test_duckduckgo_instant_answer_parser_sanitizes_hits():
+    payload = {
+        "Heading": "Python",
+        "AbstractText": "<b>Python</b> is a programming language.",
+        "AbstractURL": "https://www.python.org/?secret=drop#frag",
+        "RelatedTopics": [
+            {
+                "Text": "Python - Official website",
+                "FirstURL": "javascript:alert(1)",
+            },
+            {
+                "Text": "Python downloads",
+                "FirstURL": "https://www.python.org/downloads/?token=drop",
+            },
+        ],
+    }
+
+    hits = web_search_module.parse_duckduckgo_instant_answer(payload, max_results=3)
+
+    assert hits[0] == web_search_module.WebSearchHit(
+        title="Python",
+        url="https://www.python.org/",
+        snippet="Python is a programming language.",
+    )
+    assert hits[1].title == "Web result"
+    assert hits[1].url == ""
+    assert hits[1].snippet == "Python - Official website"
+    assert hits[2].url == "https://www.python.org/downloads/"
+
+
 def test_query_trace_counts_only_prompt_included_chunks(tmp_path):
     document = tmp_path / "long-phoenix.txt"
     document.write_text(
@@ -1103,7 +1440,7 @@ def test_loop_middleware_refusal_uses_guardrail_specific_answer(tmp_path):
         "A loop guardrail refused this query before it could safely complete."
     )
     assert result.answer != (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.error_message == "policy_refused"
     assert result.loop_report.run.final_decision == LoopDecision.REFUSE
@@ -1233,7 +1570,7 @@ def test_self_check_refuses_when_answer_has_no_prompt_evidence(tmp_path):
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert result.trace.self_check.reasons == ["no_prompt_evidence"]
@@ -1505,7 +1842,7 @@ def test_self_check_refuses_when_retry_still_fails(tmp_path):
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert "self_check_failed_closed" in result.trace.self_check.reasons
@@ -1541,7 +1878,7 @@ def test_self_check_rejects_cited_but_unsupported_answer(tmp_path):
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert result.trace.self_check.reasons == ["llm_verifier_unsupported"]
@@ -1711,7 +2048,7 @@ def test_self_check_refuses_when_retry_keeps_hallucinated_inline_citation_id(tmp
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert "self_check_failed_closed" in result.trace.self_check.reasons
@@ -1749,7 +2086,7 @@ def test_llm_verifier_failures_refuse_answer(
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert result.trace.self_check.reasons == expected_reasons
@@ -1788,7 +2125,7 @@ def test_self_check_rejects_inverted_relationship_claim(tmp_path):
     result = qa.query_with_trace("Who acquired whom?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert result.trace.self_check.reasons == ["llm_verifier_unsupported"]
@@ -1826,7 +2163,7 @@ def test_self_check_rejects_denied_extractive_claim(tmp_path):
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
@@ -1867,7 +2204,7 @@ def test_self_check_rejects_later_refuted_repeated_claim(tmp_path):
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
@@ -1914,7 +2251,7 @@ def test_self_check_rejects_connector_refuted_extractive_claim(tmp_path, excerpt
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
@@ -1976,7 +2313,7 @@ def test_self_check_rejects_connector_noun_phrase_refutation(tmp_path, excerpt):
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
@@ -2062,7 +2399,7 @@ def test_self_check_rejects_prefix_refuted_extractive_claim(tmp_path):
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
@@ -2107,7 +2444,7 @@ def test_self_check_rejects_qa_style_denied_extractive_claim(tmp_path, excerpt):
     result = qa.query_with_trace("When does Project Phoenix launch?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert "citation_text_does_not_support_answer" in result.trace.self_check.reasons
@@ -2178,7 +2515,7 @@ def test_self_check_rejects_false_premise_question_token_laundering(tmp_path):
     result = qa.query_with_trace("Does Project Phoenix launch tomorrow?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert result.trace.self_check.reasons == ["llm_verifier_unsupported"]
@@ -2202,7 +2539,7 @@ def test_self_check_rejects_unchecked_unicode_claim(tmp_path):
     result = qa.query_with_trace("What greeting is in the document?")
 
     assert result.answer == (
-        "I could not find enough relevant information in the document to answer that."
+        answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     )
     assert result.trace.self_check.outcome == "needs_refusal"
     assert result.trace.self_check.reasons == ["llm_verifier_unsupported"]

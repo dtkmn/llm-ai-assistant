@@ -60,14 +60,17 @@ first context provider, not the product boundary.
   hashing for deterministic demos/tests.
 - `LLM_BACKEND=auto` must select Ollama only. It must not silently select mock,
   provider-specific hosted backends, or in-process model loading.
-- Product identity is AI Loop Engine. Treat document answering as
-  the first context provider capability, not the repo's strategic identity.
-- Document context is the first `ContextProvider`; keep provider identity in
-  loop reports instead of hardcoding document-specific assumptions in UI code.
-- Document context is optional at query time. No-context answers may draft with
-  the selected LLM backend, but they must report `context_provider="none"`,
-  zero citations, and `not_verified`; do not run document verifier support
-  claims without prompt evidence.
+- Product identity is AI Loop Engine. Treat document answering and explicit web
+  evidence as context provider capabilities, not the repo's strategic identity.
+- Document and web evidence are `ContextProvider`-shaped capabilities; keep
+  provider identity in loop reports instead of hardcoding document-specific
+  assumptions in UI code.
+- Document context is optional at query time, and web context must be explicit.
+  No-context answers may draft with the selected LLM backend, but they must
+  report `context_provider="none"`, zero citations, and `not_verified`; do not
+  run verifier support claims without prompt evidence. `context_provider=web`
+  may use fixed web-search snippets as prompt evidence; `auto` must not search
+  the web by surprise.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRecipe`, `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`,
   `LoopPolicy`, `LoopSession`, `GuardrailDecision`, `LoopMiddleware`,
@@ -165,6 +168,7 @@ first context provider, not the product boundary.
 - `src/env_file.py`
 - `src/runtime_config.py`
 - `src/model_adapters.py`
+- `src/web_search.py`
 - `src/answer_loop.py`
 - `src/DocumentQA.py`
 - `src/loop_engine.py`

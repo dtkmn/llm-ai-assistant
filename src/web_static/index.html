@@ -112,6 +112,16 @@
           </div>
           <div class="messages" id="messages" aria-live="polite"></div>
           <form id="query-form" class="query-form">
+            <label class="query-context-control">
+              Evidence
+              <select id="query-context" name="context_provider">
+                <option value="">Recipe default</option>
+                <option value="auto">Auto</option>
+                <option value="document">Indexed document</option>
+                <option value="web">Web search</option>
+                <option value="none">No external context</option>
+              </select>
+            </label>
             <label class="visually-hidden" for="query-input">Question</label>
             <textarea id="query-input" rows="3" placeholder="Ask anything, or ask against indexed context"></textarea>
             <button id="query-button" type="submit">Run Loop</button>

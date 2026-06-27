@@ -120,12 +120,14 @@ class FakeQA:
         semantic_memory=None,
         semantic_memory_status="not_requested",
         loop_recipe=None,
+        context_provider=None,
     ):
         self.last_query_session_id = session_id
         self.last_conversation_history = list(conversation_history or [])
         self.last_semantic_memory = list(semantic_memory or [])
         self.last_semantic_memory_status = semantic_memory_status
         self.last_loop_recipe = dict(loop_recipe or {})
+        self.last_context_provider = context_provider
         active_backend = self.active_llm_backend or self.llm_backend
         active_model_label = (
             self.loaded_model_label
@@ -632,12 +634,14 @@ globalThis.fetch = async (url, options = {}) => {
 
 await importFreshApp();
 await tick();
+dom["query-context"].value = "web";
 dom["query-input"].value = "What happened?";
 await dom["query-form"].dispatch("submit");
 
 assert.equal(queryBodies.length, 1);
 assert.ok(queryBodies[0].session_id.startsWith("thread_"));
 assert.equal(queryBodies[0].recipe_id, "recipe_general_loop");
+assert.equal(queryBodies[0].context_provider, "web");
 const assistantMessage = findNode(
   dom.messages,
   (node) => node.className === "message assistant",
@@ -741,6 +745,89 @@ assert.ok(
 assert.ok(
   nodeText(dom["memory-status"]).includes("last run did not use thread memory"),
   "clear should reset last-run memory status",
+);
+'''
+    )
+
+
+def test_static_frontend_omits_context_provider_for_recipe_default():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  importFreshApp,
+  jsonResponse,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
+
+const dom = createDom();
+const queryBodies = [];
+const recipes = [{
+  recipe_id: "recipe_general_loop",
+  name: "Web recipe",
+  goal: "Use web evidence by default.",
+  context_provider: "web",
+  model_profile: "quality",
+  verifier: "default",
+  instructions: "Search when evidence is needed.",
+  success_criteria: ["Uses the recipe context provider."],
+  stop_condition: "Stop when answered.",
+  is_default: true,
+}];
+
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ title: "AI Loop Engine" });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({
+      backend: "mock",
+      model: "MockLLM",
+      ready_for_queries: false,
+      query_mode: "direct",
+      profile: "FAST",
+    });
+  }
+  if (url === "/api/threads") {
+    return jsonResponse({ threads: [createThreadPayload("thread_initial")] });
+  }
+  if (url === "/api/threads/thread_initial" && method === "GET") {
+    return jsonResponse(createThreadPayload("thread_initial"));
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/query" && method === "POST") {
+    const request = JSON.parse(options.body);
+    queryBodies.push(request);
+    return jsonResponse({
+      answer: "Using recipe context.",
+      summary: { context_provider: "web" },
+      timeline: { rows: [], final_decision: "not_verified" },
+      trace: {},
+      thread: createThreadPayload(request.session_id),
+    });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+
+await importFreshApp();
+await tick();
+assert.equal(dom["query-context"].value, "");
+dom["query-input"].value = "What changed?";
+await dom["query-form"].dispatch("submit");
+
+assert.equal(queryBodies.length, 1);
+assert.equal(queryBodies[0].recipe_id, "recipe_general_loop");
+assert.ok(
+  !Object.hasOwn(queryBodies[0], "context_provider"),
+  "recipe-default evidence mode must omit context_provider",
 );
 '''
     )
@@ -1506,6 +1593,24 @@ def test_query_endpoint_passes_session_id_to_loop_runtime():
     )
 
 
+def test_query_endpoint_passes_context_provider_to_loop_runtime():
+    fake_qa = FakeQA()
+    client = TestClient(web_app.create_app(fake_qa))
+
+    response = client.post(
+        "/api/query",
+        json={
+            "message": "What changed today?",
+            "session_id": "thread_web",
+            "context_provider": "web",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_qa.last_query_session_id == "thread_web"
+    assert fake_qa.last_context_provider == "web"
+
+
 def test_query_endpoint_applies_selected_loop_recipe():
     fake_qa = FakeQA()
     store = ThreadStore.in_memory()
@@ -1833,6 +1938,7 @@ def test_query_endpoint_does_not_persist_partial_turn_on_runtime_failure():
             semantic_memory=None,
             semantic_memory_status="not_requested",
             loop_recipe=None,
+            context_provider=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
@@ -1875,12 +1981,14 @@ def test_clear_chat_blocks_stale_in_flight_query_persistence():
             semantic_memory=None,
             semantic_memory_status="not_requested",
             loop_recipe=None,
+            context_provider=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
             self.last_semantic_memory = list(semantic_memory or [])
             self.last_semantic_memory_status = semantic_memory_status
             self.last_loop_recipe = dict(loop_recipe or {})
+            self.last_context_provider = context_provider
             self.started.set()
             if not self.release.wait(timeout=5):
                 raise RuntimeError("timed out waiting for test release")
@@ -1891,6 +1999,7 @@ def test_clear_chat_blocks_stale_in_flight_query_persistence():
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
                 loop_recipe=loop_recipe,
+                context_provider=context_provider,
             )
 
     fake_qa = BlockingQA()
@@ -1940,12 +2049,14 @@ def test_delete_thread_blocks_stale_in_flight_query_resurrection():
             semantic_memory=None,
             semantic_memory_status="not_requested",
             loop_recipe=None,
+            context_provider=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
             self.last_semantic_memory = list(semantic_memory or [])
             self.last_semantic_memory_status = semantic_memory_status
             self.last_loop_recipe = dict(loop_recipe or {})
+            self.last_context_provider = context_provider
             self.started.set()
             if not self.release.wait(timeout=5):
                 raise RuntimeError("timed out waiting for test release")
@@ -1956,6 +2067,7 @@ def test_delete_thread_blocks_stale_in_flight_query_resurrection():
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
                 loop_recipe=loop_recipe,
+                context_provider=context_provider,
             )
 
     fake_qa = BlockingQA()
@@ -1997,12 +2109,14 @@ def test_delete_recreate_blocks_stale_in_flight_query_resurrection():
             semantic_memory=None,
             semantic_memory_status="not_requested",
             loop_recipe=None,
+            context_provider=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
             self.last_semantic_memory = list(semantic_memory or [])
             self.last_semantic_memory_status = semantic_memory_status
             self.last_loop_recipe = dict(loop_recipe or {})
+            self.last_context_provider = context_provider
             self.started.set()
             if not self.release.wait(timeout=5):
                 raise RuntimeError("timed out waiting for test release")
@@ -2013,6 +2127,7 @@ def test_delete_recreate_blocks_stale_in_flight_query_resurrection():
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
                 loop_recipe=loop_recipe,
+                context_provider=context_provider,
             )
 
     fake_qa = BlockingQA()

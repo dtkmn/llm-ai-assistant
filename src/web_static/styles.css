@@ -225,6 +225,10 @@ section {
   gap: 12px;
 }
 
+.query-context-control {
+  max-width: 260px;
+}
+
 label {
   color: var(--muted);
   display: grid;

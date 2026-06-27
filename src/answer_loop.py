@@ -12,7 +12,7 @@ except ImportError:
 
 
 SELF_CHECK_REFUSAL_ANSWER = (
-    "I could not find enough relevant information in the document to answer that."
+    "I could not find enough relevant information in the provided evidence to answer that."
 )
 FORMAT_CHECK_FAILURE_ANSWER = (
     "The model answer failed formatting checks after retry. Please try again."
@@ -615,7 +615,7 @@ def verifier_prompt(
         for citation in cited_citations
     )
     return (
-        "You are a strict citation verifier for a document QA system.\n"
+        "You are a strict citation verifier for an evidence-grounded AI loop.\n"
         "Use only the cited excerpts. Do not use outside knowledge.\n"
         "Decide whether every factual claim in the answer is directly supported "
         "by the cited excerpts.\n"

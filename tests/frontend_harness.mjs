@@ -192,6 +192,7 @@ export function createDom() {
     "refresh-status",
     "runtime-grid",
     "query-form",
+    "query-context",
     "query-input",
     "query-button",
     "clear-chat",

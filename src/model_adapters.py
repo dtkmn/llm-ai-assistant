@@ -237,8 +237,12 @@ class MockLLM(LLM):
         return "mock"
 
     def _call(self, prompt: str, stop: Optional[List[str]] = None, **kwargs) -> str:
-        if "context:" in prompt.lower():
-            context = prompt.split("Context:", 1)[1].split("Question:", 1)[0]
+        context_match = re.search(
+            r"(?is)(?:^|\n)(?:web search context|context):\s*(.*?)(?:\n\s*Question:|\Z)",
+            prompt,
+        )
+        if context_match:
+            context = context_match.group(1)
             citation_id = None
             for line in context.splitlines():
                 stripped_line = line.strip()

@@ -64,7 +64,7 @@ unless that capture is disabled.
 | --- | --- | --- |
 | `LoopSession.session_id` | trace `group_id` | Groups related runs in one conversation/session. |
 | `LoopRun.run_id` | trace metadata and/or trace id suffix | Preserve the internal id; do not require OpenAI id format internally. |
-| `LoopRun.context_provider` | trace metadata | Example: `document`. Later: web, memory, tool, etc. |
+| `LoopRun.context_provider` | trace metadata | Examples: `document`, `web`, or `none`. |
 | `LoopStep.phase=context_select/retrieve` | custom span | These are AI Loop Engine-specific context phases. |
 | `LoopStep.phase=draft` | generation-like span or custom span | Use generation span only if OpenAI SDK data shape can represent the model call honestly. |
 | `LoopStep.phase=format_check` | custom span | Presentation/readability gate, not evidence verification. |

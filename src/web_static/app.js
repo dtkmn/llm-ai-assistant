@@ -46,6 +46,7 @@ const elements = {
   refreshStatus: document.querySelector("#refresh-status"),
   runtimeGrid: document.querySelector("#runtime-grid"),
   queryForm: document.querySelector("#query-form"),
+  queryContext: document.querySelector("#query-context"),
   queryInput: document.querySelector("#query-input"),
   queryButton: document.querySelector("#query-button"),
   clearButton: document.querySelector("#clear-chat"),
@@ -1271,14 +1272,19 @@ async function runQuery(event) {
 
   setBusy(elements.queryButton, true, "Run Loop");
   try {
+    const queryPayload = {
+      message,
+      session_id: requestThreadId,
+      recipe_id: state.activeRecipeId || undefined,
+    };
+    const contextProvider = String(elements.queryContext?.value || "").trim();
+    if (contextProvider) {
+      queryPayload.context_provider = contextProvider;
+    }
     const result = await requestJson("/api/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        message,
-        session_id: requestThreadId,
-        recipe_id: state.activeRecipeId || undefined,
-      }),
+      body: JSON.stringify(queryPayload),
     });
     const targetThread = threadById(requestThreadId);
     if (!targetThread || normalizedRevision(targetThread.revision) !== requestRevision) {

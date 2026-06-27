@@ -136,8 +136,12 @@ try:
         OPENAI_COMPAT_EMBEDDINGS_MODEL_ENV_VAR,
         OPENAI_COMPAT_MODEL_ENV_VAR,
         OPENAI_COMPAT_TIMEOUT_ENV_VAR,
+        DEFAULT_WEB_SEARCH_MAX_RESULTS,
+        DEFAULT_WEB_SEARCH_TIMEOUT,
         SUPPORTED_EMBEDDINGS_MODELS,
         SUPPORTED_LLM_BACKENDS,
+        WEB_SEARCH_MAX_RESULTS_ENV_VAR,
+        WEB_SEARCH_TIMEOUT_ENV_VAR,
         env_flag,
         env_int,
         env_int_range,
@@ -171,8 +175,12 @@ except ImportError:
         OPENAI_COMPAT_EMBEDDINGS_MODEL_ENV_VAR,
         OPENAI_COMPAT_MODEL_ENV_VAR,
         OPENAI_COMPAT_TIMEOUT_ENV_VAR,
+        DEFAULT_WEB_SEARCH_MAX_RESULTS,
+        DEFAULT_WEB_SEARCH_TIMEOUT,
         SUPPORTED_EMBEDDINGS_MODELS,
         SUPPORTED_LLM_BACKENDS,
+        WEB_SEARCH_MAX_RESULTS_ENV_VAR,
+        WEB_SEARCH_TIMEOUT_ENV_VAR,
         env_flag,
         env_int,
         env_int_range,
@@ -251,6 +259,7 @@ MAX_CONVERSATION_CONTEXT_MESSAGE_CHARS = 1200
 MAX_LOOP_RECIPE_FIELD_CHARS = 1600
 MAX_LOOP_RECIPE_CRITERIA = 8
 SEMANTIC_MEMORY_STATUSES = {"not_requested", "retrieved", "empty", "unavailable"}
+QUERY_CONTEXT_PROVIDERS = {"auto", "none", "document", "web"}
 _RETRIEVAL_EXPORTS = {
     "DocumentRetrievalChain",
     "FaissRetriever",
@@ -339,6 +348,15 @@ def _retrieval_module():
         import retrieval
 
     return retrieval
+
+
+def _web_search_module():
+    try:
+        from . import web_search
+    except ImportError:
+        import web_search
+
+    return web_search
 
 
 def _retrieval_export(name: str):
@@ -577,6 +595,19 @@ class AILoopEngine:
             OPENAI_COMPAT_MODEL_ENV_VAR, ""
         ).strip()
         self.openai_compat_timeout = env_int(OPENAI_COMPAT_TIMEOUT_ENV_VAR, 120)
+        self.web_search_timeout = env_int_range(
+            WEB_SEARCH_TIMEOUT_ENV_VAR,
+            DEFAULT_WEB_SEARCH_TIMEOUT,
+            minimum=2,
+            maximum=60,
+        )
+        self.web_search_max_results = env_int_range(
+            WEB_SEARCH_MAX_RESULTS_ENV_VAR,
+            DEFAULT_WEB_SEARCH_MAX_RESULTS,
+            minimum=1,
+            maximum=8,
+        )
+        self.web_search_client = None
         self.model_thinking_enabled = env_flag(MODEL_THINKING_ENV_VAR, True)
         self.embeddings_model = self._resolve_embeddings_model(embeddings_model)
         self.embeddings_device = self._normalize_embeddings_device(embeddings_device)
@@ -1604,11 +1635,14 @@ class AILoopEngine:
         loop_report: Optional[LoopReport] = None,
         model_thinking: Optional[str] = None,
     ) -> QueryResult:
+        trace_document_name = active_state.document_name
+        if loop_report and loop_report.run.context_provider != "document":
+            trace_document_name = None
         return QueryResult(
             answer=answer,
             trace=AnswerTrace(
                 question=question,
-                document_name=active_state.document_name,
+                document_name=trace_document_name,
                 backend=self._active_backend(),
                 model_label=self._active_model_label(),
                 retrieved_chunk_count=retrieved_chunk_count,
@@ -1637,6 +1671,54 @@ class AILoopEngine:
     ) -> str:
         context_provider = self._active_context_provider_for_run(active_state)
         return context_provider.provider_type if context_provider else "none"
+
+    def _normalize_query_context_provider(
+        self,
+        context_provider: Optional[str],
+        loop_recipe: Optional[Mapping[str, Any]],
+    ) -> str:
+        requested = str(context_provider or "").strip().lower()
+        if not requested and isinstance(loop_recipe, Mapping):
+            requested = str(loop_recipe.get("context_provider") or "").strip().lower()
+        requested = requested or "auto"
+        if requested not in QUERY_CONTEXT_PROVIDERS:
+            raise ValueError(
+                "context_provider must be one of auto, none, document, or web."
+            )
+        return requested
+
+    def _resolve_query_context_provider(
+        self, requested_provider: str, active_state: ActiveDocumentState
+    ) -> str:
+        if requested_provider == "none":
+            return "none"
+        if requested_provider == "web":
+            return "web"
+        if requested_provider == "document":
+            return "document" if active_state.retrieval_chain else "none"
+        return "document" if active_state.retrieval_chain else "none"
+
+    def _context_provider_display_name(
+        self, provider_type: str, active_state: ActiveDocumentState
+    ) -> Optional[str]:
+        if provider_type == "document":
+            context_provider = self._active_context_provider_for_run(active_state)
+            return context_provider.display_name if context_provider else None
+        if provider_type == "web":
+            return "DuckDuckGo Instant Answer"
+        return None
+
+    def _build_web_search_chain(self):
+        web_search = _web_search_module()
+        client = self.web_search_client or web_search.DuckDuckGoInstantAnswerSearch(
+            timeout=self.web_search_timeout,
+        )
+        return web_search.WebSearchRetrievalChain(
+            search_client=client,
+            llm=self.llm,
+            profile=self.profile,
+            max_results=self.web_search_max_results,
+        )
 
     def _conversation_entry_value(self, entry: object, key: str) -> object:
         if isinstance(entry, Mapping):
@@ -1959,17 +2041,31 @@ class AILoopEngine:
         prompt: str,
         session_id: str,
         active_state: ActiveDocumentState,
+        requested_context_provider: str = "auto",
+        resolved_context_provider: Optional[str] = None,
         conversation_context_turns: int = 0,
         semantic_memory_turns: int = 0,
         semantic_memory_status: str = "not_requested",
         loop_recipe: Optional[Mapping[str, Any]] = None,
     ) -> LoopRun:
-        context_provider = self._active_context_provider_for_run(active_state)
-        context_provider_type = self._context_provider_type_for_run(active_state)
+        context_provider_type = (
+            resolved_context_provider
+            if resolved_context_provider in {"none", "document", "web"}
+            else self._context_provider_type_for_run(active_state)
+        )
+        context_provider_name = self._context_provider_display_name(
+            context_provider_type,
+            active_state,
+        )
         recipe = self._normalize_loop_recipe(loop_recipe)
         untrusted_inputs = ["model_output", "future_tool_output"]
         if context_provider_type == "document":
             untrusted_inputs = ["document_text", "retrieved_chunks", *untrusted_inputs]
+        elif context_provider_type == "web":
+            untrusted_inputs = ["web_search_results", *untrusted_inputs]
+        used_document_name = (
+            active_state.document_name if context_provider_type == "document" else None
+        )
         return LoopRun(
             user_input=prompt,
             context_provider=context_provider_type,
@@ -1978,11 +2074,10 @@ class AILoopEngine:
             session_id=session_id,
             policy=LoopPolicy(max_retries=1),
             metadata={
-                "document_name": active_state.document_name,
+                "document_name": used_document_name,
+                "requested_context_provider": requested_context_provider,
                 "context_provider": context_provider_type,
-                "context_provider_name": (
-                    context_provider.display_name if context_provider else None
-                ),
+                "context_provider_name": context_provider_name,
                 "conversation_context_turns": conversation_context_turns,
                 "semantic_memory_turns": semantic_memory_turns,
                 "semantic_memory_status": semantic_memory_status,
@@ -2404,6 +2499,7 @@ class AILoopEngine:
         semantic_memory: Optional[Sequence[object]] = None,
         semantic_memory_status: str = "not_requested",
         loop_recipe: Optional[Mapping[str, Any]] = None,
+        context_provider: Optional[str] = None,
     ) -> QueryResult:
         """Answer a user query and return the retrieved evidence used."""
         active_state = self._snapshot_active_document_state()
@@ -2418,6 +2514,45 @@ class AILoopEngine:
             semantic_memory_status
         )
         loop_recipe_context = self._normalize_loop_recipe(loop_recipe)
+        try:
+            requested_context_provider = self._normalize_query_context_provider(
+                context_provider,
+                loop_recipe_context,
+            )
+        except ValueError as exc:
+            run = self._start_loop_run(
+                prompt=clean_prompt,
+                session_id=session_id,
+                active_state=active_state,
+                requested_context_provider=str(context_provider or "auto"),
+                resolved_context_provider="none",
+                conversation_context_turns=len(conversation_context),
+                semantic_memory_turns=len(semantic_memory_context),
+                semantic_memory_status=semantic_memory_status,
+                loop_recipe=loop_recipe_context,
+            )
+            run = run.with_step(
+                self._loop_step(
+                    LoopPhase.INPUT,
+                    decision=LoopDecision.BLOCK,
+                    name="Context provider validation",
+                    output_summary="invalid_context_provider",
+                    error_message="invalid_context_provider",
+                    metadata={"error_type": exc.__class__.__name__},
+                )
+            )
+            return self._finish_query_result(
+                answer="Invalid context provider. Choose auto, none, document, or web.",
+                question=clean_prompt,
+                active_state=active_state,
+                run=run,
+                final_decision=LoopDecision.BLOCK,
+                error_message="invalid_context_provider",
+            )
+        resolved_context_provider = self._resolve_query_context_provider(
+            requested_context_provider,
+            active_state,
+        )
         effective_prompt = self._question_with_conversation_context(
             clean_prompt,
             conversation_context,
@@ -2431,6 +2566,8 @@ class AILoopEngine:
             prompt=clean_prompt,
             session_id=session_id,
             active_state=active_state,
+            requested_context_provider=requested_context_provider,
+            resolved_context_provider=resolved_context_provider,
             conversation_context_turns=len(conversation_context),
             semantic_memory_turns=len(semantic_memory_context),
             semantic_memory_status=semantic_memory_status,
@@ -2541,11 +2678,16 @@ class AILoopEngine:
                 )
             run = self._refresh_run_model_identity(run)
 
-        context_provider_type = self._context_provider_type_for_run(active_state)
-        context_provider = self._active_context_provider_for_run(active_state)
+        context_provider_type = resolved_context_provider
+        context_provider_name = self._context_provider_display_name(
+            context_provider_type,
+            active_state,
+        )
         context_output = (
             active_state.document_name
             if context_provider_type == "document"
+            else "web_search"
+            if context_provider_type == "web"
             else "no_context_provider"
         )
         run, guardrail_decision = self._append_loop_step(
@@ -2556,11 +2698,14 @@ class AILoopEngine:
                 name="Select context provider",
                 output_summary=context_output,
                 metadata={
-                    "document_name": active_state.document_name,
-                    "context_provider": context_provider_type,
-                    "context_provider_name": (
-                        context_provider.display_name if context_provider else None
+                    "document_name": (
+                        active_state.document_name
+                        if context_provider_type == "document"
+                        else None
                     ),
+                    "requested_context_provider": requested_context_provider,
+                    "context_provider": context_provider_type,
+                    "context_provider_name": context_provider_name,
                 },
             ),
         )
@@ -2629,7 +2774,11 @@ class AILoopEngine:
                 error_message="llm_not_initialized",
             )
 
-        if active_state.document_name and self._is_document_identity_question(clean_prompt):
+        if (
+            context_provider_type == "document"
+            and active_state.document_name
+            and self._is_document_identity_question(clean_prompt)
+        ):
             return self._finish_query_result(
                 answer=f"The uploaded document is `{active_state.document_name}`.",
                 question=clean_prompt,
@@ -2640,7 +2789,16 @@ class AILoopEngine:
             )
 
         model_thinking = None
-        direct_context = not active_state.retrieval_chain
+        context_retrieval_chain = None
+        if context_provider_type == "document":
+            context_retrieval_chain = active_state.retrieval_chain
+        elif context_provider_type == "web":
+            context_retrieval_chain = self._build_web_search_chain()
+        provider_query_prompt = (
+            clean_prompt if context_provider_type == "web" else effective_prompt
+        )
+
+        direct_context = context_retrieval_chain is None
         try:
             if direct_context:
                 planned_draft_step = self._planned_loop_step(
@@ -2671,6 +2829,7 @@ class AILoopEngine:
                     model_thinking = None
                     error_metadata = {
                         "context_provider": "none",
+                        "requested_context_provider": requested_context_provider,
                         "raw_answer_chars": len(raw_response),
                         "removed_inline_citation_ids": removed_inline_citation_ids,
                     }
@@ -2714,6 +2873,7 @@ class AILoopEngine:
                 draft_metadata = {
                     "answer_chars": len(response),
                     "context_provider": "none",
+                    "requested_context_provider": requested_context_provider,
                     "inline_citation_ids": self._direct_citation_marker_ids(response),
                     "model_thinking_available": bool(model_thinking),
                     "removed_inline_citation_ids": removed_inline_citation_ids,
@@ -2805,6 +2965,7 @@ class AILoopEngine:
                         model_thinking = None
                         error_metadata = {
                             "context_provider": "none",
+                            "requested_context_provider": requested_context_provider,
                             "raw_answer_chars": len(raw_response),
                             "removed_inline_citation_ids": removed_inline_citation_ids,
                             "retry_reason": "format_check",
@@ -2843,6 +3004,7 @@ class AILoopEngine:
                     retry_draft_metadata = {
                         "answer_chars": len(response),
                         "context_provider": "none",
+                        "requested_context_provider": requested_context_provider,
                         "inline_citation_ids": self._direct_citation_marker_ids(
                             response
                         ),
@@ -2920,10 +3082,10 @@ class AILoopEngine:
                         active_state=active_state,
                         run=run,
                     )
-            elif hasattr(active_state.retrieval_chain, "invoke_with_trace"):
+            elif hasattr(context_retrieval_chain, "invoke_with_trace"):
                 supports_split_trace = (
-                    hasattr(active_state.retrieval_chain, "retrieve_with_trace")
-                    and hasattr(active_state.retrieval_chain, "draft_with_trace")
+                    hasattr(context_retrieval_chain, "retrieve_with_trace")
+                    and hasattr(context_retrieval_chain, "draft_with_trace")
                 )
                 planned_retrieve_step = self._planned_loop_step(
                     LoopPhase.RETRIEVE,
@@ -2941,8 +3103,8 @@ class AILoopEngine:
                         run=run,
                     )
                 if supports_split_trace:
-                    retrieved_context = active_state.retrieval_chain.retrieve_with_trace(
-                        effective_prompt
+                    retrieved_context = context_retrieval_chain.retrieve_with_trace(
+                        provider_query_prompt
                     )
                     retrieved_chunk_count = retrieved_context.retrieved_chunk_count
                     citations = retrieved_context.citations
@@ -2985,7 +3147,7 @@ class AILoopEngine:
                             active_state=active_state,
                             run=run,
                         )
-                    chain_result = active_state.retrieval_chain.draft_with_trace(
+                    chain_result = context_retrieval_chain.draft_with_trace(
                         draft_prompt,
                         retrieved_context,
                     )
@@ -3005,8 +3167,8 @@ class AILoopEngine:
                             active_state=active_state,
                             run=run,
                         )
-                    chain_result = active_state.retrieval_chain.invoke_with_trace(
-                        effective_prompt
+                    chain_result = context_retrieval_chain.invoke_with_trace(
+                        provider_query_prompt
                     )
                     retrieved_chunk_count = chain_result.retrieved_chunk_count
                     citations = chain_result.citations
@@ -3067,7 +3229,7 @@ class AILoopEngine:
                         run=run,
                     )
                 if format_check.outcome == "needs_retry" and hasattr(
-                    active_state.retrieval_chain, "retry_with_trace"
+                    context_retrieval_chain, "retry_with_trace"
                 ):
                     run, guardrail_decision = self._append_loop_step(
                         run,
@@ -3102,7 +3264,7 @@ class AILoopEngine:
                             active_state=active_state,
                             run=run,
                         )
-                    retry_result = active_state.retrieval_chain.retry_with_trace(
+                    retry_result = context_retrieval_chain.retry_with_trace(
                         draft_prompt,
                         chain_result,
                         self_check_instruction=self._format_check_retry_instruction(
@@ -3185,7 +3347,7 @@ class AILoopEngine:
                         reasons=["self_check_interrupted"],
                     )
                 if self_check.outcome == "needs_retry" and hasattr(
-                    active_state.retrieval_chain, "retry_with_trace"
+                    context_retrieval_chain, "retry_with_trace"
                 ):
                     run, guardrail_decision = self._append_loop_step(
                         run,
@@ -3220,7 +3382,7 @@ class AILoopEngine:
                             active_state=active_state,
                             run=run,
                         )
-                    retry_result = active_state.retrieval_chain.retry_with_trace(
+                    retry_result = context_retrieval_chain.retry_with_trace(
                         draft_prompt,
                         chain_result,
                         self_check_instruction=self._self_check_retry_instruction(
@@ -3320,7 +3482,7 @@ class AILoopEngine:
                         active_state=active_state,
                         run=run,
                     )
-                response = active_state.retrieval_chain.invoke(effective_prompt)
+                response = context_retrieval_chain.invoke(provider_query_prompt)
                 model_thinking = self._last_model_thinking()
                 retrieved_chunk_count = 0
                 citations = []
@@ -3453,6 +3615,32 @@ class AILoopEngine:
             )
             return result
         except Exception as exc:
+            if (
+                resolved_context_provider == "web"
+                and exc.__class__.__name__ == "WebSearchError"
+            ):
+                LOGGER.info("Web search provider failed.")
+                run = run.with_step(
+                    self._loop_step(
+                        LoopPhase.ERROR,
+                        decision=LoopDecision.ERROR,
+                        name="Web search retrieval",
+                        output_summary="web_search_failed",
+                        error_message="web_search_failed",
+                        metadata={"error_type": exc.__class__.__name__},
+                    )
+                )
+                return self._finish_query_result(
+                    answer=(
+                        "Web search evidence is unavailable right now. Try again "
+                        "or switch Evidence to Auto or No external context."
+                    ),
+                    question=clean_prompt,
+                    active_state=active_state,
+                    run=run,
+                    final_decision=LoopDecision.ERROR,
+                    error_message="web_search_failed",
+                )
             LOGGER.exception("Error while processing query.")
             error_decision = self._run_loop_middleware("on_error", run, exc)
             if error_decision:
@@ -3488,6 +3676,7 @@ class AILoopEngine:
         conversation_history: Optional[Sequence[object]] = None,
         semantic_memory: Optional[Sequence[object]] = None,
         semantic_memory_status: str = "not_requested",
+        context_provider: Optional[str] = None,
     ) -> str:
         """Answer a user query using retrieved document context."""
         return self.query_with_trace(
@@ -3496,6 +3685,7 @@ class AILoopEngine:
             conversation_history=conversation_history,
             semantic_memory=semantic_memory,
             semantic_memory_status=semantic_memory_status,
+            context_provider=context_provider,
         ).answer
 
 

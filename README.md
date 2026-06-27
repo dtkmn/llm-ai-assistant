@@ -2,8 +2,9 @@
 AI Loop Engine is a local-first engine for inspecting and hardening AI answer
 loops: context selection, retrieval, drafting, format checks, citation checks,
 claim verification, retries, refusals, middleware guardrails, evals, and replay. The
-current built-in context source is document upload, but the product focus is the
-loop: making agent behavior visible, testable, and harder to fake.
+current built-in context sources are document upload and explicit web search,
+but the product focus is the loop: making agent behavior visible, testable, and
+harder to fake.
 
 ## Features
 - **Loop Engineering Core:** Treats retrieval, drafting, format checks, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
@@ -15,6 +16,9 @@ loop: making agent behavior visible, testable, and harder to fake.
 - **Loop Recipes / Skills:** Provides saved loop recipes for goal, instructions,
   success criteria, stop condition, context provider, model profile, and verifier
   metadata
+- **Explicit Web Evidence:** Allows a query to opt into web-search snippets as
+  prompt evidence with citations; `auto` mode stays local and never searches the
+  web by surprise
 - **Local-first LLM Backend:** Recommended local path is Ollama; cloud or
   gateway deployment uses a generic OpenAI-compatible chat-completions backend
 - **Vector Search:** Uses FAISS for efficient similarity search with
@@ -199,15 +203,19 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
    The default recipe is selected automatically.
 4. Switch threads from the sidebar when you want separate local conversations,
    memory counts, durable run history, and loop traces.
-5. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
-   you want grounded retrieval, citations, and verifier-backed support checks
-6. Click "Index Context" to make the uploaded document available to the loop
-7. Inspect the Loop Timeline to see recipe selection, context selection, retrieve, draft, format,
+5. Choose an Evidence mode for the run. `Auto` uses indexed document context
+   when present and otherwise answers directly; `Web search` explicitly sends
+   the current query to the fixed web-search provider for snippet evidence.
+6. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
+   you want local grounded retrieval, citations, and verifier-backed support
+   checks.
+7. Click "Index Context" to make the uploaded document available to the loop.
+8. Inspect the Loop Timeline to see recipe selection, context selection, retrieve, draft, format,
    check, verify, retry, refusal, and final-decision steps in order
-8. Inspect Durable Runs to see persisted run evidence for the active thread
-9. Inspect the loop summary for memory usage, provider, recipe, draft count,
+9. Inspect Durable Runs to see persisted run evidence for the active thread
+10. Inspect the loop summary for memory usage, provider, recipe, draft count,
    checks, verifier, retry/refusal state, final decision, and last error
-10. Open the answer trace when you need the detailed redacted `LoopReport`
+11. Open the answer trace when you need the detailed redacted `LoopReport`
 
 ## Technical Details
 
@@ -215,13 +223,16 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 - **Context mode:** Direct no-context chat is allowed, but it is reported as
   `not_verified` with no citations. Direct answers should match the depth the
   user asks for, but model knowledge and thread memory are not treated as
-  verified evidence. Document context is optional and upgrades the loop into
-  grounded retrieval plus citation/verifier checks.
-- **Current context provider:** Document context
+  verified evidence. Document context and explicit web search are optional
+  context providers that upgrade the loop into grounded retrieval plus
+  citation/verifier checks.
+- **Current context providers:** document context and explicit web search.
+  `Auto` resolves only to indexed document context or direct/no-context mode;
+  it does not search the web unless the query or recipe requests `web`.
 - **Current document loop shape:** validate/decode -> split -> embed/index -> retrieve -> draft answer -> run format checks -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
-- **Context provider boundary:** `DocumentContextProvider` wraps the current
-  document vector store and retrieval chain so later providers can plug into the
-  loop without changing the product identity again
+- **Context provider boundary:** `DocumentContextProvider` wraps local document
+  retrieval; per-query web search uses the same retrieve/draft/check/verify loop
+  without becoming durable uploaded context.
 - **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRecipe`, `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopSession`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
 - **Runtime reports:** `AILoopEngine.query_with_trace()` returns a `QueryResult` with both the legacy answer trace and a first-class `LoopReport`
 - **Thread state:** browser threads are backed by a local SQLite store for
@@ -281,6 +292,10 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 - **Retrieval:** MMR retrieval with source/page grounding
   - **Quality:** `k=6`, `fetch_k=24`
   - **Fast:** `k=3`, `fetch_k=10`
+- **Web search:** explicit `context_provider=web` queries the fixed DuckDuckGo
+  Instant Answer JSON endpoint for snippets only. It does not fetch arbitrary
+  result pages. Configure bounded provider behavior with `WEB_SEARCH_TIMEOUT`
+  and `WEB_SEARCH_MAX_RESULTS`.
 - **Safety limits:** Max upload size 25 MB, chunk cap 2,000 chunks per document
 - **Native runtime defaults:** unless you override them, app entrypoints
   bootstrap `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
