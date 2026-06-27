@@ -268,6 +268,38 @@ def test_thread_store_clear_removes_semantic_memories():
     ) == ()
 
 
+def test_thread_store_reports_semantic_memory_count():
+    store = ThreadStore.in_memory()
+    store.create_thread(thread_id="thread_local")
+    first = store.append_message(
+        "thread_local",
+        role="user",
+        content="Remember this.",
+    )
+    second = store.append_message(
+        "thread_local",
+        role="assistant",
+        content="I will remember it.",
+    )
+    store.upsert_message_embedding(
+        first,
+        embedding_model="fake-memory",
+        vector=[1.0],
+    )
+    store.upsert_message_embedding(
+        second,
+        embedding_model="fake-memory",
+        vector=[1.0],
+    )
+
+    detailed = store.get_thread("thread_local")
+    listed = store.list_threads()[0]
+
+    assert detailed.memory_count == 2
+    assert detailed.detail_dict()["memory_count"] == 2
+    assert listed.summary_dict()["memory_count"] == 2
+
+
 def test_thread_store_clear_missing_thread_does_not_recreate():
     store = ThreadStore.in_memory()
     store.create_thread(thread_id="thread_local")
@@ -434,3 +466,19 @@ def test_thread_store_updates_and_deletes_custom_recipes_only():
     assert deleted_custom is True
     assert store.get_recipe("recipe_custom") is None
     assert store.get_recipe(DEFAULT_LOOP_RECIPE_ID) is not None
+
+
+def test_thread_store_rejects_duplicate_recipe_ids():
+    store = ThreadStore.in_memory()
+    store.create_recipe(
+        recipe_id="recipe_custom",
+        name="Custom",
+        goal="Do a custom loop.",
+    )
+
+    with pytest.raises(ValueError, match="already exists"):
+        store.create_recipe(
+            recipe_id="recipe_custom",
+            name="Duplicate",
+            goal="Should fail.",
+        )

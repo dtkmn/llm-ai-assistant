@@ -36,6 +36,44 @@
             Skill
             <select id="recipe-select" name="recipe"></select>
           </label>
+          <details class="recipe-editor" id="recipe-editor">
+            <summary>
+              <span>Recipe Editor</span>
+              <small id="recipe-editor-state">ready</small>
+            </summary>
+            <div class="recipe-actions">
+              <button class="ghost-button" id="recipe-new" type="button">New</button>
+              <button class="ghost-button" id="recipe-save" type="button">Save</button>
+              <button class="ghost-button" id="recipe-delete" type="button">Delete</button>
+              <button class="ghost-button" id="recipe-export" type="button">Export</button>
+              <label class="ghost-button file-button" for="recipe-import">
+                Import
+                <input class="visually-hidden" id="recipe-import" type="file" accept="application/json,.json" />
+              </label>
+            </div>
+            <form class="recipe-form" id="recipe-form">
+              <label>
+                Name
+                <input id="recipe-name" name="name" type="text" autocomplete="off" />
+              </label>
+              <label>
+                Goal
+                <textarea id="recipe-goal" name="goal" rows="3"></textarea>
+              </label>
+              <label>
+                Instructions
+                <textarea id="recipe-instructions" name="instructions" rows="4"></textarea>
+              </label>
+              <label>
+                Success criteria
+                <textarea id="recipe-criteria" name="success_criteria" rows="4"></textarea>
+              </label>
+              <label>
+                Stop condition
+                <textarea id="recipe-stop" name="stop_condition" rows="2"></textarea>
+              </label>
+            </form>
+          </details>
           <p class="status-message compact" id="recipe-status">
             Loading loop recipes...
           </p>
@@ -66,6 +104,9 @@
             <div>
               <h2 id="chat-title">Session</h2>
               <p class="active-thread-title" id="active-thread-title">New thread</p>
+              <p class="active-thread-memory" id="active-thread-memory">
+                0 memories indexed · last run did not use thread memory
+              </p>
             </div>
             <button class="ghost-button" id="clear-chat" type="button">Clear</button>
           </div>
@@ -82,6 +123,7 @@
             <h2 id="timeline-title">Loop Timeline</h2>
             <span class="decision-chip" id="final-decision">idle</span>
           </div>
+          <div class="memory-status" id="memory-status" aria-label="Thread memory status"></div>
           <div class="timeline" id="timeline"></div>
           <div class="run-history">
             <div class="panel-heading compact-heading">

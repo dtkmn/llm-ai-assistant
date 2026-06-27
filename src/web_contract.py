@@ -284,6 +284,7 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
             "backend": None,
             "model": None,
             "retrieved_chunk_count": 0,
+            "conversation_context_count": 0,
             "semantic_memory_count": 0,
             "semantic_memory_status": None,
             "recipe_id": None,
@@ -328,6 +329,10 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
         "backend": trace.backend,
         "model": trace.model_label,
         "retrieved_chunk_count": trace.retrieved_chunk_count,
+        "conversation_context_count": run.get("metadata", {}).get(
+            "conversation_context_turns",
+            0,
+        ),
         "semantic_memory_count": run.get("metadata", {}).get(
             "semantic_memory_turns",
             0,

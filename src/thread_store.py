@@ -221,6 +221,7 @@ class ThreadRecord:
     instance_id: str
     generation: int = 0
     message_count: int = 0
+    memory_count: int = 0
     loop_run_count: int = 0
     messages: tuple[ThreadMessage, ...] = ()
     loop_runs: tuple[LoopRunRecord, ...] = ()
@@ -233,6 +234,7 @@ class ThreadRecord:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "message_count": self.message_count,
+            "memory_count": self.memory_count,
             "loop_run_count": self.loop_run_count,
         }
         if include_latest:
@@ -422,6 +424,11 @@ class ThreadStore:
                     COUNT(m.id) AS message_count,
                     (
                         SELECT COUNT(*)
+                        FROM message_embeddings me
+                        WHERE me.thread_id = t.id
+                    ) AS memory_count,
+                    (
+                        SELECT COUNT(*)
                         FROM loop_runs lr
                         WHERE lr.thread_id = t.id
                     ) AS loop_run_count,
@@ -457,6 +464,11 @@ class ThreadStore:
                     t.instance_id,
                     t.generation,
                     COUNT(m.id) AS message_count,
+                    (
+                        SELECT COUNT(*)
+                        FROM message_embeddings me
+                        WHERE me.thread_id = t.id
+                    ) AS memory_count,
                     (
                         SELECT COUNT(*)
                         FROM loop_runs lr
@@ -768,6 +780,8 @@ class ThreadStore:
             metadata=metadata or {},
         )
         with self._lock:
+            if self.get_recipe(recipe.recipe_id) is not None:
+                raise ValueError("Loop recipe already exists.")
             self._insert_recipe(recipe)
             self._conn.commit()
             return recipe
@@ -1126,6 +1140,7 @@ class ThreadStore:
             instance_id=str(row["instance_id"]),
             generation=int(row["generation"] or 0),
             message_count=int(row["message_count"] or len(messages)),
+            memory_count=int(row["memory_count"] or 0),
             loop_run_count=int(row["loop_run_count"] or len(loop_runs)),
             messages=messages,
             loop_runs=loop_runs,

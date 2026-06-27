@@ -193,6 +193,7 @@ class FakeQA:
                 final_decision=LoopDecision.NOT_VERIFIED,
                 final_answer=answer,
                 metadata={
+                    "conversation_context_turns": len(self.last_conversation_history),
                     "semantic_memory_turns": len(self.last_semantic_memory),
                     "semantic_memory_status": semantic_memory_status,
                     "recipe_id": self.last_loop_recipe.get("recipe_id"),
@@ -443,6 +444,8 @@ def test_static_frontend_is_served():
     assert "Optional Context" in response.text
     assert "You can still run the loop without documents" in response.text
     assert "Model Thinking" in response.text
+    assert "active-thread-memory" in response.text
+    assert "memory-status" in response.text
     assert "/assets/app.js" in response.text
     assert script.status_code == 200
     assert "Ask a question, or add context" in script.text
@@ -452,462 +455,75 @@ def test_static_frontend_is_served():
     assert "switchThread" in script.text
     assert "recipe_id" in script.text
     assert "renderRuns" in script.text
+    assert "runMemoryLabel" in script.text
     assert "result.trace?.model_thinking" in script.text
     assert "message-thinking" in script.text
     assert "innerHTML" not in script.text
     assert styles.status_code == 200
     assert ".thread-button" in styles.text
+    assert ".memory-status" in styles.text
     assert ".message-thinking" in styles.text
     assert ".message-code-block" in styles.text
 
 
-def test_static_frontend_renders_model_thinking_inside_assistant_message():
+
+def run_frontend_node(script: str) -> None:
     if shutil.which("node") is None:
         pytest.skip("node is required for static frontend execution test")
 
-    script = r"""
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-
-class ClassList {
-  constructor(element) {
-    this.element = element;
-  }
-
-  toggle(name, force) {
-    const tokens = new Set(this.element.className.split(/\s+/).filter(Boolean));
-    const enabled = force === undefined ? !tokens.has(name) : Boolean(force);
-    if (enabled) {
-      tokens.add(name);
-    } else {
-      tokens.delete(name);
-    }
-    this.element.className = Array.from(tokens).join(" ");
-  }
-}
-
-class Element {
-  constructor(tagName) {
-    this.tagName = tagName.toUpperCase();
-    this.children = [];
-    this.className = "";
-    this.dataset = {};
-    this.disabled = false;
-    this.files = [];
-    this.listeners = {};
-    this.open = false;
-    this.scrollHeight = 0;
-    this.scrollTop = 0;
-    this.textContent = "";
-    this.value = "";
-    this.classList = new ClassList(this);
-  }
-
-  append(...nodes) {
-    for (const node of nodes) {
-      node.parentElement = this;
-      this.children.push(node);
-    }
-    this.scrollHeight = this.children.length;
-  }
-
-  replaceChildren(...nodes) {
-    this.children = [];
-    this.append(...nodes);
-  }
-
-  addEventListener(type, listener) {
-    this.listeners[type] = listener;
-  }
-
-  async dispatch(type) {
-    const listener = this.listeners[type];
-    if (!listener) {
-      return;
-    }
-    await listener({ preventDefault() {} });
-  }
-
-  focus() {}
-
-  querySelector(selector) {
-    if (selector === "summary span") {
-      const summary = findNode(this, (node) => node.tagName === "SUMMARY");
-      return summary ? findNode(summary, (node) => node.tagName === "SPAN") : null;
-    }
-    return findNode(this, (node) => matches(node, selector));
-  }
-}
-
-function matches(node, selector) {
-  if (selector.startsWith(".")) {
-    return node.className.split(/\s+/).includes(selector.slice(1));
-  }
-  return node.tagName === selector.toUpperCase();
-}
-
-function findNode(root, predicate) {
-  for (const child of root.children) {
-    if (predicate(child)) {
-      return child;
-    }
-    const nested = findNode(child, predicate);
-    if (nested) {
-      return nested;
-    }
-  }
-  return null;
-}
-
-function nodeText(root) {
-  return [
-    root.textContent || "",
-    ...root.children.map((child) => nodeText(child)),
-  ].join(" ");
-}
-
-function createMemoryStorage() {
-  const values = new Map();
-  return {
-    getItem(key) {
-      return values.has(key) ? values.get(key) : null;
-    },
-    setItem(key, value) {
-      values.set(key, String(value));
-    },
-    removeItem(key) {
-      values.delete(key);
-    },
-  };
-}
-
-function createDom() {
-  Object.defineProperty(globalThis, "localStorage", {
-    configurable: true,
-    value: createMemoryStorage(),
-  });
-  const ids = [
-    "backend-pill",
-    "model-pill",
-    "ready-pill",
-    "upload-form",
-    "upload-button",
-    "upload-status",
-    "document-file",
-    "text-encoding",
-    "new-thread",
-    "thread-list",
-    "recipe-select",
-    "recipe-status",
-    "recipe-state",
-    "active-thread-title",
-    "refresh-status",
-    "runtime-grid",
-    "query-form",
-    "query-input",
-    "query-button",
-    "clear-chat",
-    "messages",
-    "timeline",
-    "run-list",
-    "run-count",
-    "final-decision",
-    "thinking-panel",
-    "thinking-state",
-    "thinking-note",
-    "thinking-content",
-    "summary-json",
-    "trace-json",
-  ];
-  const byId = Object.fromEntries(ids.map((id) => [id, new Element("div")]));
-  byId["query-input"].value = "";
-  const summary = new Element("summary");
-  summary.append(new Element("span"));
-  byId["thinking-panel"].append(summary);
-  const tabButtons = [new Element("button"), new Element("button")];
-  tabButtons[0].dataset.target = "summary-json";
-  tabButtons[1].dataset.target = "trace-json";
-
-  globalThis.document = {
-    createElement(tagName) {
-      return new Element(tagName);
-    },
-    querySelector(selector) {
-      if (!selector.startsWith("#")) {
-        return null;
-      }
-      return byId[selector.slice(1)] || null;
-    },
-    querySelectorAll(selector) {
-      return selector === ".tab-button" ? tabButtons : [];
-    },
-  };
-  return byId;
-}
-
-function jsonResponse(payload) {
-  return {
-    ok: true,
-    status: 200,
-    headers: { get: () => "application/json" },
-    async json() {
-      return payload;
-    },
-    async text() {
-      return JSON.stringify(payload);
-    },
-  };
-}
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
-function createThreadPayload(id, messages = [], latest = null, options = {}) {
-  const payload = {
-    id,
-    title: "New thread",
-    messages,
-    latest,
-    message_count: messages.length,
-    loop_run_count: options.loopRunCount || 0,
-    created_at: "2026-06-26T00:00:00.000Z",
-    updated_at: "2026-06-26T00:00:00.000Z",
-  };
-  if (options.includeRuns !== false) {
-    payload.loop_runs = options.loopRuns || [];
-  }
-  return payload;
-}
-
-async function importFreshApp() {
-  const source = await readFile(process.env.APP_JS_PATH, "utf8");
-  const encoded = Buffer.from(
-    `${source}\n// frontend harness case ${Date.now()} ${Math.random()}`,
-    "utf8",
-  ).toString("base64");
-  await import(`data:text/javascript;base64,${encoded}`);
-}
-
-async function runCase(modelThinking, answer = "Loop answer") {
-  const dom = createDom();
-  const queryBodies = [];
-  const serverThreads = [
-    createThreadPayload("thread_initial"),
-    createThreadPayload("thread_with_runs", [], null, {
-      includeRuns: false,
-      loopRunCount: 2,
-    }),
-  ];
-  const recipes = [{
-    recipe_id: "recipe_general_loop",
-    name: "General assistant loop",
-    goal: "Answer the request clearly.",
-    context_provider: "auto",
-    model_profile: "quality",
-    verifier: "default",
-    is_default: true,
-  }];
-  globalThis.fetch = async (url, options = {}) => {
-    const method = String(options.method || "GET").toUpperCase();
-    if (url === "/api/config") {
-      return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
-    }
-    if (url === "/api/status") {
-      return jsonResponse({
-        backend: "ollama",
-        model: "thinking-model",
-        ready_for_queries: false,
-        query_mode: "direct",
-        chunk_count: 0,
-      });
-    }
-    if (url === "/api/recipes") {
-      return jsonResponse({
-        default_recipe_id: "recipe_general_loop",
-        recipes,
-      });
-    }
-    if (url === "/api/threads" && method === "GET") {
-      return jsonResponse({ threads: serverThreads });
-    }
-    if (url === "/api/threads" && method === "POST") {
-      const thread = createThreadPayload(`thread_created_${serverThreads.length}`);
-      serverThreads.unshift(thread);
-      return jsonResponse(thread);
-    }
-    if (url.startsWith("/api/threads/") && method === "GET") {
-      const id = decodeURIComponent(url.slice("/api/threads/".length));
-      const thread = serverThreads.find((item) => item.id === id);
-      if (thread) {
-        return jsonResponse(thread);
-      }
-    }
-    if (url === "/api/query") {
-      queryBodies.push(JSON.parse(options.body));
-      return jsonResponse({
-        answer,
-        run: {
-          run_id: "run_frontend",
-          final_decision: "not_verified",
-          context_provider: "none",
-          backend: "mock",
-          model: "MockLLM",
-          recipe_id: "recipe_general_loop",
-          recipe_name: "General assistant loop",
-          step_count: 4,
-          created_at: "2026-06-26T00:00:00.000Z",
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "APP_JS_PATH": str(REPO_ROOT / "src" / "web_static" / "app.js"),
+            "FRONTEND_HARNESS_URL": (
+                REPO_ROOT / "tests" / "frontend_harness.mjs"
+            ).as_uri(),
         },
-        timeline: { rows: [], final_decision: "not_verified" },
-        summary: {},
-        trace: { model_thinking: modelThinking },
-      });
-    }
-    if (url === "/api/chat/clear") {
-      return jsonResponse({
-        timeline: { rows: [], final_decision: null },
-        summary: {},
-        trace: {},
-      });
-    }
-    throw new Error(`unexpected fetch ${url}`);
-  };
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stderr == ""
 
-  await importFreshApp();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  dom["query-input"].value = "What happened?";
-  await dom["query-form"].dispatch("submit");
-  return { dom, queryBodies };
-}
 
-const capturedCase = await runCase({
-  available: true,
-  redacted: false,
-  label: "Model Thinking (unverified)",
-  content: "Captured thinking from model.",
-  note: "Model-emitted thinking is useful for debugging the loop.",
-}, [
-  "Here is `dp[0]` safely:",
-  "```java",
-  "public class FibonacciDP {",
-  "  public static int fib(int n) { return n; }",
-  "}",
-  "```",
-  "- uses memoization",
-  "<img src=x onerror=alert(1)>",
-].join("\n"));
-const capturedDom = capturedCase.dom;
-assert.equal(capturedCase.queryBodies.length, 1);
-assert.ok(capturedCase.queryBodies[0].session_id.startsWith("thread_"));
-assert.equal(capturedCase.queryBodies[0].recipe_id, "recipe_general_loop");
-const capturedAssistantMessage = findNode(
-  capturedDom.messages,
-  (node) => node.className === "message assistant",
-);
-assert.ok(capturedAssistantMessage, "assistant message should render");
-const capturedMessageContent = findNode(
-  capturedAssistantMessage,
-  (node) => node.className === "message-content",
-);
-assert.ok(capturedMessageContent, "assistant message should include rich content");
-const capturedCodeBlock = findNode(
-  capturedMessageContent,
-  (node) => node.className === "message-code-block",
-);
-assert.ok(capturedCodeBlock, "assistant markdown fence should become a code block");
-const capturedLanguage = findNode(
-  capturedCodeBlock,
-  (node) => node.className === "message-code-language",
-);
-assert.equal(capturedLanguage.textContent, "java");
-const capturedAnswerCode = findNode(capturedCodeBlock, (node) => node.tagName === "CODE");
-assert.ok(capturedAnswerCode.textContent.includes("public class FibonacciDP"));
-const capturedInlineCode = findNode(
-  capturedMessageContent,
-  (node) => node.className === "message-inline-code",
-);
-assert.equal(capturedInlineCode.textContent, "dp[0]");
-const capturedList = findNode(capturedMessageContent, (node) => node.tagName === "UL");
-assert.ok(capturedList, "assistant markdown list should render as a list");
-const capturedImage = findNode(capturedMessageContent, (node) => node.tagName === "IMG");
-assert.equal(capturedImage, null, "model HTML must stay inert text");
-const capturedThinking = findNode(
-  capturedDom.messages,
-  (node) => node.className === "message-thinking",
-);
-assert.ok(capturedThinking, "assistant message should include thinking details");
-const capturedPre = findNode(capturedThinking, (node) => node.tagName === "PRE");
-assert.equal(capturedPre.textContent, "Captured thinking from model.");
-const capturedRun = findNode(
-  capturedDom["run-list"],
-  (node) => node.className === "run-row",
-);
-assert.ok(capturedRun, "durable run summary should render after query");
-assert.ok(
-  nodeText(capturedDom["thread-list"]).includes("2 runs"),
-  "thread summaries should preserve backend loop_run_count before details load",
-);
+def test_static_frontend_renders_assistant_content_and_model_thinking():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  findNode,
+  importFreshApp,
+  jsonResponse,
+  nodeText,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
 
-const inlineFenceCase = await runCase({
-  available: false,
-  redacted: false,
-  label: "Model Thinking (unverified)",
-  content: null,
-  note: "Model-emitted thinking is useful for debugging the loop.",
-}, "Inline fence: ```java public class InlineFence {}``` done.");
-const inlineAssistant = findNode(
-  inlineFenceCase.dom.messages,
-  (node) => node.className === "message assistant",
-);
-const inlineCodeBlock = findNode(
-  inlineAssistant,
-  (node) => node.className === "message-code-block",
-);
-assert.ok(inlineCodeBlock, "inline fenced code should become a code block");
-const inlineFenceLanguage = findNode(
-  inlineCodeBlock,
-  (node) => node.className === "message-code-language",
-);
-assert.equal(inlineFenceLanguage.textContent, "java");
-const inlineFenceCode = findNode(inlineCodeBlock, (node) => node.tagName === "CODE");
-assert.equal(inlineFenceCode.textContent, "public class InlineFence {}");
+const dom = createDom();
+const queryBodies = [];
+const serverThreads = [
+  createThreadPayload("thread_initial"),
+  createThreadPayload("thread_with_runs", [], null, {
+    includeRuns: false,
+    loopRunCount: 2,
+  }),
+];
+const recipes = [{
+  recipe_id: "recipe_general_loop",
+  name: "General assistant loop",
+  goal: "Answer the request clearly.",
+  context_provider: "auto",
+  model_profile: "quality",
+  verifier: "default",
+  instructions: "Use same-thread memory carefully.",
+  success_criteria: ["Answer the request clearly."],
+  stop_condition: "Stop when done.",
+  is_default: true,
+}];
 
-const emptyCase = await runCase({
-  available: false,
-  redacted: false,
-  label: "Model Thinking (unverified)",
-  content: null,
-  note: "Model-emitted thinking is useful for debugging the loop.",
-});
-const emptyDom = emptyCase.dom;
-const emptyThinking = findNode(
-  emptyDom.messages,
-  (node) => node.className === "message-thinking",
-);
-assert.equal(emptyThinking, null);
-
-const threadCase = await runCase({
-  available: false,
-  redacted: false,
-  label: "Model Thinking (unverified)",
-  content: null,
-  note: "Model-emitted thinking is useful for debugging the loop.",
-});
-const firstThreadId = threadCase.queryBodies[0].session_id;
-await threadCase.dom["new-thread"].dispatch("click");
-threadCase.dom["query-input"].value = "Second thread question";
-await threadCase.dom["query-form"].dispatch("submit");
-assert.equal(threadCase.queryBodies.length, 2);
-assert.notEqual(threadCase.queryBodies[1].session_id, firstThreadId);
-assert.equal(threadCase.dom["thread-list"].children.length, 3);
-
-const staleDom = createDom();
-const staleQuery = deferred();
-const staleServerThreads = [createThreadPayload("thread_stale")];
 globalThis.fetch = async (url, options = {}) => {
   const method = String(options.method || "GET").toUpperCase();
   if (url === "/api/config") {
@@ -923,72 +539,591 @@ globalThis.fetch = async (url, options = {}) => {
     });
   }
   if (url === "/api/recipes") {
-    return jsonResponse({
-      default_recipe_id: "recipe_general_loop",
-      recipes: [{
-        recipe_id: "recipe_general_loop",
-        name: "General assistant loop",
-        goal: "Answer the request clearly.",
-        is_default: true,
-      }],
-    });
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
   }
   if (url === "/api/threads" && method === "GET") {
-    return jsonResponse({ threads: staleServerThreads });
+    return jsonResponse({ threads: serverThreads });
   }
   if (url.startsWith("/api/threads/") && method === "GET") {
     const id = decodeURIComponent(url.slice("/api/threads/".length));
-    const thread = staleServerThreads.find((item) => item.id === id);
+    const thread = serverThreads.find((item) => item.id === id);
     if (thread) {
       return jsonResponse(thread);
     }
   }
   if (url === "/api/query") {
-    await staleQuery.promise;
+    const request = JSON.parse(options.body);
+    queryBodies.push(request);
     return jsonResponse({
-      answer: "Stale answer should not reappear",
+      answer: [
+        "Here is `dp[0]` safely:",
+        "```java",
+        "public class FibonacciDP {",
+        "  public static int fib(int n) { return n; }",
+        "}",
+        "```",
+        "- uses memoization",
+        "<img src=x onerror=alert(1)>",
+      ].join("\n"),
+      run: {
+        run_id: "run_frontend",
+        final_decision: "not_verified",
+        context_provider: "none",
+        backend: "mock",
+        model: "MockLLM",
+        recipe_id: "recipe_general_loop",
+        recipe_name: "General assistant loop",
+        step_count: 4,
+        created_at: "2026-06-26T00:00:00.000Z",
+      },
       timeline: { rows: [], final_decision: "not_verified" },
-      summary: {},
-      trace: { model_thinking: null },
+      summary: {
+        conversation_context_count: 1,
+        semantic_memory_count: 2,
+        semantic_memory_status: "retrieved",
+      },
+      trace: {
+        model_thinking: {
+          available: true,
+          redacted: false,
+          label: "Model Thinking (unverified)",
+          content: "Captured thinking from model.",
+          note: "Model-emitted thinking is useful for debugging the loop.",
+        },
+      },
+      thread: createThreadPayload(request.session_id, [], null, {
+        memoryCount: 4,
+        loopRunCount: 1,
+      }),
     });
   }
   if (url === "/api/chat/clear") {
+    return jsonResponse({ timeline: { rows: [], final_decision: null }, summary: {}, trace: {} });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+
+await importFreshApp();
+await tick();
+dom["query-input"].value = "What happened?";
+await dom["query-form"].dispatch("submit");
+
+assert.equal(queryBodies.length, 1);
+assert.ok(queryBodies[0].session_id.startsWith("thread_"));
+assert.equal(queryBodies[0].recipe_id, "recipe_general_loop");
+const assistantMessage = findNode(
+  dom.messages,
+  (node) => node.className === "message assistant",
+);
+assert.ok(assistantMessage, "assistant message should render");
+const messageContent = findNode(
+  assistantMessage,
+  (node) => node.className === "message-content",
+);
+assert.ok(messageContent, "assistant message should include rich content");
+const codeBlock = findNode(
+  messageContent,
+  (node) => node.className === "message-code-block",
+);
+assert.ok(codeBlock, "assistant markdown fence should become a code block");
+const language = findNode(codeBlock, (node) => node.className === "message-code-language");
+assert.equal(language.textContent, "java");
+const answerCode = findNode(codeBlock, (node) => node.tagName === "CODE");
+assert.ok(answerCode.textContent.includes("public class FibonacciDP"));
+const inlineCode = findNode(
+  messageContent,
+  (node) => node.className === "message-inline-code",
+);
+assert.equal(inlineCode.textContent, "dp[0]");
+const list = findNode(messageContent, (node) => node.tagName === "UL");
+assert.ok(list, "assistant markdown list should render as a list");
+const image = findNode(messageContent, (node) => node.tagName === "IMG");
+assert.equal(image, null, "model HTML must stay inert text");
+const thinking = findNode(dom.messages, (node) => node.className === "message-thinking");
+assert.ok(thinking, "assistant message should include thinking details");
+const thinkingPre = findNode(thinking, (node) => node.tagName === "PRE");
+assert.equal(thinkingPre.textContent, "Captured thinking from model.");
+const run = findNode(dom["run-list"], (node) => node.className === "run-row");
+assert.ok(run, "durable run summary should render after query");
+assert.ok(
+  nodeText(dom["thread-list"]).includes("2 runs"),
+  "thread summaries should preserve backend loop_run_count before details load",
+);
+assert.ok(
+  nodeText(dom["thread-list"]).includes("0 memories"),
+  "thread summaries should show indexed memory counts",
+);
+assert.ok(
+  nodeText(dom["thread-list"]).includes("4 memories"),
+  "thread summaries should update indexed memory counts after query",
+);
+assert.ok(
+  nodeText(dom["active-thread-memory"]).includes("4 memories indexed"),
+  "active thread header should show indexed memory count",
+);
+assert.ok(
+  nodeText(dom["active-thread-memory"]).includes(
+    "last run used 1 recent turn + 2 recalled memories",
+  ),
+  "active thread header should show last-run memory usage",
+);
+assert.ok(
+  nodeText(dom["memory-status"]).includes("4 memories indexed"),
+  "loop panel should show indexed memory count",
+);
+assert.ok(
+  nodeText(dom["memory-status"]).includes(
+    "last run used 1 recent turn + 2 recalled memories",
+  ),
+  "loop panel should show last-run memory usage",
+);
+await dom["clear-chat"].dispatch("click");
+assert.ok(
+  nodeText(dom["active-thread-memory"]).includes("0 memories indexed"),
+  "clear should reset visible indexed memory count",
+);
+assert.ok(
+  nodeText(dom["memory-status"]).includes("last run did not use thread memory"),
+  "clear should reset last-run memory status",
+);
+'''
+    )
+
+
+def test_static_frontend_renders_inline_fences_and_hides_empty_thinking():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  findNode,
+  importFreshApp,
+  jsonResponse,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
+
+const dom = createDom();
+const recipes = [{
+  recipe_id: "recipe_general_loop",
+  name: "General assistant loop",
+  goal: "Answer the request clearly.",
+  instructions: "Use same-thread memory carefully.",
+  success_criteria: ["Answer the request clearly."],
+  stop_condition: "Stop when done.",
+  is_default: true,
+}];
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
     return jsonResponse({
-      timeline: { rows: [], final_decision: null },
-      summary: {},
-      trace: {},
+      backend: "ollama",
+      model: "thinking-model",
+      ready_for_queries: false,
+      query_mode: "direct",
+      chunk_count: 0,
     });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: [createThreadPayload("thread_inline")] });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    return jsonResponse(createThreadPayload("thread_inline"));
+  }
+  if (url === "/api/query") {
+    return jsonResponse({
+      answer: "Inline fence: ```java public class InlineFence {}``` done.",
+      timeline: { rows: [], final_decision: "not_verified" },
+      summary: {},
+      trace: {
+        model_thinking: {
+          available: false,
+          redacted: false,
+          label: "Model Thinking (unverified)",
+          content: null,
+          note: "Model-emitted thinking is useful for debugging the loop.",
+        },
+      },
+    });
+  }
+  if (url === "/api/chat/clear") {
+    return jsonResponse({ timeline: { rows: [], final_decision: null }, summary: {}, trace: {} });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+
+await importFreshApp();
+await tick();
+dom["query-input"].value = "What happened?";
+await dom["query-form"].dispatch("submit");
+const inlineAssistant = findNode(dom.messages, (node) => node.className === "message assistant");
+const inlineCodeBlock = findNode(inlineAssistant, (node) => node.className === "message-code-block");
+assert.ok(inlineCodeBlock, "inline fenced code should become a code block");
+const inlineLanguage = findNode(inlineCodeBlock, (node) => node.className === "message-code-language");
+assert.equal(inlineLanguage.textContent, "java");
+const inlineCode = findNode(inlineCodeBlock, (node) => node.tagName === "CODE");
+assert.equal(inlineCode.textContent, "public class InlineFence {}");
+const emptyThinking = findNode(dom.messages, (node) => node.className === "message-thinking");
+assert.equal(emptyThinking, null);
+'''
+    )
+
+
+def test_static_frontend_threads_and_stale_response_guard():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  deferred,
+  findNode,
+  importFreshApp,
+  jsonResponse,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
+
+const recipes = [{
+  recipe_id: "recipe_general_loop",
+  name: "General assistant loop",
+  goal: "Answer the request clearly.",
+  instructions: "Use same-thread memory carefully.",
+  success_criteria: ["Answer the request clearly."],
+  stop_condition: "Stop when done.",
+  is_default: true,
+}];
+
+const switchDom = createDom();
+const queryBodies = [];
+const serverThreads = [createThreadPayload("thread_initial")];
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: serverThreads });
+  }
+  if (url === "/api/threads" && method === "POST") {
+    const thread = createThreadPayload(`thread_created_${serverThreads.length}`);
+    serverThreads.unshift(thread);
+    return jsonResponse(thread);
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    return jsonResponse(serverThreads.find((item) => item.id === id) || serverThreads[0]);
+  }
+  if (url === "/api/query") {
+    queryBodies.push(JSON.parse(options.body));
+    return jsonResponse({ answer: "Loop answer", timeline: { rows: [], final_decision: "not_verified" }, summary: {}, trace: { model_thinking: null } });
+  }
+  if (url === "/api/chat/clear") {
+    return jsonResponse({ timeline: { rows: [], final_decision: null }, summary: {}, trace: {} });
   }
   throw new Error(`unexpected fetch ${url}`);
 };
 await importFreshApp();
-await new Promise((resolve) => setTimeout(resolve, 0));
+await tick();
+switchDom["query-input"].value = "First thread question";
+await switchDom["query-form"].dispatch("submit");
+const firstThreadId = queryBodies[0].session_id;
+await switchDom["new-thread"].dispatch("click");
+switchDom["query-input"].value = "Second thread question";
+await switchDom["query-form"].dispatch("submit");
+assert.equal(queryBodies.length, 2);
+assert.notEqual(queryBodies[1].session_id, firstThreadId);
+assert.equal(switchDom["thread-list"].children.length, 2);
+
+const staleDom = createDom();
+const staleQuery = deferred();
+const staleServerThreads = [createThreadPayload("thread_stale")];
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: staleServerThreads });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    return jsonResponse(staleServerThreads[0]);
+  }
+  if (url === "/api/query") {
+    await staleQuery.promise;
+    return jsonResponse({ answer: "Stale answer should not reappear", timeline: { rows: [], final_decision: "not_verified" }, summary: {}, trace: { model_thinking: null } });
+  }
+  if (url === "/api/chat/clear") {
+    return jsonResponse({ timeline: { rows: [], final_decision: null }, summary: {}, trace: {} });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await importFreshApp();
+await tick();
 staleDom["query-input"].value = "Question that will be cleared";
 const pendingSubmit = staleDom["query-form"].dispatch("submit");
-await new Promise((resolve) => setTimeout(resolve, 0));
+await tick();
 await staleDom["clear-chat"].dispatch("click");
 staleQuery.resolve();
 await pendingSubmit;
-const staleAssistant = findNode(
-  staleDom.messages,
-  (node) => node.className === "message assistant",
-);
+const staleAssistant = findNode(staleDom.messages, (node) => node.className === "message assistant");
 assert.equal(staleAssistant, null);
-"""
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=REPO_ROOT,
-        env={
-            **os.environ,
-            "APP_JS_PATH": str(REPO_ROOT / "src" / "web_static" / "app.js"),
-        },
-        text=True,
-        capture_output=True,
-        check=True,
+'''
     )
 
-    assert result.stderr == ""
 
+def test_static_frontend_recipe_save_and_detail_failure_guard():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  errorResponse,
+  importFreshApp,
+  jsonResponse,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
+
+const dom = createDom();
+const recipeBodies = [];
+const recipes = [{
+  recipe_id: "recipe_general_loop",
+  name: "General assistant loop",
+  goal: "Answer the request clearly.",
+  context_provider: "auto",
+  model_profile: "quality",
+  verifier: "default",
+  instructions: "Use same-thread memory carefully.",
+  success_criteria: ["Answer the request clearly."],
+  stop_condition: "Stop when done.",
+  is_default: true,
+}];
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    if (method === "POST") {
+      const body = JSON.parse(options.body);
+      recipeBodies.push(body);
+      const recipe = { recipe_id: `recipe_created_${recipeBodies.length}`, ...body, is_default: false };
+      recipes.push(recipe);
+      return jsonResponse(recipe);
+    }
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: [createThreadPayload("thread_recipe_save")] });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    return jsonResponse(createThreadPayload("thread_recipe_save"));
+  }
+  if (url === "/api/query") {
+    return jsonResponse({ answer: "Loop answer", timeline: { rows: [], final_decision: "not_verified" }, summary: {}, trace: { model_thinking: null } });
+  }
+  if (url === "/api/chat/clear") {
+    return jsonResponse({ timeline: { rows: [], final_decision: null }, summary: {}, trace: {} });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await importFreshApp();
+await tick();
+dom["recipe-new"].dispatch("click");
+dom["recipe-name"].value = "Debug loop";
+dom["recipe-goal"].value = "Explain loop behavior.";
+dom["recipe-instructions"].value = "Keep evidence and advice separate.";
+dom["recipe-criteria"].value = "Names the loop step\nStates uncertainty";
+dom["recipe-stop"].value = "Stop after a clear answer.";
+await dom["recipe-save"].dispatch("click");
+assert.equal(recipeBodies.length, 1);
+assert.deepEqual(recipeBodies[0].success_criteria, ["Names the loop step", "States uncertainty"]);
+assert.equal(recipeBodies[0].goal, "Explain loop behavior.");
+assert.equal(dom["recipe-select"].value, "recipe_created_1");
+
+const summaryOnlyDom = createDom();
+const summaryOnlyPatchBodies = [];
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_custom", recipes: [{ recipe_id: "recipe_custom", name: "Custom summary", goal: "Summary-only goal.", is_default: false }] });
+  }
+  if (url === "/api/recipes/recipe_custom" && method === "GET") {
+    return errorResponse(503, { detail: "Recipe detail unavailable." });
+  }
+  if (url === "/api/recipes/recipe_custom" && method === "PATCH") {
+    summaryOnlyPatchBodies.push(JSON.parse(options.body));
+    return jsonResponse({ recipe_id: "recipe_custom", name: "Should not save", goal: "Should not save.", instructions: "", success_criteria: [], stop_condition: "", is_default: false });
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: [createThreadPayload("thread_summary_only")] });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    return jsonResponse(createThreadPayload("thread_summary_only"));
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await importFreshApp();
+await tick();
+assert.equal(summaryOnlyDom["recipe-save"].disabled, true);
+assert.equal(summaryOnlyDom["recipe-name"].readOnly, true);
+summaryOnlyDom["recipe-name"].value = "Wipe hidden fields";
+await summaryOnlyDom["recipe-save"].dispatch("click");
+assert.equal(summaryOnlyPatchBodies.length, 0);
+assert.equal(summaryOnlyDom["recipe-save"].disabled, true);
+assert.ok(summaryOnlyDom["recipe-status"].textContent.includes("detail unavailable"));
+'''
+    )
+
+
+def test_static_frontend_recipe_import_export_delete_controls():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  importFreshApp,
+  jsonResponse,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
+
+const dom = createDom();
+globalThis.localStorage.setItem("ai-loop-engine.active-recipe.v1", "recipe_custom");
+let deleteConfirmed = false;
+globalThis.confirm = (message) => {
+  deleteConfirmed = message.includes("Custom reviewer");
+  return true;
+};
+const requests = { deleted: [], imported: [], exported: [] };
+const recipes = [
+  { recipe_id: "recipe_general_loop", name: "General assistant loop", goal: "Answer the request clearly.", instructions: "Default instructions.", success_criteria: ["Default passes."], stop_condition: "Stop when done.", is_default: true },
+  { recipe_id: "recipe_custom", name: "Custom reviewer", goal: "Find weak assumptions.", instructions: "Be sharp.", success_criteria: ["Names risk."], stop_condition: "Stop after verdict.", context_provider: "auto", model_profile: "quality", verifier: "default", metadata: { source: "test" }, is_default: false },
+];
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    if (method === "POST") {
+      const body = JSON.parse(options.body);
+      requests.imported.push(body);
+      const imported = { ...body, is_default: false, context_provider: body.context_provider || "auto", model_profile: body.model_profile || "quality", verifier: body.verifier || "default", metadata: body.metadata || {} };
+      recipes.push(imported);
+      return jsonResponse(imported);
+    }
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes: recipes.map((recipe) => ({ recipe_id: recipe.recipe_id, name: recipe.name, goal: recipe.goal, context_provider: recipe.context_provider || "auto", model_profile: recipe.model_profile || "quality", verifier: recipe.verifier || "default", is_default: recipe.is_default })) });
+  }
+  if (url === "/api/recipes/recipe_custom/export" && method === "GET") {
+    requests.exported.push(url);
+    return jsonResponse({ ...recipes.find((recipe) => recipe.recipe_id === "recipe_custom"), exported_from: "AI Loop Engine" });
+  }
+  if (url === "/api/recipes/recipe_custom" && method === "DELETE") {
+    requests.deleted.push(url);
+    const index = recipes.findIndex((recipe) => recipe.recipe_id === "recipe_custom");
+    if (index >= 0) {
+      recipes.splice(index, 1);
+    }
+    return jsonResponse({ deleted: true, recipe_id: "recipe_custom" });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/recipes/".length));
+    const recipe = recipes.find((item) => item.recipe_id === id);
+    if (recipe) {
+      return jsonResponse(recipe);
+    }
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: [createThreadPayload("thread_recipe_flow")] });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    return jsonResponse(createThreadPayload("thread_recipe_flow"));
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await importFreshApp();
+await tick();
+assert.equal(dom["recipe-select"].value, "recipe_custom");
+assert.equal(dom["recipe-instructions"].value, "Be sharp.");
+await dom["recipe-export"].dispatch("click");
+assert.deepEqual(requests.exported, ["/api/recipes/recipe_custom/export"]);
+assert.equal(globalThis.__downloads.length, 1);
+assert.equal(globalThis.__downloads[0].download, "recipe_custom.json");
+assert.equal(globalThis.__downloads[0].href, "blob:test-1");
+assert.deepEqual(globalThis.__revokedObjectUrls, ["blob:test-1"]);
+const exportedRecipe = JSON.parse(await globalThis.__objectUrls[0].blob.text());
+assert.equal(exportedRecipe.recipe_id, "recipe_custom");
+assert.equal(exportedRecipe.instructions, "Be sharp.");
+assert.deepEqual(exportedRecipe.success_criteria, ["Names risk."]);
+assert.deepEqual(exportedRecipe.metadata, { source: "test" });
+assert.equal(exportedRecipe.exported_from, "AI Loop Engine");
+assert.ok(dom["recipe-status"].textContent.includes("Exported Custom reviewer"));
+await dom["recipe-delete"].dispatch("click");
+assert.equal(deleteConfirmed, true);
+assert.deepEqual(requests.deleted, ["/api/recipes/recipe_custom"]);
+assert.equal(dom["recipe-select"].value, "recipe_general_loop");
+assert.ok(dom["recipe-status"].textContent.includes("Deleted Custom reviewer"));
+dom["recipe-import"].files = [{
+  async text() {
+    return JSON.stringify({ recipe_id: "recipe_imported", name: "Imported recipe", goal: "Use imported loop guidance.", instructions: "Preserve imported instructions.", success_criteria: ["Imported criterion."], stop_condition: "Stop after imported answer.", metadata: { imported: true } });
+  },
+}];
+await dom["recipe-import"].dispatch("change");
+assert.equal(requests.imported.length, 1);
+assert.equal(requests.imported[0].recipe_id, "recipe_imported");
+assert.deepEqual(requests.imported[0].success_criteria, ["Imported criterion."]);
+assert.equal(dom["recipe-select"].value, "recipe_imported");
+assert.equal(dom["recipe-instructions"].value, "Preserve imported instructions.");
+assert.ok(dom["recipe-status"].textContent.includes("Imported Imported recipe"));
+assert.equal(dom["recipe-import"].value, "");
+'''
+    )
 
 def test_config_and_status_endpoints_return_runtime_contract():
     fake_qa = FakeQA()
@@ -1281,6 +1416,9 @@ def test_query_endpoint_returns_visible_loop_payload():
     assert payload["timeline"]["rows"][1]["signals"] == "1 prompt chunks; chunks: 1; citations: 1"
     assert payload["summary"]["document"] == "demo.txt"
     assert payload["summary"]["final_decision"] == "not_verified"
+    assert payload["summary"]["conversation_context_count"] == 0
+    assert payload["summary"]["semantic_memory_count"] == 0
+    assert payload["summary"]["semantic_memory_status"] == "not_requested"
     assert payload["summary"]["recipe_id"] == "recipe_general_loop"
     assert payload["summary"]["recipe_name"] == "General assistant loop"
     assert payload["recipe"]["recipe_id"] == "recipe_general_loop"
@@ -1396,6 +1534,7 @@ def test_recipe_endpoints_manage_loop_recipes():
     created = client.post(
         "/api/recipes",
         json={
+            "recipe_id": "recipe_strict_reviewer",
             "name": "Strict reviewer",
             "description": "Review answers sharply.",
             "goal": "Find weak assumptions before final answer.",
@@ -1409,10 +1548,27 @@ def test_recipe_endpoints_manage_loop_recipes():
     )
     assert created.status_code == 200
     recipe_id = created.json()["recipe_id"]
+    assert recipe_id == "recipe_strict_reviewer"
 
     fetched = client.get(f"/api/recipes/{recipe_id}")
     assert fetched.status_code == 200
     assert fetched.json()["success_criteria"] == ["Risks first.", "No vague praise."]
+
+    exported = client.get(f"/api/recipes/{recipe_id}/export")
+    assert exported.status_code == 200
+    assert exported.json()["recipe_id"] == recipe_id
+    assert exported.json()["exported_from"] == "AI Loop Engine"
+
+    duplicate = client.post(
+        "/api/recipes",
+        json={
+            "recipe_id": recipe_id,
+            "name": "Duplicate",
+            "goal": "Should fail.",
+        },
+    )
+    assert duplicate.status_code == 400
+    assert "already exists" in duplicate.json()["detail"]
 
     patched = client.patch(
         f"/api/recipes/{recipe_id}",
@@ -1455,10 +1611,13 @@ def test_query_endpoint_persists_thread_messages_and_latest_payload():
     assert "Project Phoenix" in thread["messages"][1]["content"]
     assert thread["messages"][1]["thinking"]["available"] is True
     assert thread["latest"]["summary"]["final_decision"] == "not_verified"
+    assert thread["memory_count"] == 2
     assert thread["loop_run_count"] == 1
     assert thread["loop_runs"][0]["run_id"] == "run_fake"
     assert thread["loop_runs"][0]["recipe_id"] == "recipe_general_loop"
-    assert response.json()["run"]["run_id"] == "run_fake"
+    response_payload = response.json()
+    assert response_payload["run"]["run_id"] == "run_fake"
+    assert response_payload["thread"]["memory_count"] == 2
     assert thread["latest"]["trace"]["loop_report"]["run"]["session_id"] == (
         "thread_alpha"
     )
@@ -1512,6 +1671,7 @@ def test_query_endpoint_passes_recent_same_thread_history_to_runtime():
         "stay out" not in entry["content"]
         for entry in fake_qa.last_conversation_history
     )
+    assert response.json()["summary"]["conversation_context_count"] == 2
 
 
 def test_query_endpoint_retrieves_older_semantic_thread_memory():
@@ -1592,6 +1752,12 @@ def test_query_endpoint_retrieves_older_semantic_thread_memory():
     assert "memory: 1" in memory_rows[0]["signals"]
     assert payload["summary"]["semantic_memory_count"] == 1
     assert payload["summary"]["semantic_memory_status"] == "retrieved"
+    assert payload["summary"]["conversation_context_count"] == (
+        web_app.MAX_QUERY_HISTORY_MESSAGES
+    )
+    public_payload_text = json.dumps(payload)
+    assert "reusing answers to subproblems" not in public_payload_text
+    assert "another thread" not in public_payload_text
     indexed_memories = store.semantic_memories(
         "thread_alpha",
         embedding_model="fake-memory",
