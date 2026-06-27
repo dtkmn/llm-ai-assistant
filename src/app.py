@@ -357,7 +357,12 @@ def create_app(
                     {"detail": "Uploaded document exceeds the 25 MB limit."},
                     status_code=413,
                 )
-        return await call_next(request)
+        response = await call_next(request)
+        if request.method.upper() in {"GET", "HEAD"} and (
+            request.url.path == "/" or request.url.path.startswith("/assets/")
+        ):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @api.get("/", include_in_schema=False)
     def index() -> FileResponse:

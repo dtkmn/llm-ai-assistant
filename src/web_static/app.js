@@ -579,17 +579,78 @@ function appendTextWithLineBreaks(parent, text) {
   }
 }
 
+function normalizeMessageMarkdownStructure(text) {
+  const compactLabeledListPattern =
+    /(?:^|\s)1[.)]\s+(?:\*\*)?[^:\n]{1,80}:(?:\*\*)?/;
+  const compactNumberedListPattern =
+    /(?:^|:)\s*1[.)]\s+\S[^\n]{2,}?\s+2[.)]\s+\S/s;
+  const listItemPattern = /(^|\s+)(\d{1,2})([.)])\s+(?=\S)/g;
+  const listStartPattern =
+    /(?:^|:)\s*1[.)]\s+(?=\S)|(?:^|\s)1[.)]\s+(?=(?:\*\*)?[^:\n]{1,80}:(?:\*\*)?)/;
+  const splitSequentialListItems = (line) => {
+    const startMatch = line.match(listStartPattern);
+    if (!startMatch || startMatch.index === undefined) {
+      return line;
+    }
+    const markerOffset = startMatch[0].search(/1[.)]\s+/);
+    if (markerOffset < 0) {
+      return line;
+    }
+    const listStart = startMatch.index + markerOffset;
+    const prefix = line.slice(0, listStart);
+    const body = line.slice(listStart);
+    let expectedNextItem = null;
+    const normalizedBody = body.replace(
+      listItemPattern,
+      (marker, spacing, rawNumber, punctuation, offset) => {
+        const number = Number.parseInt(rawNumber, 10);
+        const shouldStartList = number === 1;
+        const shouldContinueList = expectedNextItem === number;
+        if (shouldStartList) {
+          expectedNextItem = 2;
+        } else if (shouldContinueList) {
+          expectedNextItem = number + 1;
+        } else {
+          return marker;
+        }
+        const separator = offset > 0 && !spacing.includes("\n") ? "\n" : spacing;
+        return `${separator}${rawNumber}${punctuation} `;
+      },
+    );
+    const listSeparator = prefix && !prefix.endsWith("\n") ? "\n" : "";
+    return `${prefix}${listSeparator}${normalizedBody}`;
+  };
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .split(/(`[^`\n]+`)/g)
+    .map((part) =>
+      part.startsWith("`")
+        ? part
+        : compactLabeledListPattern.test(part) ||
+            compactNumberedListPattern.test(part)
+          ? part.split("\n").map(splitSequentialListItems).join("\n")
+          : part,
+    )
+    .join("");
+}
+
 function appendInlineMarkdown(parent, text) {
-  const inlineCodePattern = /`([^`\n]+)`/g;
+  const inlinePattern = /`([^`\n]+)`|\*\*([^\n]+?)\*\*/g;
   let cursor = 0;
-  for (const match of text.matchAll(inlineCodePattern)) {
+  for (const match of text.matchAll(inlinePattern)) {
     if (match.index > cursor) {
       appendTextWithLineBreaks(parent, text.slice(cursor, match.index));
     }
-    const code = document.createElement("code");
-    code.className = "message-inline-code";
-    code.textContent = match[1];
-    parent.append(code);
+    if (match[1] !== undefined) {
+      const code = document.createElement("code");
+      code.className = "message-inline-code";
+      code.textContent = match[1];
+      parent.append(code);
+    } else {
+      const strong = document.createElement("strong");
+      strong.textContent = match[2];
+      parent.append(strong);
+    }
     cursor = match.index + match[0].length;
   }
   if (cursor < text.length) {
@@ -623,7 +684,7 @@ function appendList(container, items, ordered) {
 }
 
 function appendTextBlocks(container, text) {
-  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  const lines = normalizeMessageMarkdownStructure(text).split("\n");
   let paragraph = [];
   let listItems = [];
   let orderedList = false;

@@ -34,7 +34,7 @@
 
   <rect class="bg" width="1600" height="650"/>
   <text class="title" x="54" y="54">AI Loop Engine</text>
-  <text class="subtitle" x="54" y="84">Local-first loop inspection for context, drafting, checks, verification, retries, refusals, sessions, and replay.</text>
+  <text class="subtitle" x="54" y="84">Local-first loop inspection for context, drafting, format checks, verification, retries, refusals, sessions, and replay.</text>
 
   <rect class="band context" x="54" y="120" rx="14" ry="14" width="294" height="360"/>
   <text class="label" x="80" y="158">Context Provider</text>
@@ -57,9 +57,9 @@
   <text class="small" x="734" y="214">Draft answer</text>
   <text class="tiny" x="734" y="236">Ollama or hosted model</text>
   <rect class="box check" x="436" y="298" rx="10" ry="10" width="200" height="82"/>
-  <text class="small" x="460" y="326">Mechanical checks</text>
-  <text class="tiny" x="460" y="348">Citations exist and match</text>
-  <text class="tiny" x="460" y="366">Prompt evidence</text>
+  <text class="small" x="460" y="326">Format + checks</text>
+  <text class="tiny" x="460" y="348">Readable Markdown</text>
+  <text class="tiny" x="460" y="366">Citations match evidence</text>
   <rect class="box check" x="710" y="298" rx="10" ry="10" width="200" height="82"/>
   <text class="small" x="734" y="326">Verifier</text>
   <text class="tiny" x="734" y="348">Real backend verifies</text>

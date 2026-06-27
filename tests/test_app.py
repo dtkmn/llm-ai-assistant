@@ -437,6 +437,7 @@ def test_static_frontend_is_served():
     styles = client.get("/assets/styles.css")
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert "AI Loop Engine" in response.text
     assert "Threads" in response.text
     assert "Loop Recipe" in response.text
@@ -448,6 +449,7 @@ def test_static_frontend_is_served():
     assert "memory-status" in response.text
     assert "/assets/app.js" in response.text
     assert script.status_code == 200
+    assert script.headers["cache-control"] == "no-store"
     assert "Ask a question, or add context" in script.text
     assert "direct mode" in script.text
     assert "renderMessageThinking" in script.text
@@ -456,12 +458,15 @@ def test_static_frontend_is_served():
     assert "recipe_id" in script.text
     assert "renderRuns" in script.text
     assert "runMemoryLabel" in script.text
+    assert "normalizeMessageMarkdownStructure" in script.text
     assert "result.trace?.model_thinking" in script.text
     assert "message-thinking" in script.text
     assert "innerHTML" not in script.text
     assert styles.status_code == 200
+    assert styles.headers["cache-control"] == "no-store"
     assert ".thread-button" in styles.text
     assert ".memory-status" in styles.text
+    assert ".message-content strong" in styles.text
     assert ".message-thinking" in styles.text
     assert ".message-code-block" in styles.text
 
@@ -524,6 +529,16 @@ const recipes = [{
   is_default: true,
 }];
 
+function collectNodes(root, predicate, matches = []) {
+  for (const child of root.children) {
+    if (predicate(child)) {
+      matches.push(child);
+    }
+    collectNodes(child, predicate, matches);
+  }
+  return matches;
+}
+
 globalThis.fetch = async (url, options = {}) => {
   const method = String(options.method || "GET").toUpperCase();
   if (url === "/api/config") {
@@ -559,7 +574,16 @@ globalThis.fetch = async (url, options = {}) => {
     queryBodies.push(request);
     return jsonResponse({
       answer: [
+        "**Step-by-step detail** 1. **Trigger:** Pressure builds. 2. **Outcome:** The plan escalates.",
+        "",
+        "Use Java 8. It introduced lambdas.",
+        "",
+        "1. First do X. 2. Then do Y.",
+        "",
+        "1. install dependencies. 2. run tests.",
+        "",
         "Here is `dp[0]` safely:",
+        "Keep `step 1. Start 2. Stop` inline.",
         "```java",
         "public class FibonacciDP {",
         "  public static int fib(int n) { return n; }",
@@ -638,6 +662,35 @@ const inlineCode = findNode(
   (node) => node.className === "message-inline-code",
 );
 assert.equal(inlineCode.textContent, "dp[0]");
+const compactInlineCode = findNode(
+  messageContent,
+  (node) => node.tagName === "CODE" && node.textContent === "step 1. Start 2. Stop",
+);
+assert.ok(compactInlineCode, "compact numbered inline code should stay inline");
+const boldText = findNode(messageContent, (node) => node.tagName === "STRONG");
+assert.ok(boldText, "assistant markdown bold should become strong text");
+assert.equal(boldText.textContent, "Step-by-step detail");
+const orderedLists = collectNodes(messageContent, (node) => node.tagName === "OL");
+assert.ok(orderedLists.length >= 2, "compact ordered markdown should become ordered lists");
+const orderedText = orderedLists.map((node) => nodeText(node)).join(" ").replace(/\s+/g, " ");
+assert.ok(orderedText.includes("Trigger: Pressure builds."));
+assert.ok(orderedText.includes("Outcome: The plan escalates."));
+assert.ok(orderedText.includes("First do X."));
+assert.ok(orderedText.includes("Then do Y."));
+assert.ok(orderedText.includes("install dependencies."));
+assert.ok(orderedText.includes("run tests."));
+assert.equal(
+  orderedText.includes("It introduced lambdas."),
+  false,
+  "ordinary version prose should not become an ordered-list item",
+);
+const messageText = nodeText(messageContent).replace(/\s+/g, " ");
+assert.ok(messageText.includes("Use Java 8. It introduced lambdas."));
+assert.equal(
+  nodeText(messageContent).includes("**"),
+  false,
+  "rendered markdown markers should not leak into normal text",
+);
 const list = findNode(messageContent, (node) => node.tagName === "UL");
 assert.ok(list, "assistant markdown list should render as a list");
 const image = findNode(messageContent, (node) => node.tagName === "IMG");
@@ -2019,6 +2072,7 @@ def test_query_endpoint_allows_no_context_loop():
     assert "mock response" in payload["answer"]
     assert payload["summary"]["context_provider"] == "none"
     assert payload["summary"]["document"] is None
+    assert payload["summary"]["format_check"] == "format_passed"
     assert payload["summary"]["final_decision"] == "not_verified"
     assert payload["trace"]["retrieved_chunk_count"] == 0
     assert payload["trace"]["citations"] == []
