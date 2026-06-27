@@ -213,8 +213,10 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 
 ### Loop Contract
 - **Context mode:** Direct no-context chat is allowed, but it is reported as
-  `not_verified` with no citations. Document context is optional and upgrades
-  the loop into grounded retrieval plus citation/verifier checks.
+  `not_verified` with no citations. Direct answers should match the depth the
+  user asks for, but model knowledge and thread memory are not treated as
+  verified evidence. Document context is optional and upgrades the loop into
+  grounded retrieval plus citation/verifier checks.
 - **Current context provider:** Document context
 - **Current document loop shape:** validate/decode -> split -> embed/index -> retrieve -> draft answer -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
 - **Context provider boundary:** `DocumentContextProvider` wraps the current

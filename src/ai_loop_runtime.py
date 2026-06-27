@@ -1819,8 +1819,16 @@ class AILoopEngine:
         )
         return (
             "You are AI Loop Engine running without an external context provider. "
-            "Answer the user's question directly. Be concise, do not invent "
-            "citations, and say when you are unsure.\n\n"
+            "Answer the user's current question directly. Match the depth the "
+            "user asks for: give a fuller step-by-step explanation when they "
+            "ask for detail, and keep simple yes/no or factual answers brief. "
+            "Do not invent citations, and say when you are unsure. Treat model "
+            "knowledge and thread memory as not verified evidence. Use clean "
+            "Markdown for readability: short paragraphs, bullets or numbered "
+            "lists with each item on its own line, and bold labels only when "
+            "they help scanning. Do not include internal verification labels "
+            "such as not_verified or supported in the answer; the UI reports "
+            "verification separately.\n\n"
             f"Question: {effective_question}\n"
             "Answer:"
         )

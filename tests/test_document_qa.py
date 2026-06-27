@@ -294,6 +294,12 @@ def test_no_context_query_uses_same_thread_conversation_history():
     assert "Do you know what dynamic programming is?" in prompt
     assert "Assistant: Yes." in prompt
     assert "Current question: Please explain it in layman terms." in prompt
+    assert "give a fuller step-by-step explanation" in prompt
+    assert "model knowledge and thread memory as not verified evidence" in prompt
+    assert "Use clean Markdown for readability" in prompt
+    assert "each item on its own line" in prompt
+    assert "Do not include internal verification labels" in prompt
+    assert "Be concise" not in prompt
     assert result.loop_report.run.user_input == "Please explain it in layman terms."
     assert result.loop_report.run.metadata["conversation_context_turns"] == 2
 

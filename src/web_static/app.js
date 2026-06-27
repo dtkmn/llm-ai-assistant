@@ -579,17 +579,40 @@ function appendTextWithLineBreaks(parent, text) {
   }
 }
 
+function normalizeMessageMarkdownStructure(text) {
+  return String(text || "")
+    .replace(/\r\n/g, "\n")
+    .split(/(`[^`\n]+`)/g)
+    .map((part) =>
+      part.startsWith("`")
+        ? part
+        : /(?:^|\s)1[.)]\s+\*\*[^*\n]{1,80}:\*\*/.test(part)
+          ? part.replace(
+              /([^\n])\s+(\d{1,2})[.)]\s+(?=\*\*[^*\n]{1,80}:\*\*)/g,
+              "$1\n$2. ",
+            )
+          : part,
+    )
+    .join("");
+}
+
 function appendInlineMarkdown(parent, text) {
-  const inlineCodePattern = /`([^`\n]+)`/g;
+  const inlinePattern = /`([^`\n]+)`|\*\*([^\n]+?)\*\*/g;
   let cursor = 0;
-  for (const match of text.matchAll(inlineCodePattern)) {
+  for (const match of text.matchAll(inlinePattern)) {
     if (match.index > cursor) {
       appendTextWithLineBreaks(parent, text.slice(cursor, match.index));
     }
-    const code = document.createElement("code");
-    code.className = "message-inline-code";
-    code.textContent = match[1];
-    parent.append(code);
+    if (match[1] !== undefined) {
+      const code = document.createElement("code");
+      code.className = "message-inline-code";
+      code.textContent = match[1];
+      parent.append(code);
+    } else {
+      const strong = document.createElement("strong");
+      strong.textContent = match[2];
+      parent.append(strong);
+    }
     cursor = match.index + match[0].length;
   }
   if (cursor < text.length) {
@@ -623,7 +646,7 @@ function appendList(container, items, ordered) {
 }
 
 function appendTextBlocks(container, text) {
-  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  const lines = normalizeMessageMarkdownStructure(text).split("\n");
   let paragraph = [];
   let listItems = [];
   let orderedList = false;

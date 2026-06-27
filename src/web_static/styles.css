@@ -391,6 +391,11 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.message-content strong {
+  color: var(--text);
+  font-weight: 850;
+}
+
 .message-list {
   display: grid;
   gap: 6px;
