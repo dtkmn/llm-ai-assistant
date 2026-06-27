@@ -14,6 +14,9 @@ except ImportError:
 SELF_CHECK_REFUSAL_ANSWER = (
     "I could not find enough relevant information in the document to answer that."
 )
+FORMAT_CHECK_FAILURE_ANSWER = (
+    "The model answer failed formatting checks after retry. Please try again."
+)
 SELF_CHECK_PASS_OUTCOMES = {"supported", "not_verified"}
 VERIFIER_OUTCOMES = {"supported", "unsupported", "insufficient"}
 
@@ -82,6 +85,13 @@ class AnswerSelfCheck:
     retry_attempted: bool = False
 
 
+@dataclass(frozen=True)
+class AnswerFormatCheck:
+    outcome: str
+    reasons: List[str]
+    retry_attempted: bool = False
+
+
 def answer_is_refusal(answer: str) -> bool:
     lowered = answer.lower()
     refusal_markers = (
@@ -104,6 +114,61 @@ def inline_citation_ids(answer: str) -> List[int]:
         except ValueError:
             continue
     return citation_ids
+
+
+def format_check_answer(
+    answer: str, *, retry_attempted: bool = False
+) -> AnswerFormatCheck:
+    clean_answer = answer.strip()
+    check_text = re.sub(r"```.*?```", " ", clean_answer, flags=re.DOTALL)
+    check_text = re.sub(r"`[^`\n]+`", " ", check_text)
+    reasons: List[str] = []
+
+    if re.search(
+        r"\b(?:not_verified|mechanical_checks_passed|needs_retry|needs_refusal|"
+        r"llm_verifier_[a-z_]+|self_check_[a-z_]+)\b",
+        check_text,
+    ):
+        reasons.append("internal_verification_label")
+
+    compact_labeled_list_pattern = re.compile(
+        r"(?:^|\s)1[.)]\s+(?:\*\*)?[^:\n]{1,80}:(?:\*\*)?"
+        r".+?\s+2[.)]\s+(?:\*\*)?[^:\n]{1,80}:(?:\*\*)?",
+        flags=re.DOTALL,
+    )
+    compact_numbered_list_pattern = re.compile(
+        r"(?:^|:)\s*1[.)]\s+\S[^\n]{2,}?\s+2[.)]\s+\S",
+        flags=re.DOTALL,
+    )
+    for line in check_text.splitlines():
+        if compact_labeled_list_pattern.search(
+            line
+        ) or compact_numbered_list_pattern.search(line):
+            reasons.append("compact_ordered_list")
+            break
+
+    if reasons:
+        return AnswerFormatCheck(
+            outcome="needs_retry",
+            reasons=reasons,
+            retry_attempted=retry_attempted,
+        )
+
+    return AnswerFormatCheck(
+        outcome="format_passed",
+        reasons=["clean_web_markdown"],
+        retry_attempted=retry_attempted,
+    )
+
+
+def loop_decision_for_format_check(
+    format_check: AnswerFormatCheck,
+) -> LoopDecision:
+    if format_check.outcome == "format_passed":
+        return LoopDecision.CONTINUE
+    if format_check.outcome == "needs_retry":
+        return LoopDecision.RETRY
+    return LoopDecision.ERROR
 
 
 def citation_ids_are_valid(
@@ -652,4 +717,15 @@ def self_check_retry_instruction(self_check: AnswerSelfCheck) -> str:
         f"({reasons}). Answer again using only the context above. Include at least "
         "one bracketed citation like [1] for supported claims. If the context does "
         "not contain the answer, say that clearly."
+    )
+
+
+def format_check_retry_instruction(format_check: AnswerFormatCheck) -> str:
+    reasons = ", ".join(format_check.reasons)
+    return (
+        "Format retry instruction: the previous answer was hard to render in a "
+        f"web chat UI ({reasons}). Keep the facts and citations unchanged, but "
+        "rewrite the answer using clean Markdown. Put each numbered-list item "
+        "on its own line, use short paragraphs, avoid raw internal verification "
+        "labels such as not_verified or needs_retry, and do not emit HTML."
     )

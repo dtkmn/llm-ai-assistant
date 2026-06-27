@@ -140,12 +140,14 @@ def test_golden_document_supported_answer_is_cited_and_verified(tmp_path):
         LoopPhase.CONTEXT_SELECT,
         LoopPhase.RETRIEVE,
         LoopPhase.DRAFT,
+        LoopPhase.FORMAT_CHECK,
         LoopPhase.MECHANICAL_CHECK,
         LoopPhase.VERIFY,
         LoopPhase.FINAL,
     ]
     assert only_step(result, LoopPhase.RETRIEVE).decision == LoopDecision.CONTINUE
     assert only_step(result, LoopPhase.DRAFT).decision == LoopDecision.CONTINUE
+    assert only_step(result, LoopPhase.FORMAT_CHECK).decision == LoopDecision.CONTINUE
     mechanical_step = only_step(result, LoopPhase.MECHANICAL_CHECK)
     verify_step = only_step(result, LoopPhase.VERIFY)
     assert mechanical_step.decision == LoopDecision.CONTINUE
@@ -175,6 +177,7 @@ def test_golden_document_unsupported_answer_fails_closed(tmp_path):
         LoopPhase.CONTEXT_SELECT,
         LoopPhase.RETRIEVE,
         LoopPhase.DRAFT,
+        LoopPhase.FORMAT_CHECK,
         LoopPhase.MECHANICAL_CHECK,
         LoopPhase.VERIFY,
         LoopPhase.REFUSE,
@@ -206,9 +209,11 @@ def test_golden_document_missing_citation_retries_then_passes(tmp_path):
         LoopPhase.CONTEXT_SELECT,
         LoopPhase.RETRIEVE,
         LoopPhase.DRAFT,
+        LoopPhase.FORMAT_CHECK,
         LoopPhase.MECHANICAL_CHECK,
         LoopPhase.RETRY,
         LoopPhase.DRAFT,
+        LoopPhase.FORMAT_CHECK,
         LoopPhase.MECHANICAL_CHECK,
         LoopPhase.VERIFY,
         LoopPhase.FINAL,

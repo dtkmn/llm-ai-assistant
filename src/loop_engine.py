@@ -105,6 +105,7 @@ class LoopPhase(str, Enum):
     CONTEXT_SELECT = "context_select"
     RETRIEVE = "retrieve"
     DRAFT = "draft"
+    FORMAT_CHECK = "format_check"
     MECHANICAL_CHECK = "mechanical_check"
     VERIFY = "verify"
     RETRY = "retry"

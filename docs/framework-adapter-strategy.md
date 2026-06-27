@@ -38,7 +38,7 @@ The useful internal adapter boundary is already mostly present:
   context provider, backend/model, policy, steps, final decision, final answer,
   error, and metadata.
 - `LoopStep`: phase-level events for context selection, retrieval, drafting,
-  mechanical checks, verifier decisions, retries, refusals, final answers, and
+  format checks, mechanical checks, verifier decisions, retries, refusals, final answers, and
   errors.
 - `LoopSession`: bounded in-memory run history keyed by `session_id`, with raw
   JSONL export for local replay/debug artifacts.
@@ -67,6 +67,7 @@ unless that capture is disabled.
 | `LoopRun.context_provider` | trace metadata | Example: `document`. Later: web, memory, tool, etc. |
 | `LoopStep.phase=context_select/retrieve` | custom span | These are AI Loop Engine-specific context phases. |
 | `LoopStep.phase=draft` | generation-like span or custom span | Use generation span only if OpenAI SDK data shape can represent the model call honestly. |
+| `LoopStep.phase=format_check` | custom span | Presentation/readability gate, not evidence verification. |
 | `LoopStep.phase=mechanical_check` | custom span | Deterministic check, not model generation. |
 | `LoopStep.phase=verify` | guardrail span or custom span | Treat as guardrail/verifier evidence; preserve outcome and reasons. |
 | `LoopStep.phase=retry/refuse/error/final` | custom span | These are loop-control decisions. |

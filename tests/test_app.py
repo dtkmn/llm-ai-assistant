@@ -529,6 +529,16 @@ const recipes = [{
   is_default: true,
 }];
 
+function collectNodes(root, predicate, matches = []) {
+  for (const child of root.children) {
+    if (predicate(child)) {
+      matches.push(child);
+    }
+    collectNodes(child, predicate, matches);
+  }
+  return matches;
+}
+
 globalThis.fetch = async (url, options = {}) => {
   const method = String(options.method || "GET").toUpperCase();
   if (url === "/api/config") {
@@ -567,6 +577,10 @@ globalThis.fetch = async (url, options = {}) => {
         "**Step-by-step detail** 1. **Trigger:** Pressure builds. 2. **Outcome:** The plan escalates.",
         "",
         "Use Java 8. It introduced lambdas.",
+        "",
+        "1. First do X. 2. Then do Y.",
+        "",
+        "1. install dependencies. 2. run tests.",
         "",
         "Here is `dp[0]` safely:",
         "Keep `step 1. Start 2. Stop` inline.",
@@ -656,11 +670,15 @@ assert.ok(compactInlineCode, "compact numbered inline code should stay inline");
 const boldText = findNode(messageContent, (node) => node.tagName === "STRONG");
 assert.ok(boldText, "assistant markdown bold should become strong text");
 assert.equal(boldText.textContent, "Step-by-step detail");
-const orderedList = findNode(messageContent, (node) => node.tagName === "OL");
-assert.ok(orderedList, "inline ordered markdown should become an ordered list");
-const orderedText = nodeText(orderedList).replace(/\s+/g, " ");
+const orderedLists = collectNodes(messageContent, (node) => node.tagName === "OL");
+assert.ok(orderedLists.length >= 2, "compact ordered markdown should become ordered lists");
+const orderedText = orderedLists.map((node) => nodeText(node)).join(" ").replace(/\s+/g, " ");
 assert.ok(orderedText.includes("Trigger: Pressure builds."));
 assert.ok(orderedText.includes("Outcome: The plan escalates."));
+assert.ok(orderedText.includes("First do X."));
+assert.ok(orderedText.includes("Then do Y."));
+assert.ok(orderedText.includes("install dependencies."));
+assert.ok(orderedText.includes("run tests."));
 assert.equal(
   orderedText.includes("It introduced lambdas."),
   false,
@@ -2054,6 +2072,7 @@ def test_query_endpoint_allows_no_context_loop():
     assert "mock response" in payload["answer"]
     assert payload["summary"]["context_provider"] == "none"
     assert payload["summary"]["document"] is None
+    assert payload["summary"]["format_check"] == "format_passed"
     assert payload["summary"]["final_decision"] == "not_verified"
     assert payload["trace"]["retrieved_chunk_count"] == 0
     assert payload["trace"]["citations"] == []

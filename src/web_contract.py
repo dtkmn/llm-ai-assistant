@@ -218,6 +218,7 @@ def loop_phase_label(phase: Optional[str]) -> str:
         "context_select": "Context",
         "retrieve": "Retrieve",
         "draft": "Draft",
+        "format_check": "Format",
         "mechanical_check": "Check",
         "verify": "Verify",
         "retry": "Retry",
@@ -290,6 +291,7 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
             "recipe_id": None,
             "recipe_name": None,
             "draft_attempt_count": 0,
+            "format_check": None,
             "mechanical_check": None,
             "verifier": None,
             "retry_attempted": False,
@@ -302,6 +304,9 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
     run = (public_loop_report or {}).get("run") or {}
     steps = run.get("steps") or []
     trace = query_result.trace
+    format_steps = [
+        step for step in steps if step.get("phase") == "format_check"
+    ]
     mechanical_steps = [
         step for step in steps if step.get("phase") == "mechanical_check"
     ]
@@ -344,6 +349,9 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
         "recipe_name": run.get("metadata", {}).get("recipe_name"),
         "draft_attempt_count": sum(
             1 for step in steps if step.get("phase") == "draft"
+        ),
+        "format_check": (
+            format_steps[-1].get("output_summary") if format_steps else None
         ),
         "mechanical_check": (
             mechanical_steps[-1].get("output_summary") if mechanical_steps else None

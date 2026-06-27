@@ -257,9 +257,15 @@ def test_query_before_document_runs_no_context_loop():
     assert [step.phase for step in run.steps] == [
         LoopPhase.CONTEXT_SELECT,
         LoopPhase.DRAFT,
+        LoopPhase.FORMAT_CHECK,
         LoopPhase.VERIFY,
         LoopPhase.FINAL,
     ]
+    format_step = next(
+        step for step in run.steps if step.phase == LoopPhase.FORMAT_CHECK
+    )
+    assert format_step.output_summary == "format_passed"
+    assert format_step.metadata["reasons"] == ["clean_web_markdown"]
     verify_step = next(step for step in run.steps if step.phase == LoopPhase.VERIFY)
     assert verify_step.verification.outcome.value == "not_verified"
     assert verify_step.metadata["verifier_skipped"] is True
@@ -485,6 +491,190 @@ def test_no_context_query_preserves_code_indices():
         assert draft_step.metadata["removed_inline_citation_ids"] == []
 
 
+def test_no_context_format_check_retries_compact_markdown_list():
+    prompts = []
+    answers = [
+        (
+            "1. **Trigger:** Pressure builds. 2. **Outcome:** The plan "
+            "escalates."
+        ),
+        "1. **Trigger:** Pressure builds.\n2. **Outcome:** The plan escalates.",
+    ]
+
+    def invoke(prompt):
+        prompts.append(prompt)
+        return answers[len(prompts) - 1]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(invoke=invoke, last_thinking=None)
+
+    result = qa.query_with_trace("Explain the sequence.", session_id="format_direct")
+
+    assert result.answer == answers[1]
+    assert len(prompts) == 2
+    assert "Format retry instruction" in prompts[1]
+    assert "compact_ordered_list" in prompts[1]
+    phases = [step.phase for step in result.loop_report.run.steps]
+    assert phases == [
+        LoopPhase.CONTEXT_SELECT,
+        LoopPhase.DRAFT,
+        LoopPhase.FORMAT_CHECK,
+        LoopPhase.RETRY,
+        LoopPhase.DRAFT,
+        LoopPhase.FORMAT_CHECK,
+        LoopPhase.VERIFY,
+        LoopPhase.FINAL,
+    ]
+    format_steps = [
+        step
+        for step in result.loop_report.run.steps
+        if step.phase == LoopPhase.FORMAT_CHECK
+    ]
+    assert [step.output_summary for step in format_steps] == [
+        "needs_retry",
+        "format_passed",
+    ]
+    assert format_steps[0].metadata["reasons"] == ["compact_ordered_list"]
+    assert format_steps[1].retry_count == 1
+
+
+def test_no_context_format_check_retries_unlabeled_compact_numbered_list():
+    prompts = []
+    answers = [
+        "1. install dependencies. 2. run tests.",
+        "1. install dependencies.\n2. run tests.",
+    ]
+
+    def invoke(prompt):
+        prompts.append(prompt)
+        return answers[len(prompts) - 1]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(invoke=invoke, last_thinking=None)
+
+    result = qa.query_with_trace("Give me steps.", session_id="format_plain_list")
+
+    assert result.answer == answers[1]
+    assert len(prompts) == 2
+    assert "Format retry instruction" in prompts[1]
+    assert "compact_ordered_list" in prompts[1]
+    format_steps = [
+        step
+        for step in result.loop_report.run.steps
+        if step.phase == LoopPhase.FORMAT_CHECK
+    ]
+    assert [step.output_summary for step in format_steps] == [
+        "needs_retry",
+        "format_passed",
+    ]
+    assert format_steps[0].metadata["reasons"] == ["compact_ordered_list"]
+
+
+def test_no_context_format_check_retries_compact_numbered_list_after_intro():
+    prompts = []
+    answers = [
+        "Here are the steps:\n1. install dependencies. 2. run tests.",
+        "Here are the steps:\n1. install dependencies.\n2. run tests.",
+    ]
+
+    def invoke(prompt):
+        prompts.append(prompt)
+        return answers[len(prompts) - 1]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(invoke=invoke, last_thinking=None)
+
+    result = qa.query_with_trace(
+        "Give me steps.", session_id="format_intro_plain_list"
+    )
+
+    assert result.answer == answers[1]
+    assert len(prompts) == 2
+    assert "compact_ordered_list" in prompts[1]
+    format_steps = [
+        step
+        for step in result.loop_report.run.steps
+        if step.phase == LoopPhase.FORMAT_CHECK
+    ]
+    assert [step.output_summary for step in format_steps] == [
+        "needs_retry",
+        "format_passed",
+    ]
+    assert format_steps[0].metadata["reasons"] == ["compact_ordered_list"]
+
+
+def test_no_context_format_check_does_not_retry_version_prose():
+    cases = [
+        ("What changed in Java 8?", "Use Java 8. It introduced lambdas."),
+        (
+            "Show literal step text.",
+            "Keep `1. install dependencies. 2. run tests.` inline.",
+        ),
+    ]
+
+    for question, answer in cases:
+        qa = DocumentQA(fast_mode=True, llm_backend="mock")
+        qa.llm = SimpleNamespace(
+            invoke=lambda _prompt, value=answer: value,
+            last_thinking=None,
+        )
+
+        result = qa.query_with_trace(question)
+
+        assert result.answer == answer
+        assert LoopPhase.RETRY not in [
+            step.phase for step in result.loop_report.run.steps
+        ]
+        format_step = next(
+            step
+            for step in result.loop_report.run.steps
+            if step.phase == LoopPhase.FORMAT_CHECK
+        )
+        assert format_step.output_summary == "format_passed"
+
+
+def test_no_context_format_check_fails_closed_when_retry_still_bad():
+    prompts = []
+    bad_answer = (
+        "1. **Trigger:** Pressure builds. 2. **Outcome:** The plan escalates. "
+        "not_verified"
+    )
+
+    def invoke(prompt):
+        prompts.append(prompt)
+        return bad_answer
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(invoke=invoke, last_thinking=None)
+
+    result = qa.query_with_trace("Explain the sequence.", session_id="format_failed")
+
+    assert result.answer == answer_loop_module.FORMAT_CHECK_FAILURE_ANSWER
+    assert result.trace.error_message == "format_check_failed"
+    assert result.trace.self_check is None
+    assert result.trace.citations == []
+    assert len(prompts) == 2
+
+    run = result.loop_report.run
+    assert run.final_decision == LoopDecision.ERROR
+    assert run.error_message == "format_check_failed"
+    assert LoopPhase.VERIFY not in [step.phase for step in run.steps]
+    format_steps = [
+        step for step in run.steps if step.phase == LoopPhase.FORMAT_CHECK
+    ]
+    assert [step.output_summary for step in format_steps] == [
+        "needs_retry",
+        "needs_retry",
+    ]
+    assert format_steps[1].metadata["retry_attempted"] is True
+    error_step = next(step for step in run.steps if step.phase == LoopPhase.ERROR)
+    assert error_step.name == "Format check failed"
+    assert error_step.metadata["reasons"] == [
+        "internal_verification_label",
+        "compact_ordered_list",
+    ]
+
+
 def test_no_context_empty_draft_fails_closed():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.llm = SimpleNamespace(invoke=lambda _prompt: "   ", last_thinking=None)
@@ -657,14 +847,19 @@ def test_query_with_trace_includes_loop_report_for_prompt_evidence(tmp_path):
         LoopPhase.CONTEXT_SELECT,
         LoopPhase.RETRIEVE,
         LoopPhase.DRAFT,
+        LoopPhase.FORMAT_CHECK,
         LoopPhase.MECHANICAL_CHECK,
         LoopPhase.VERIFY,
         LoopPhase.FINAL,
     ]
     retrieve_step = next(step for step in run.steps if step.phase == LoopPhase.RETRIEVE)
+    format_step = next(
+        step for step in run.steps if step.phase == LoopPhase.FORMAT_CHECK
+    )
     verify_step = next(step for step in run.steps if step.phase == LoopPhase.VERIFY)
     assert retrieve_step.metadata["retrieved_chunk_count"] == len(result.trace.citations)
     assert retrieve_step.metadata["citation_ids"] == [1]
+    assert format_step.output_summary == "format_passed"
     assert verify_step.decision == LoopDecision.NOT_VERIFIED
     assert verify_step.verification.outcome.value == "not_verified"
     assert verify_step.verification.reasons == tuple(result.trace.self_check.reasons)
@@ -1100,6 +1295,189 @@ def test_self_check_retries_missing_inline_citation(tmp_path):
         if step.phase == LoopPhase.DRAFT and step.retry_count == 1
     ]
     assert len(retry_draft_steps) == 1
+
+
+def test_document_format_check_retries_without_losing_citations(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+
+    class FormatRetryChain:
+        def __init__(self):
+            self.calls = []
+
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            self.calls.append(self_check_instruction)
+            return SimpleNamespace(
+                answer=(
+                    "1. **Launch:** Project Phoenix launches in June 2026 [1]. "
+                    "2. **Owner:** Alex owns the rollout [1]."
+                ),
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            self.calls.append(self_check_instruction)
+            return SimpleNamespace(
+                answer=(
+                    "1. **Launch:** Project Phoenix launches in June 2026 [1].\n"
+                    "2. **Owner:** Alex owns the rollout [1]."
+                ),
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    retrieval_chain = FormatRetryChain()
+    replace_retrieval_chain(qa, retrieval_chain)
+
+    result = qa.query_with_trace("Summarize Project Phoenix.")
+
+    assert result.answer == (
+        "1. **Launch:** Project Phoenix launches in June 2026 [1].\n"
+        "2. **Owner:** Alex owns the rollout [1]."
+    )
+    assert len(retrieval_chain.calls) == 2
+    assert retrieval_chain.calls[0] == ""
+    assert "Format retry instruction" in retrieval_chain.calls[1]
+    assert "compact_ordered_list" in retrieval_chain.calls[1]
+    assert result.trace.citations == [citation_for(document.name)]
+    assert result.trace.self_check.outcome == "not_verified"
+
+    format_steps = [
+        step
+        for step in result.loop_report.run.steps
+        if step.phase == LoopPhase.FORMAT_CHECK
+    ]
+    assert [step.output_summary for step in format_steps] == [
+        "needs_retry",
+        "format_passed",
+    ]
+    assert format_steps[0].metadata["reasons"] == ["compact_ordered_list"]
+    assert format_steps[1].retry_count == 1
+    retry_step = next(
+        step for step in result.loop_report.run.steps if step.phase == LoopPhase.RETRY
+    )
+    assert retry_step.name == "Retry answer format"
+    assert retry_step.metadata["reasons"] == ["compact_ordered_list"]
+
+
+def test_document_format_check_retries_compact_numbered_list_after_intro(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+
+    class IntroFormatRetryChain:
+        def __init__(self):
+            self.calls = []
+
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            self.calls.append(self_check_instruction)
+            return SimpleNamespace(
+                answer=(
+                    "Here are the steps:\n"
+                    "1. cite the June launch [1]. "
+                    "2. name Alex as owner [1]."
+                ),
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            self.calls.append(self_check_instruction)
+            return SimpleNamespace(
+                answer=(
+                    "Here are the steps:\n"
+                    "1. cite the June launch [1].\n"
+                    "2. name Alex as owner [1]."
+                ),
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    retrieval_chain = IntroFormatRetryChain()
+    replace_retrieval_chain(qa, retrieval_chain)
+
+    result = qa.query_with_trace("Summarize Project Phoenix.")
+
+    assert result.answer == (
+        "Here are the steps:\n"
+        "1. cite the June launch [1].\n"
+        "2. name Alex as owner [1]."
+    )
+    assert len(retrieval_chain.calls) == 2
+    assert "compact_ordered_list" in retrieval_chain.calls[1]
+    assert result.trace.citations == [citation_for(document.name)]
+    assert result.trace.self_check.outcome == "not_verified"
+    format_steps = [
+        step
+        for step in result.loop_report.run.steps
+        if step.phase == LoopPhase.FORMAT_CHECK
+    ]
+    assert [step.output_summary for step in format_steps] == [
+        "needs_retry",
+        "format_passed",
+    ]
+
+
+def test_document_format_check_fails_closed_when_retry_still_bad(tmp_path):
+    qa, document = create_processed_mock_qa(tmp_path)
+
+    class FailedFormatRetryChain:
+        def __init__(self):
+            self.calls = []
+
+        def invoke_with_trace(self, question, self_check_instruction=""):
+            self.calls.append(self_check_instruction)
+            return SimpleNamespace(
+                answer=(
+                    "1. **Launch:** Project Phoenix launches in June 2026 [1]. "
+                    "2. **Status:** not_verified [1]."
+                ),
+                retrieved_chunk_count=1,
+                citations=[citation_for(document.name)],
+                context="Project Phoenix launches in June 2026.",
+            )
+
+        def retry_with_trace(self, question, previous_result, self_check_instruction):
+            self.calls.append(self_check_instruction)
+            return SimpleNamespace(
+                answer=(
+                    "1. **Launch:** Project Phoenix launches in June 2026 [1]. "
+                    "2. **Status:** not_verified [1]."
+                ),
+                retrieved_chunk_count=previous_result.retrieved_chunk_count,
+                citations=previous_result.citations,
+                context=previous_result.context,
+            )
+
+    retrieval_chain = FailedFormatRetryChain()
+    replace_retrieval_chain(qa, retrieval_chain)
+
+    result = qa.query_with_trace("Summarize Project Phoenix.")
+
+    assert result.answer == answer_loop_module.FORMAT_CHECK_FAILURE_ANSWER
+    assert result.trace.error_message == "format_check_failed"
+    assert result.trace.self_check is None
+    assert result.trace.citations == []
+    assert len(retrieval_chain.calls) == 2
+    assert "Format retry instruction" in retrieval_chain.calls[1]
+
+    run = result.loop_report.run
+    assert run.final_decision == LoopDecision.ERROR
+    assert LoopPhase.MECHANICAL_CHECK not in [step.phase for step in run.steps]
+    assert LoopPhase.VERIFY not in [step.phase for step in run.steps]
+    format_steps = [
+        step for step in run.steps if step.phase == LoopPhase.FORMAT_CHECK
+    ]
+    assert [step.output_summary for step in format_steps] == [
+        "needs_retry",
+        "needs_retry",
+    ]
+    assert all(
+        "internal_verification_label" in step.metadata["reasons"]
+        for step in format_steps
+    )
 
 
 def test_self_check_refuses_when_retry_still_fails(tmp_path):

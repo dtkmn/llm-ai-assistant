@@ -1,13 +1,13 @@
 # AI Loop Engine
 AI Loop Engine is a local-first engine for inspecting and hardening AI answer
-loops: context selection, retrieval, drafting, citation checks, claim
-verification, retries, refusals, middleware guardrails, evals, and replay. The
+loops: context selection, retrieval, drafting, format checks, citation checks,
+claim verification, retries, refusals, middleware guardrails, evals, and replay. The
 current built-in context source is document upload, but the product focus is the
 loop: making agent behavior visible, testable, and harder to fake.
 
 ## Features
-- **Loop Engineering Core:** Treats retrieval, drafting, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
-- **Observable Runtime Reports:** Emits structured loop evidence for context selection, prompt evidence, drafts, verifier decisions, retries, refusals, and replay
+- **Loop Engineering Core:** Treats retrieval, drafting, format checks, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
+- **Observable Runtime Reports:** Emits structured loop evidence for context selection, prompt evidence, drafts, format checks, verifier decisions, retries, refusals, and replay
 - **Durable Local Runs:** Stores public loop-run summaries and reports in the
   local thread database so completed runs remain inspectable after restart
 - **Visible Thread Memory:** Shows per-thread memory counts and last-run use of
@@ -202,8 +202,8 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 5. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
    you want grounded retrieval, citations, and verifier-backed support checks
 6. Click "Index Context" to make the uploaded document available to the loop
-7. Inspect the Loop Timeline to see recipe selection, context selection, retrieve, draft, check,
-   verify, retry, refusal, and final-decision steps in order
+7. Inspect the Loop Timeline to see recipe selection, context selection, retrieve, draft, format,
+   check, verify, retry, refusal, and final-decision steps in order
 8. Inspect Durable Runs to see persisted run evidence for the active thread
 9. Inspect the loop summary for memory usage, provider, recipe, draft count,
    checks, verifier, retry/refusal state, final decision, and last error
@@ -218,7 +218,7 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   verified evidence. Document context is optional and upgrades the loop into
   grounded retrieval plus citation/verifier checks.
 - **Current context provider:** Document context
-- **Current document loop shape:** validate/decode -> split -> embed/index -> retrieve -> draft answer -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
+- **Current document loop shape:** validate/decode -> split -> embed/index -> retrieve -> draft answer -> run format checks -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
 - **Context provider boundary:** `DocumentContextProvider` wraps the current
   document vector store and retrieval chain so later providers can plug into the
   loop without changing the product identity again
@@ -307,7 +307,7 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 This repo is intentionally built around three loops:
 
 - **Runtime agent loop:** select context -> retrieve prompt evidence -> draft an
-  answer with inline citations -> run mechanical checks -> verify cited claims
+  answer with inline citations -> run format checks -> run mechanical checks -> verify cited claims
   with the active real backend -> retry once or fail closed -> return trace/status.
 - **Guardrail loop:** middleware hooks can run before/after runs and steps, and
   can return typed decisions: continue, retry, refuse, block, or requires_review.

@@ -33,6 +33,7 @@ def test_provider_free_loop_eval_scores_all_cases_with_loop_reports():
         "context_select",
         "retrieve",
         "draft",
+        "format_check",
         "mechanical_check",
         "verify",
         "final",

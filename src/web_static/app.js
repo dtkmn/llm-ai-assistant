@@ -580,17 +580,55 @@ function appendTextWithLineBreaks(parent, text) {
 }
 
 function normalizeMessageMarkdownStructure(text) {
+  const compactLabeledListPattern =
+    /(?:^|\s)1[.)]\s+(?:\*\*)?[^:\n]{1,80}:(?:\*\*)?/;
+  const compactNumberedListPattern =
+    /(?:^|:)\s*1[.)]\s+\S[^\n]{2,}?\s+2[.)]\s+\S/s;
+  const listItemPattern = /(^|\s+)(\d{1,2})([.)])\s+(?=\S)/g;
+  const listStartPattern =
+    /(?:^|:)\s*1[.)]\s+(?=\S)|(?:^|\s)1[.)]\s+(?=(?:\*\*)?[^:\n]{1,80}:(?:\*\*)?)/;
+  const splitSequentialListItems = (line) => {
+    const startMatch = line.match(listStartPattern);
+    if (!startMatch || startMatch.index === undefined) {
+      return line;
+    }
+    const markerOffset = startMatch[0].search(/1[.)]\s+/);
+    if (markerOffset < 0) {
+      return line;
+    }
+    const listStart = startMatch.index + markerOffset;
+    const prefix = line.slice(0, listStart);
+    const body = line.slice(listStart);
+    let expectedNextItem = null;
+    const normalizedBody = body.replace(
+      listItemPattern,
+      (marker, spacing, rawNumber, punctuation, offset) => {
+        const number = Number.parseInt(rawNumber, 10);
+        const shouldStartList = number === 1;
+        const shouldContinueList = expectedNextItem === number;
+        if (shouldStartList) {
+          expectedNextItem = 2;
+        } else if (shouldContinueList) {
+          expectedNextItem = number + 1;
+        } else {
+          return marker;
+        }
+        const separator = offset > 0 && !spacing.includes("\n") ? "\n" : spacing;
+        return `${separator}${rawNumber}${punctuation} `;
+      },
+    );
+    const listSeparator = prefix && !prefix.endsWith("\n") ? "\n" : "";
+    return `${prefix}${listSeparator}${normalizedBody}`;
+  };
   return String(text || "")
     .replace(/\r\n/g, "\n")
     .split(/(`[^`\n]+`)/g)
     .map((part) =>
       part.startsWith("`")
         ? part
-        : /(?:^|\s)1[.)]\s+\*\*[^*\n]{1,80}:\*\*/.test(part)
-          ? part.replace(
-              /([^\n])\s+(\d{1,2})[.)]\s+(?=\*\*[^*\n]{1,80}:\*\*)/g,
-              "$1\n$2. ",
-            )
+        : compactLabeledListPattern.test(part) ||
+            compactNumberedListPattern.test(part)
+          ? part.split("\n").map(splitSequentialListItems).join("\n")
           : part,
     )
     .join("");

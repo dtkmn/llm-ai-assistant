@@ -188,18 +188,22 @@ try:
     from . import answer_loop as _answer_loop
     from .answer_loop import (
         ANSWER_SUPPORT_STOPWORDS,
+        FORMAT_CHECK_FAILURE_ANSWER,
         SELF_CHECK_PASS_OUTCOMES,
         SELF_CHECK_REFUSAL_ANSWER,
         VERIFIER_OUTCOMES,
+        AnswerFormatCheck,
         AnswerSelfCheck,
     )
 except ImportError:
     import answer_loop as _answer_loop
     from answer_loop import (
         ANSWER_SUPPORT_STOPWORDS,
+        FORMAT_CHECK_FAILURE_ANSWER,
         SELF_CHECK_PASS_OUTCOMES,
         SELF_CHECK_REFUSAL_ANSWER,
         VERIFIER_OUTCOMES,
+        AnswerFormatCheck,
         AnswerSelfCheck,
     )
 
@@ -300,6 +304,7 @@ DOCUMENT_IDENTITY_QUESTION_HINTS = (
     "which file",
 )
 SELF_CHECK_REFUSAL_ANSWER = _answer_loop.SELF_CHECK_REFUSAL_ANSWER
+FORMAT_CHECK_FAILURE_ANSWER = _answer_loop.FORMAT_CHECK_FAILURE_ANSWER
 NO_CONTEXT_SELF_CHECK_REASONS = [
     "no_context_provider",
     "verifier_requires_prompt_evidence",
@@ -1395,6 +1400,23 @@ class AILoopEngine:
     def _loop_decision_for_self_check(self, self_check: AnswerSelfCheck) -> LoopDecision:
         return _answer_loop.loop_decision_for_self_check(self_check)
 
+    def _format_check_answer(
+        self, answer: str, *, retry_attempted: bool = False
+    ) -> AnswerFormatCheck:
+        return _answer_loop.format_check_answer(
+            answer, retry_attempted=retry_attempted
+        )
+
+    def _loop_decision_for_format_check(
+        self, format_check: AnswerFormatCheck
+    ) -> LoopDecision:
+        return _answer_loop.loop_decision_for_format_check(format_check)
+
+    def _format_check_retry_instruction(
+        self, format_check: AnswerFormatCheck
+    ) -> str:
+        return _answer_loop.format_check_retry_instruction(format_check)
+
     def _verification_result_for_self_check(
         self, self_check: AnswerSelfCheck
     ) -> VerificationResult:
@@ -1841,6 +1863,29 @@ class AILoopEngine:
         cleaned = re.sub(r"\s+([.,;:!?])", r"\1", cleaned)
         return re.sub(r"\s{2,}", " ", cleaned).strip()
 
+    def _draft_direct_answer(
+        self,
+        question: str,
+        *,
+        conversation_history: Sequence[Mapping[str, str]],
+        semantic_memory: Sequence[Mapping[str, str]],
+        loop_recipe: Optional[Mapping[str, Any]],
+        format_instruction: str = "",
+    ) -> Tuple[str, str, Optional[str], List[int]]:
+        prompt = self._direct_answer_prompt(
+            question,
+            conversation_history=conversation_history,
+            semantic_memory=semantic_memory,
+            loop_recipe=loop_recipe,
+        )
+        if format_instruction.strip():
+            prompt = f"{prompt}\n\n{format_instruction.strip()}"
+        raw_response = str(self.llm.invoke(prompt)).strip()
+        model_thinking = self._last_model_thinking()
+        removed_inline_citation_ids = self._direct_citation_marker_ids(raw_response)
+        response = self._strip_direct_answer_citations(raw_response)
+        return raw_response, response, model_thinking, removed_inline_citation_ids
+
     def _direct_citation_marker_ids(self, answer: str) -> List[int]:
         standalone_ids = [
             int(match.group(1))
@@ -2014,6 +2059,51 @@ class AILoopEngine:
             if guardrail_decision:
                 return run, guardrail_decision
         return run, None
+
+    def _run_format_check_with_loop(
+        self,
+        *,
+        run: LoopRun,
+        answer: str,
+        retry_attempted: bool = False,
+    ) -> Tuple[LoopRun, Optional[GuardrailDecision], AnswerFormatCheck]:
+        retry_count = 1 if retry_attempted else 0
+        planned_format_step = self._planned_loop_step(
+            LoopPhase.FORMAT_CHECK,
+            name="Format check",
+            input_summary="draft answer",
+            retry_count=retry_count,
+        )
+        guardrail_decision = self._prepare_loop_step(run, planned_format_step)
+        if guardrail_decision:
+            return (
+                run,
+                guardrail_decision,
+                AnswerFormatCheck(
+                    outcome="needs_retry",
+                    reasons=["format_check_interrupted"],
+                    retry_attempted=retry_attempted,
+                ),
+            )
+
+        format_check = self._format_check_answer(
+            answer, retry_attempted=retry_attempted
+        )
+        format_step = self._loop_step(
+            LoopPhase.FORMAT_CHECK,
+            decision=self._loop_decision_for_format_check(format_check),
+            name="Format check",
+            input_summary="draft answer",
+            output_summary=format_check.outcome,
+            retry_count=retry_count,
+            metadata={
+                "reasons": list(format_check.reasons),
+                "answer_chars": len(str(answer).strip()),
+                "retry_attempted": retry_attempted,
+            },
+        )
+        run, guardrail_decision = self._record_loop_step(run, format_step)
+        return run, guardrail_decision, format_check
 
     def _run_self_check_with_loop(
         self,
@@ -2270,6 +2360,40 @@ class AILoopEngine:
             final_decision=self._terminal_decision_for_guardrail(decision),
             error_message=self._error_message_for_guardrail(decision),
             metadata={"guardrail_decision": decision.decision.value},
+        )
+
+    def _finish_format_check_failed_query_result(
+        self,
+        *,
+        format_check: AnswerFormatCheck,
+        question: str,
+        active_state: ActiveDocumentState,
+        run: LoopRun,
+    ) -> QueryResult:
+        run = run.with_step(
+            self._loop_step(
+                LoopPhase.ERROR,
+                decision=LoopDecision.ERROR,
+                name="Format check failed",
+                output_summary="format_check_failed",
+                error_message="format_check_failed",
+                metadata={
+                    "reasons": list(format_check.reasons),
+                    "retry_attempted": format_check.retry_attempted,
+                },
+            )
+        )
+        return self._finish_query_result(
+            answer=FORMAT_CHECK_FAILURE_ANSWER,
+            question=question,
+            active_state=active_state,
+            run=run,
+            final_decision=LoopDecision.ERROR,
+            error_message="format_check_failed",
+            metadata={
+                "format_check_outcome": format_check.outcome,
+                "format_check_reasons": list(format_check.reasons),
+            },
         )
 
     def query_with_trace(
@@ -2532,21 +2656,17 @@ class AILoopEngine:
                         active_state=active_state,
                         run=run,
                     )
-                raw_response = str(
-                    self.llm.invoke(
-                        self._direct_answer_prompt(
-                            clean_prompt,
-                            conversation_history=conversation_context,
-                            semantic_memory=semantic_memory_context,
-                            loop_recipe=loop_recipe_context,
-                        )
-                    )
-                ).strip()
-                model_thinking = self._last_model_thinking()
-                removed_inline_citation_ids = self._direct_citation_marker_ids(
-                    raw_response
+                (
+                    raw_response,
+                    response,
+                    model_thinking,
+                    removed_inline_citation_ids,
+                ) = self._draft_direct_answer(
+                    clean_prompt,
+                    conversation_history=conversation_context,
+                    semantic_memory=semantic_memory_context,
+                    loop_recipe=loop_recipe_context,
                 )
-                response = self._strip_direct_answer_citations(raw_response)
                 if len(response) < 3:
                     model_thinking = None
                     error_metadata = {
@@ -2620,6 +2740,162 @@ class AILoopEngine:
                         active_state=active_state,
                         run=run,
                     )
+                run, guardrail_decision, format_check = (
+                    self._run_format_check_with_loop(
+                        run=run,
+                        answer=response,
+                    )
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                if format_check.outcome == "needs_retry":
+                    run, guardrail_decision = self._append_loop_step(
+                        run,
+                        self._loop_step(
+                            LoopPhase.RETRY,
+                            decision=LoopDecision.RETRY,
+                            name="Retry answer format",
+                            output_summary="retrying after format check",
+                            metadata={"reasons": list(format_check.reasons)},
+                        ),
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    planned_retry_draft_step = self._planned_loop_step(
+                        LoopPhase.DRAFT,
+                        name="Draft format retry answer",
+                        input_summary=clean_prompt,
+                        retry_count=1,
+                    )
+                    guardrail_decision = self._prepare_loop_step(
+                        run, planned_retry_draft_step
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    (
+                        raw_response,
+                        response,
+                        model_thinking,
+                        removed_inline_citation_ids,
+                    ) = self._draft_direct_answer(
+                        clean_prompt,
+                        conversation_history=conversation_context,
+                        semantic_memory=semantic_memory_context,
+                        loop_recipe=loop_recipe_context,
+                        format_instruction=self._format_check_retry_instruction(
+                            format_check
+                        ),
+                    )
+                    if len(response) < 3:
+                        model_thinking = None
+                        error_metadata = {
+                            "context_provider": "none",
+                            "raw_answer_chars": len(raw_response),
+                            "removed_inline_citation_ids": removed_inline_citation_ids,
+                            "retry_reason": "format_check",
+                        }
+                        run, guardrail_decision = self._record_loop_step(
+                            run,
+                            self._loop_step(
+                                LoopPhase.DRAFT,
+                                decision=LoopDecision.ERROR,
+                                name="Draft format retry answer",
+                                input_summary=clean_prompt,
+                                output_summary="empty_direct_answer",
+                                retry_count=1,
+                                error_message="empty_direct_answer",
+                                metadata=error_metadata,
+                            ),
+                        )
+                        if guardrail_decision:
+                            return self._finish_guardrail_query_result(
+                                decision=guardrail_decision,
+                                question=clean_prompt,
+                                active_state=active_state,
+                                run=run,
+                            )
+                        return self._finish_query_result(
+                            answer=(
+                                "The model returned an empty answer. Please try again "
+                                "or check your LLM backend."
+                            ),
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                            final_decision=LoopDecision.ERROR,
+                            error_message="empty_direct_answer",
+                        )
+                    retry_draft_metadata = {
+                        "answer_chars": len(response),
+                        "context_provider": "none",
+                        "inline_citation_ids": self._direct_citation_marker_ids(
+                            response
+                        ),
+                        "model_thinking_available": bool(model_thinking),
+                        "removed_inline_citation_ids": removed_inline_citation_ids,
+                        "retry_reason": "format_check",
+                        "semantic_memory_count": len(semantic_memory_context),
+                        "trace_available": True,
+                    }
+                    if model_thinking:
+                        retry_draft_metadata["model_thinking_chars"] = len(
+                            model_thinking
+                        )
+                    run, guardrail_decision = self._record_loop_step(
+                        run,
+                        self._loop_step(
+                            LoopPhase.DRAFT,
+                            decision=LoopDecision.CONTINUE,
+                            name="Draft format retry answer",
+                            input_summary=clean_prompt,
+                            output_summary=str(response).strip()[:500],
+                            retry_count=1,
+                            metadata=retry_draft_metadata,
+                        ),
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    run, guardrail_decision, format_check = (
+                        self._run_format_check_with_loop(
+                            run=run,
+                            answer=response,
+                            retry_attempted=True,
+                        )
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    if format_check.outcome != "format_passed":
+                        return self._finish_format_check_failed_query_result(
+                            format_check=format_check,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
                 verify_step = self._loop_step(
                     LoopPhase.VERIFY,
                     decision=LoopDecision.NOT_VERIFIED,
@@ -2777,6 +3053,119 @@ class AILoopEngine:
                         active_state=active_state,
                         run=run,
                     )
+                run, guardrail_decision, format_check = (
+                    self._run_format_check_with_loop(
+                        run=run,
+                        answer=response,
+                    )
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                if format_check.outcome == "needs_retry" and hasattr(
+                    active_state.retrieval_chain, "retry_with_trace"
+                ):
+                    run, guardrail_decision = self._append_loop_step(
+                        run,
+                        self._loop_step(
+                            LoopPhase.RETRY,
+                            decision=LoopDecision.RETRY,
+                            name="Retry answer format",
+                            output_summary="retrying after format check",
+                            metadata={"reasons": list(format_check.reasons)},
+                        ),
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    planned_retry_draft_step = self._planned_loop_step(
+                        LoopPhase.DRAFT,
+                        name="Draft format retry answer",
+                        input_summary=clean_prompt,
+                        retry_count=1,
+                    )
+                    guardrail_decision = self._prepare_loop_step(
+                        run, planned_retry_draft_step
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    retry_result = active_state.retrieval_chain.retry_with_trace(
+                        draft_prompt,
+                        chain_result,
+                        self_check_instruction=self._format_check_retry_instruction(
+                            format_check
+                        ),
+                    )
+                    chain_result = retry_result
+                    response = retry_result.answer
+                    retrieved_chunk_count = retry_result.retrieved_chunk_count
+                    citations = retry_result.citations
+                    model_thinking = getattr(retry_result, "model_thinking", None)
+                    retry_draft_metadata = {
+                        "answer_chars": len(str(response).strip()),
+                        "inline_citation_ids": self._inline_citation_ids(
+                            str(response)
+                        ),
+                        "model_thinking_available": bool(model_thinking),
+                        "retry_reason": "format_check",
+                    }
+                    if model_thinking:
+                        retry_draft_metadata["model_thinking_chars"] = len(
+                            model_thinking
+                        )
+                    run, guardrail_decision = self._record_loop_step(
+                        run,
+                        self._loop_step(
+                            LoopPhase.DRAFT,
+                            decision=LoopDecision.CONTINUE,
+                            name="Draft format retry answer",
+                            input_summary=clean_prompt,
+                            output_summary=str(response).strip()[:500],
+                            retry_count=1,
+                            metadata=retry_draft_metadata,
+                        ),
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    run, guardrail_decision, format_check = (
+                        self._run_format_check_with_loop(
+                            run=run,
+                            answer=response,
+                            retry_attempted=True,
+                        )
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                if format_check.outcome != "format_passed":
+                    return self._finish_format_check_failed_query_result(
+                        format_check=format_check,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
                 run, guardrail_decision, self_check = self._run_self_check_with_loop(
                     run=run,
                     answer=response,
@@ -2872,6 +3261,27 @@ class AILoopEngine:
                             active_state=active_state,
                             run=run,
                         )
+                    run, guardrail_decision, _format_check = (
+                        self._run_format_check_with_loop(
+                            run=run,
+                            answer=response,
+                            retry_attempted=True,
+                        )
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                    if _format_check.outcome != "format_passed":
+                        return self._finish_format_check_failed_query_result(
+                            format_check=_format_check,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
                     (
                         run,
                         guardrail_decision,
@@ -2929,6 +3339,26 @@ class AILoopEngine:
                 if guardrail_decision:
                     return self._finish_guardrail_query_result(
                         decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                run, guardrail_decision, _format_check = (
+                    self._run_format_check_with_loop(
+                        run=run,
+                        answer=str(response),
+                    )
+                )
+                if guardrail_decision:
+                    return self._finish_guardrail_query_result(
+                        decision=guardrail_decision,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        run=run,
+                    )
+                if _format_check.outcome != "format_passed":
+                    return self._finish_format_check_failed_query_result(
+                        format_check=_format_check,
                         question=clean_prompt,
                         active_state=active_state,
                         run=run,
