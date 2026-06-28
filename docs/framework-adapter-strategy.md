@@ -64,7 +64,7 @@ unless that capture is disabled.
 | --- | --- | --- |
 | `LoopSession.session_id` | trace `group_id` | Groups related runs in one conversation/session. |
 | `LoopRun.run_id` | trace metadata and/or trace id suffix | Preserve the internal id; do not require OpenAI id format internally. |
-| `LoopRun.context_provider` | trace metadata | Examples: `document`, `web`, or `none`. |
+| `LoopRun.context_provider` | trace metadata | Resolved provider, for example `document`, `web`, or `none`; requested provider metadata may be `smart` or legacy `auto`. |
 | `LoopStep.phase=context_select/retrieve` | custom span | These are AI Loop Engine-specific context phases. |
 | `LoopStep.phase=draft` | generation-like span or custom span | Use generation span only if OpenAI SDK data shape can represent the model call honestly. |
 | `LoopStep.phase=format_check` | custom span | Presentation/readability gate, not evidence verification. |
@@ -92,7 +92,7 @@ The first live adapter should be opt-in and should:
 ### Non-Goals
 
 - Do not run the application through `Runner`.
-- Do not model document context as OpenAI tools until autonomous tool boundaries
+- Do not model file or web context as OpenAI tools until autonomous tool boundaries
   exist.
 - Do not send raw replay artifacts to OpenAI by default.
 - Do not make `openai-agents` a core dependency.

@@ -210,6 +210,7 @@ export function createDom() {
     "trace-json",
   ];
   const byId = Object.fromEntries(ids.map((id) => [id, new Element("div")]));
+  byId["query-context"].value = "smart";
   byId["query-input"].value = "";
   const summary = new Element("summary");
   summary.append(new Element("span"));

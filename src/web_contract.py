@@ -72,12 +72,12 @@ def upload_status_message(uploaded_name: str, qa_status: DocumentQAStatus) -> st
 
     if report and not report.success:
         active_message = (
-            f"Active document remains {report.active_document_name}."
+            f"Active file remains {report.active_document_name}."
             if report.active_document_name
-            else "No active document is loaded."
+            else "No active file is loaded."
         )
         return (
-            f"Document context {document_name} failed during {report.phase}. "
+            f"File context {document_name} failed during {report.phase}. "
             f"{active_message} Error: {report.error_message}"
         )
 
@@ -91,7 +91,7 @@ def upload_status_message(uploaded_name: str, qa_status: DocumentQAStatus) -> st
 
     if qa_status.mock_mode:
         return (
-            f"Document context {document_name} processed in mock mode. "
+            f"File context {document_name} processed in mock mode. "
             f"Profile: {qa_status.profile_label}. "
             f"Max output: {qa_status.max_output_tokens} tokens. "
             f"Active model: {qa_status.active_model_label}. "
@@ -100,7 +100,7 @@ def upload_status_message(uploaded_name: str, qa_status: DocumentQAStatus) -> st
             "is configured."
         )
     return (
-        f"Document context {document_name} indexed. "
+        f"File context {document_name} indexed. "
         f"Profile: {qa_status.profile_label}. "
         f"Max output: {qa_status.max_output_tokens} tokens. "
         f"Backend: {qa_status.active_backend}. "
@@ -172,8 +172,7 @@ def public_trace_error(
     query_result: QueryResult,
     public_loop_report: Optional[dict],
 ) -> Optional[str]:
-    redaction = (public_loop_report or {}).get("public_redaction") or {}
-    if redaction.get("applied"):
+    if visible_terminal_redaction_applied(query_result, public_loop_report):
         return PUBLIC_REDACTION_REASON
     return query_result.trace.error_message
 
@@ -189,6 +188,31 @@ def public_loop_report_dict(query_result: QueryResult) -> Optional[dict]:
 def terminal_public_redaction_applied(public_loop_report: Optional[dict]) -> bool:
     redaction = (public_loop_report or {}).get("public_redaction") or {}
     return bool(redaction.get("applied"))
+
+
+def visible_terminal_redaction_applied(
+    query_result: QueryResult,
+    public_loop_report: Optional[dict],
+) -> bool:
+    if not terminal_public_redaction_applied(public_loop_report):
+        return False
+    loop_report = query_result.loop_report
+    if loop_report is None:
+        return True
+    run = loop_report.run
+    final_decision = getattr(run.final_decision, "value", run.final_decision)
+    if final_decision in {"block", "requires_review"}:
+        return True
+    if final_decision != "refuse":
+        return True
+    if run.metadata.get("after_run_guardrail") or run.metadata.get("guardrail_decision"):
+        return True
+    for step in run.steps:
+        if step.human_review is not None:
+            return True
+        if step.metadata.get("guardrail_decision"):
+            return True
+    return False
 
 
 def model_thinking_dict(
@@ -468,7 +492,10 @@ def answer_trace_dict(query_result: Optional[QueryResult]) -> dict:
     trace = query_result.trace
     self_check = trace.self_check
     public_loop_report = public_loop_report_dict(query_result)
-    terminal_redaction = terminal_public_redaction_applied(public_loop_report)
+    terminal_redaction = visible_terminal_redaction_applied(
+        query_result,
+        public_loop_report,
+    )
     final_decision = ((public_loop_report or {}).get("run") or {}).get(
         "final_decision"
     )
@@ -527,7 +554,7 @@ def query_response_dict(query_result: QueryResult) -> dict:
     public_loop_report = public_loop_report_dict(query_result)
     answer = (
         TERMINAL_PUBLIC_REDACTION
-        if terminal_public_redaction_applied(public_loop_report)
+        if visible_terminal_redaction_applied(query_result, public_loop_report)
         else query_result.answer
     )
     return {

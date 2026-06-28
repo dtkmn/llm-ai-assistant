@@ -340,7 +340,7 @@ class ThreadStore:
                 instructions TEXT NOT NULL DEFAULT '',
                 success_criteria_json TEXT NOT NULL DEFAULT '[]',
                 stop_condition TEXT NOT NULL,
-                context_provider TEXT NOT NULL DEFAULT 'auto',
+                context_provider TEXT NOT NULL DEFAULT 'smart',
                 model_profile TEXT NOT NULL DEFAULT 'quality',
                 verifier TEXT NOT NULL DEFAULT 'default',
                 metadata_json TEXT,
@@ -699,6 +699,18 @@ class ThreadStore:
         with self._lock:
             existing = self.get_recipe(DEFAULT_LOOP_RECIPE_ID)
             if existing is not None:
+                current_default = default_loop_recipe(created_at=existing.created_at)
+                if (
+                    existing.metadata.get("built_in") is True
+                    and existing != current_default
+                ):
+                    self._conn.execute(
+                        "DELETE FROM loop_recipes WHERE recipe_id = ?",
+                        (DEFAULT_LOOP_RECIPE_ID,),
+                    )
+                    self._insert_recipe(current_default)
+                    self._conn.commit()
+                    return current_default
                 return existing
             recipe = default_loop_recipe()
             self._insert_recipe(recipe)
@@ -753,7 +765,7 @@ class ThreadStore:
         instructions: str = "",
         success_criteria: tuple[str, ...] | list[str] = (),
         stop_condition: str = "",
-        context_provider: str = "auto",
+        context_provider: str = "smart",
         model_profile: str = "quality",
         verifier: str = "default",
         description: str = "",
@@ -1209,7 +1221,7 @@ class ThreadStore:
             instructions=str(row["instructions"] or ""),
             success_criteria=json_list_loads(row["success_criteria_json"]),
             stop_condition=str(row["stop_condition"] or ""),
-            context_provider=str(row["context_provider"] or "auto"),
+            context_provider=str(row["context_provider"] or "smart"),
             model_profile=str(row["model_profile"] or "quality"),
             verifier=str(row["verifier"] or "default"),
             metadata=json_loads(row["metadata_json"]) or {},

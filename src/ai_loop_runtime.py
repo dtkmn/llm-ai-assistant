@@ -259,7 +259,248 @@ MAX_CONVERSATION_CONTEXT_MESSAGE_CHARS = 1200
 MAX_LOOP_RECIPE_FIELD_CHARS = 1600
 MAX_LOOP_RECIPE_CRITERIA = 8
 SEMANTIC_MEMORY_STATUSES = {"not_requested", "retrieved", "empty", "unavailable"}
-QUERY_CONTEXT_PROVIDERS = {"auto", "none", "document", "web"}
+QUERY_CONTEXT_PROVIDERS = {"smart", "auto", "none", "document", "web"}
+SMART_CONTEXT_ACTIVE_FILE_WEB_HINTS = (
+    "latest",
+    "current",
+    "today",
+    "right now",
+    "now",
+    "recent",
+    "news",
+    "search",
+    "web",
+    "internet",
+    "online",
+    "2026",
+    "as of",
+    "still famous",
+    "famous even",
+    "who is",
+    "who was",
+    "do you know who",
+    "tell me about",
+)
+SMART_CONTEXT_FILE_HINTS = (
+    "uploaded document",
+    "uploaded file",
+    "attached document",
+    "attached file",
+    "indexed document",
+    "indexed file",
+    "indexed context",
+    "which document",
+    "what document",
+    "document name",
+    "which file",
+    "what file",
+    "file name",
+    "filename",
+    "this document",
+    "this file",
+    "the document",
+    "the file",
+    "the pdf",
+    "the docx",
+    "in the document",
+    "in the file",
+    "from the document",
+    "from the file",
+    "according to the document",
+    "according to the file",
+    "summarize this document",
+    "summarize this file",
+)
+SMART_CONTEXT_FILE_REFERENCE_HINTS = (
+    "when does it",
+    "when is it",
+    "what does it",
+    "what is it",
+    "where does it",
+    "where is it",
+    "does it",
+    "is it",
+)
+SMART_CONTEXT_FILE_TOKEN_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "does",
+        "for",
+        "from",
+        "how",
+        "i",
+        "in",
+        "is",
+        "it",
+        "me",
+        "of",
+        "on",
+        "or",
+        "please",
+        "the",
+        "this",
+        "to",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+    }
+)
+SMART_CONTEXT_ENTITY_STOPWORDS = frozenset(
+    {
+        "a",
+        "about",
+        "an",
+        "are",
+        "did",
+        "does",
+        "docx",
+        "for",
+        "from",
+        "how",
+        "is",
+        "internally",
+        "known",
+        "md",
+        "me",
+        "of",
+        "on",
+        "pdf",
+        "plan",
+        "program",
+        "project",
+        "tell",
+        "the",
+        "this",
+        "to",
+        "txt",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+    }
+)
+SMART_CONTEXT_LOCAL_ENTITY_MARKERS = (
+    "confidential",
+    "internal",
+    "local",
+    "private",
+    "proprietary",
+    "secret",
+    "unreleased",
+    "uploaded",
+)
+SMART_CONTEXT_LOCAL_ENTITY_DESCRIPTORS = frozenset(
+    {
+        "codename",
+        "initiative",
+        "plan",
+        "program",
+        "project",
+        "roadmap",
+    }
+)
+SMART_CONTEXT_PUBLIC_ENTITY_DESCRIPTORS = frozenset(
+    {
+        "actor",
+        "artist",
+        "book",
+        "celebrity",
+        "framework",
+        "library",
+        "movie",
+        "package",
+        "person",
+        "song",
+        "vendor",
+    }
+)
+SMART_CONTEXT_PUBLIC_DESCRIPTOR_LED_ENTITY_TOKENS = frozenset(
+    {
+        ("project", "runway"),
+    }
+)
+SMART_CONTEXT_PUBLIC_ENTITY_TOKEN_SETS = frozenset(
+    {
+        frozenset({"fight", "club"}),
+        frozenset({"jackie", "chan"}),
+        frozenset({"openai"}),
+        frozenset({"python"}),
+        frozenset({"react"}),
+    }
+)
+SMART_CONTEXT_PUBLIC_REFERENCE_TAIL_MARKERS = frozenset(
+    {
+        "comparison",
+        "comparisons",
+        "example",
+        "examples",
+        "vendor",
+        "vendors",
+    }
+)
+SMART_CONTEXT_LOCAL_REFERENCE_TAIL_MARKERS = frozenset(
+    {
+        "launched",
+        "launches",
+        "launching",
+        "launch",
+        "released",
+        "releases",
+        "releasing",
+        "release",
+    }
+)
+SMART_CONTEXT_ALIAS_SEPARATOR_CLASS = r"[:=\-‐‑‒–—―−]"
+SMART_CONTEXT_ALIAS_OPENING_CLASS = r"[\"'“”‘’`(\[{]*"
+SMART_CONTEXT_LOOKUP_HINTS = (
+    *SMART_CONTEXT_ACTIVE_FILE_WEB_HINTS,
+    "what is",
+    "what are",
+    "when is",
+    "when did",
+    "where is",
+    "where did",
+    "which is",
+    "which are",
+)
+SMART_CONTEXT_DIRECT_HINTS = (
+    "rewrite",
+    "draft",
+    "edit",
+    "translate",
+    "summarize this",
+    "review this",
+    "improve this",
+    "fix this",
+    "debug",
+    "write code",
+    "fix this code",
+    "debug this code",
+    "write a function",
+    "create a function",
+    "implement",
+    "stack trace",
+    "error message",
+    "private",
+    "confidential",
+    "secret",
+    "explain it",
+    "layman",
+    "brainstorm",
+    "compose",
+    "generate",
+)
 _RETRIEVAL_EXPORTS = {
     "DocumentRetrievalChain",
     "FaissRetriever",
@@ -1680,15 +1921,18 @@ class AILoopEngine:
         requested = str(context_provider or "").strip().lower()
         if not requested and isinstance(loop_recipe, Mapping):
             requested = str(loop_recipe.get("context_provider") or "").strip().lower()
-        requested = requested or "auto"
+        requested = requested or "smart"
         if requested not in QUERY_CONTEXT_PROVIDERS:
             raise ValueError(
-                "context_provider must be one of auto, none, document, or web."
+                "context_provider must be one of smart, auto, none, document, or web."
             )
         return requested
 
     def _resolve_query_context_provider(
-        self, requested_provider: str, active_state: ActiveDocumentState
+        self,
+        requested_provider: str,
+        active_state: ActiveDocumentState,
+        question: str = "",
     ) -> str:
         if requested_provider == "none":
             return "none"
@@ -1696,7 +1940,458 @@ class AILoopEngine:
             return "web"
         if requested_provider == "document":
             return "document" if active_state.retrieval_chain else "none"
-        return "document" if active_state.retrieval_chain else "none"
+        if active_state.retrieval_chain and self._has_explicit_file_context_intent(
+            question
+        ):
+            return "document"
+        if active_state.retrieval_chain and self._question_mentions_active_file_entity(
+            question,
+            active_state,
+        ):
+            return "document"
+        if self._should_use_direct_context(question):
+            return "none"
+        if self._should_use_web_context(
+            question,
+            active_file_available=bool(active_state.retrieval_chain),
+        ):
+            return "web"
+        if active_state.retrieval_chain and self._question_matches_active_file(
+            question,
+            active_state,
+        ):
+            return "document"
+        return "none"
+
+    def _has_explicit_file_context_intent(self, question: str) -> bool:
+        normalized = " ".join(str(question or "").lower().split())
+        if not normalized:
+            return False
+        return any(hint in normalized for hint in SMART_CONTEXT_FILE_HINTS)
+
+    def _question_matches_active_file(
+        self, question: str, active_state: ActiveDocumentState
+    ) -> bool:
+        normalized = " ".join(str(question or "").casefold().split())
+        if not normalized:
+            return False
+        if any(hint in normalized for hint in SMART_CONTEXT_FILE_REFERENCE_HINTS):
+            return True
+        query_tokens = {
+            token
+            for token in re.findall(r"\w+", normalized, flags=re.UNICODE)
+            if len(token) >= 3 and token not in SMART_CONTEXT_FILE_TOKEN_STOPWORDS
+        }
+        if not query_tokens:
+            return False
+        document_name = str(active_state.document_name or "").casefold()
+        if any(token in document_name for token in query_tokens):
+            return True
+        vector_store = active_state.vector_store
+        documents = getattr(vector_store, "documents", None) or []
+        sampled_text = " ".join(
+            str(getattr(document, "page_content", "") or "")[:2000].casefold()
+            for document in documents[:12]
+        )
+        return any(token in sampled_text for token in query_tokens)
+
+    def _question_mentions_active_file_entity(
+        self, question: str, active_state: ActiveDocumentState
+    ) -> bool:
+        normalized_question = " ".join(str(question or "").casefold().split())
+        if not normalized_question:
+            return False
+        question_tokens = {
+            token
+            for token in self._meaningful_entity_tokens(
+                normalized_question,
+                allow_short_entity_tokens=True,
+            )
+        }
+        if not question_tokens:
+            return False
+        document_name_stem = re.sub(
+            r"\.[A-Za-z0-9]{1,8}$",
+            "",
+            str(active_state.document_name or ""),
+        )
+        document_name_tokens = self._meaningful_entity_tokens(document_name_stem)
+        if document_name_tokens and question_tokens & document_name_tokens:
+            return True
+
+        documents = getattr(active_state.vector_store, "documents", None) or []
+        indexed_text = " ".join(
+            str(getattr(document, "page_content", "") or "")
+            for document in documents
+        )
+        for entity_tokens in self._local_entity_token_sets(indexed_text):
+            if entity_tokens and entity_tokens.issubset(question_tokens):
+                return True
+        return False
+
+    def _meaningful_entity_tokens(
+        self, text: str, *, allow_short_entity_tokens: bool = False
+    ) -> set[str]:
+        token_values: set[str] = set()
+        for token in self._entity_scan_tokens(text):
+            token_key = self._normalize_entity_token(token)
+            if not token_key:
+                continue
+            if allow_short_entity_tokens or len(token_key) >= 3:
+                if not token_key.isdigit() and token_key not in SMART_CONTEXT_ENTITY_STOPWORDS:
+                    token_values.add(token_key)
+        return token_values
+
+    def _normalize_entity_token(self, token: str) -> str:
+        token_key = str(token or "").casefold()
+        if len(token_key) > 2 and (token_key.endswith("'s") or token_key.endswith("’s")):
+            return token_key[:-2]
+        return token_key
+
+    def _entity_scan_text(self, text: str) -> str:
+        return re.sub(
+            r"(?<=[^\W_])\s*[-_/:=‐‑‒–—―−]+\s*(?=[^\W_])",
+            " ",
+            str(text or ""),
+            flags=re.UNICODE,
+        )
+
+    def _entity_scan_tokens(self, text: str) -> list[str]:
+        return re.findall(
+            r"[^\W_]+(?:['’][^\W_]+)*",
+            self._entity_scan_text(text),
+            flags=re.UNICODE,
+        )
+
+    def _local_entity_token_sets(self, text: str) -> tuple[frozenset[str], ...]:
+        if not text:
+            return ()
+        entity_sets: list[frozenset[str]] = []
+        scan_text = " ".join(str(text).splitlines())
+        for segment in re.split(r"[.!?;]+", scan_text):
+            self._append_local_known_as_entity_token_sets(entity_sets, segment)
+            if not self._segment_has_local_entity_marker(segment):
+                continue
+            self._append_local_cue_entity_token_sets(entity_sets, segment)
+            self._append_local_reference_entity_token_sets(entity_sets, segment)
+            self._append_marker_prefixed_entity_token_sets(entity_sets, segment)
+            self._append_local_subject_definition_token_sets(entity_sets, segment)
+        return tuple(entity_sets)
+
+    def _append_local_known_as_entity_token_sets(
+        self, entity_sets: list[frozenset[str]], text: str
+    ) -> None:
+        for match in re.finditer(
+            (
+                r"\bknown\s+(?:internally|locally|privately)\s+as\b"
+                rf"\s*(?:{SMART_CONTEXT_ALIAS_SEPARATOR_CLASS})?\s*"
+                rf"{SMART_CONTEXT_ALIAS_OPENING_CLASS}"
+                r"((?:[^\W_\d][^\W_]*(?:['-][^\W_]+)*)"
+                r"(?:\s+[^\W_\d][^\W_]*(?:['-][^\W_]+)*){0,11})"
+            ),
+            self._entity_scan_text(text),
+            flags=re.IGNORECASE | re.UNICODE,
+        ):
+            self._append_local_alias_entity_token_sets(entity_sets, match.group(1))
+
+    def _append_local_alias_entity_token_sets(
+        self, entity_sets: list[frozenset[str]], alias_text: str
+    ) -> None:
+        raw_tokens = self._entity_scan_tokens(alias_text)
+        alias_tokens: list[str] = []
+        for token in raw_tokens:
+            token_key = token.casefold()
+            if alias_tokens and token_key in {
+                "and",
+                "are",
+                "as",
+                "because",
+                "by",
+                "for",
+                "from",
+                "in",
+                "is",
+                "of",
+                "on",
+                "or",
+                "that",
+                "to",
+                "was",
+                "were",
+                "with",
+            }:
+                break
+            if (
+                alias_tokens
+                and not self._looks_like_entity_token(token)
+                and any(self._looks_like_entity_token(item) for item in alias_tokens)
+                and alias_tokens[-1].casefold()
+                not in SMART_CONTEXT_LOCAL_ENTITY_DESCRIPTORS
+            ):
+                break
+            alias_tokens.append(token)
+        ordered_token_values: list[str] = []
+        for token in alias_tokens:
+            if token.casefold() in SMART_CONTEXT_LOCAL_ENTITY_MARKERS:
+                continue
+            for token_value in sorted(
+                self._meaningful_entity_tokens(
+                    token,
+                    allow_short_entity_tokens=True,
+                )
+            ):
+                if token_value not in ordered_token_values:
+                    ordered_token_values.append(token_value)
+        if ordered_token_values:
+            for start_index in range(len(ordered_token_values)):
+                for end_index in range(start_index + 1, len(ordered_token_values) + 1):
+                    entity_sets.append(
+                        frozenset(ordered_token_values[start_index:end_index])
+                    )
+
+    def _append_marker_prefixed_entity_token_sets(
+        self, entity_sets: list[frozenset[str]], text: str
+    ) -> None:
+        marker_pattern = "|".join(re.escape(marker) for marker in SMART_CONTEXT_LOCAL_ENTITY_MARKERS)
+        for match in re.finditer(
+            (
+                rf"\b(?:{marker_pattern})\b\s+"
+                r"((?:[^\W_\d][^\W_]*(?:['-][^\W_]+)*)(?:\s+[^\W_\d][^\W_]*(?:['-][^\W_]+)*){0,3})"
+                r"\s+\b(?:is|are|was|were)\b"
+            ),
+            self._entity_scan_text(text),
+            flags=re.IGNORECASE | re.UNICODE,
+        ):
+            entity_tokens: list[str] = []
+            raw_tokens = self._entity_scan_tokens(match.group(1))
+            if raw_tokens and raw_tokens[0].casefold() in SMART_CONTEXT_PUBLIC_ENTITY_DESCRIPTORS:
+                continue
+            for token in self._entity_scan_tokens(match.group(1)):
+                if not self._looks_like_entity_token(token):
+                    continue
+                token_values = self._meaningful_entity_tokens(
+                    token,
+                    allow_short_entity_tokens=True,
+                )
+                if token_values:
+                    entity_tokens.extend(sorted(token_values))
+            if entity_tokens:
+                entity_sets.append(frozenset(entity_tokens))
+
+    def _append_local_subject_definition_token_sets(
+        self, entity_sets: list[frozenset[str]], text: str
+    ) -> None:
+        tokens = self._entity_scan_tokens(text)
+        for verb_index, raw_token in enumerate(tokens):
+            if raw_token.casefold() not in {"is", "are", "was", "were"}:
+                continue
+            predicate_tokens = [token.casefold() for token in tokens[verb_index + 1 :]]
+            while predicate_tokens and predicate_tokens[0] in {"a", "an", "the"}:
+                predicate_tokens.pop(0)
+            if not predicate_tokens or predicate_tokens[0] not in set(
+                SMART_CONTEXT_LOCAL_ENTITY_MARKERS
+            ):
+                continue
+            entity_tokens: list[str] = []
+            for candidate in reversed(tokens[:verb_index]):
+                if candidate.casefold() in {"a", "an", "the"}:
+                    break
+                if not self._looks_like_entity_token(candidate):
+                    break
+                token_values = self._meaningful_entity_tokens(
+                    candidate,
+                    allow_short_entity_tokens=True,
+                )
+                if token_values:
+                    entity_tokens.extend(sorted(token_values))
+            if entity_tokens:
+                entity_sets.append(frozenset(entity_tokens))
+
+    def _append_local_reference_entity_token_sets(
+        self, entity_sets: list[frozenset[str]], text: str
+    ) -> None:
+        tokens = self._entity_scan_tokens(text)
+        reference_verbs = {
+            "include",
+            "included",
+            "includes",
+            "mention",
+            "mentioned",
+            "mentions",
+            "reference",
+            "referenced",
+            "references",
+        }
+        for index, raw_token in enumerate(tokens):
+            if raw_token.casefold() not in reference_verbs:
+                continue
+            cursor = index + 1
+            skipped_tokens = {"a", "an", "the"} | set(SMART_CONTEXT_LOCAL_ENTITY_MARKERS)
+            skipped_local_marker = False
+            while cursor < len(tokens) and tokens[cursor].casefold() in skipped_tokens:
+                if tokens[cursor].casefold() in SMART_CONTEXT_LOCAL_ENTITY_MARKERS:
+                    skipped_local_marker = True
+                cursor += 1
+            entity_tokens: list[str] = []
+            raw_entity_tokens: list[str] = []
+            descriptor_seen = False
+            end_cursor = cursor
+            for offset, candidate in enumerate(tokens[cursor : cursor + 6]):
+                candidate_key = self._normalize_entity_token(candidate)
+                if candidate_key in SMART_CONTEXT_LOCAL_ENTITY_DESCRIPTORS:
+                    raw_entity_tokens.append(candidate_key)
+                    descriptor_seen = True
+                    end_cursor = cursor + offset + 1
+                    continue
+                if (
+                    entity_tokens
+                    and candidate_key
+                    in (
+                        SMART_CONTEXT_LOCAL_REFERENCE_TAIL_MARKERS
+                        | set(SMART_CONTEXT_LOCAL_ENTITY_MARKERS)
+                    )
+                ):
+                    break
+                if not descriptor_seen and not self._looks_like_entity_token(candidate):
+                    break
+                if descriptor_seen and candidate_key in (
+                    {"as", "in", "for", "of", "to", "with"}
+                    | SMART_CONTEXT_LOCAL_REFERENCE_TAIL_MARKERS
+                    | set(SMART_CONTEXT_LOCAL_ENTITY_MARKERS)
+                ):
+                    break
+                if not self._looks_like_entity_token(candidate) and not descriptor_seen:
+                    break
+                raw_entity_tokens.append(candidate_key)
+                token_values = self._meaningful_entity_tokens(
+                    candidate,
+                    allow_short_entity_tokens=True,
+                )
+                if token_values:
+                    entity_tokens.extend(sorted(token_values))
+                end_cursor = cursor + offset + 1
+            if not entity_tokens:
+                continue
+            entity_token_set = frozenset(entity_tokens)
+            if set(raw_entity_tokens) & SMART_CONTEXT_LOCAL_ENTITY_DESCRIPTORS:
+                tail_tokens = {
+                    self._normalize_entity_token(token)
+                    for token in tokens[end_cursor : end_cursor + 8]
+                }
+                local_tail_markers = (
+                    SMART_CONTEXT_LOCAL_REFERENCE_TAIL_MARKERS
+                    | SMART_CONTEXT_LOCAL_ENTITY_DESCRIPTORS
+                    | set(SMART_CONTEXT_LOCAL_ENTITY_MARKERS)
+                )
+                raw_entity_tuple = tuple(raw_entity_tokens)
+                has_public_descriptor_exception = any(
+                    raw_entity_tuple[: len(public_entity_tokens)]
+                    == public_entity_tokens
+                    for public_entity_tokens in SMART_CONTEXT_PUBLIC_DESCRIPTOR_LED_ENTITY_TOKENS
+                )
+                if (
+                    has_public_descriptor_exception
+                    and not skipped_local_marker
+                    and not tail_tokens & local_tail_markers
+                ):
+                    continue
+                entity_sets.append(entity_token_set)
+                continue
+            tail_tokens = {
+                self._normalize_entity_token(token)
+                for token in tokens[end_cursor : end_cursor + 8]
+            }
+            local_tail_markers = (
+                SMART_CONTEXT_LOCAL_REFERENCE_TAIL_MARKERS
+                | SMART_CONTEXT_LOCAL_ENTITY_DESCRIPTORS
+                | set(SMART_CONTEXT_LOCAL_ENTITY_MARKERS)
+            )
+            if (
+                tail_tokens & SMART_CONTEXT_PUBLIC_REFERENCE_TAIL_MARKERS
+                and not tail_tokens & local_tail_markers
+            ):
+                continue
+            explicit_local_tail_markers = (
+                set(SMART_CONTEXT_LOCAL_ENTITY_MARKERS)
+                | SMART_CONTEXT_LOCAL_ENTITY_DESCRIPTORS
+            )
+            if (
+                entity_token_set in SMART_CONTEXT_PUBLIC_ENTITY_TOKEN_SETS
+                and not skipped_local_marker
+                and not tail_tokens & explicit_local_tail_markers
+            ):
+                continue
+            if len(entity_token_set) >= 2 or tail_tokens & local_tail_markers:
+                entity_sets.append(entity_token_set)
+
+    def _append_local_cue_entity_token_sets(
+        self, entity_sets: list[frozenset[str]], text: str
+    ) -> None:
+        patterns = (
+            (
+                r"\bknown(?:\s+(?:internally|locally|privately))?\s+as\b"
+                rf"\s*(?:{SMART_CONTEXT_ALIAS_SEPARATOR_CLASS})?\s*"
+                rf"{SMART_CONTEXT_ALIAS_OPENING_CLASS}"
+                r"((?:[^\W_\d][^\W_]*(?:['-][^\W_]+)*)"
+                r"(?:\s+[^\W_\d][^\W_]*(?:['-][^\W_]+)*){0,11})"
+            ),
+            (
+                r"\b(?:code\s+name|codename|aka)\b"
+                r"(?:\s+(?:is|as))?"
+                rf"\s*(?:{SMART_CONTEXT_ALIAS_SEPARATOR_CLASS})?\s*"
+                rf"{SMART_CONTEXT_ALIAS_OPENING_CLASS}"
+                r"((?:[^\W_\d][^\W_]*(?:['-][^\W_]+)*)"
+                r"(?:\s+[^\W_\d][^\W_]*(?:['-][^\W_]+)*){0,11})"
+            ),
+            (
+                r"\balias\b"
+                r"(?:\s+(?:is|as|called|named))?"
+                rf"\s*(?:{SMART_CONTEXT_ALIAS_SEPARATOR_CLASS})?\s*"
+                rf"{SMART_CONTEXT_ALIAS_OPENING_CLASS}"
+                r"((?:[^\W_\d][^\W_]*(?:['-][^\W_]+)*)"
+                r"(?:\s+[^\W_\d][^\W_]*(?:['-][^\W_]+)*){0,11})"
+            ),
+            (
+                r"\b(?:project|program|plan|initiative|roadmap)\s+(?:named|called)\b"
+                r"(?:\s+(?:is|as))?"
+                rf"\s*(?:{SMART_CONTEXT_ALIAS_SEPARATOR_CLASS})?\s*"
+                rf"{SMART_CONTEXT_ALIAS_OPENING_CLASS}"
+                r"((?:[^\W_\d][^\W_]*(?:['-][^\W_]+)*)"
+                r"(?:\s+[^\W_\d][^\W_]*(?:['-][^\W_]+)*){0,11})"
+            ),
+        )
+        for pattern in patterns:
+            for match in re.finditer(
+                pattern,
+                self._entity_scan_text(text),
+                flags=re.IGNORECASE | re.UNICODE,
+            ):
+                self._append_local_alias_entity_token_sets(entity_sets, match.group(1))
+
+    def _segment_has_local_entity_marker(self, text: str) -> bool:
+        normalized = " ".join(str(text or "").casefold().split())
+        if not normalized:
+            return False
+        tokens = {token.casefold() for token in self._entity_scan_tokens(normalized)}
+        return any(marker in tokens for marker in SMART_CONTEXT_LOCAL_ENTITY_MARKERS)
+
+    def _looks_like_entity_token(self, token: str) -> bool:
+        cleaned = str(token or "").strip()
+        return bool(cleaned) and (cleaned[:1].isupper() or cleaned.isupper())
+
+    def _should_use_direct_context(self, question: str) -> bool:
+        normalized = " ".join(str(question or "").lower().split())
+        if not normalized:
+            return False
+        return any(hint in normalized for hint in SMART_CONTEXT_DIRECT_HINTS)
+
+    def _should_use_web_context(
+        self, question: str, *, active_file_available: bool
+    ) -> bool:
+        normalized = " ".join(str(question or "").lower().split())
+        if not normalized:
+            return False
+        return any(hint in normalized for hint in SMART_CONTEXT_LOOKUP_HINTS)
 
     def _context_provider_display_name(
         self, provider_type: str, active_state: ActiveDocumentState
@@ -1812,7 +2507,7 @@ class AILoopEngine:
             "instructions": field("instructions"),
             "success_criteria": success_criteria,
             "stop_condition": field("stop_condition"),
-            "context_provider": field("context_provider", "auto"),
+            "context_provider": field("context_provider", "smart"),
             "model_profile": field("model_profile", "quality"),
             "verifier": field("verifier", "default"),
         }
@@ -2041,7 +2736,7 @@ class AILoopEngine:
         prompt: str,
         session_id: str,
         active_state: ActiveDocumentState,
-        requested_context_provider: str = "auto",
+        requested_context_provider: str = "smart",
         resolved_context_provider: Optional[str] = None,
         conversation_context_turns: int = 0,
         semantic_memory_turns: int = 0,
@@ -2524,7 +3219,7 @@ class AILoopEngine:
                 prompt=clean_prompt,
                 session_id=session_id,
                 active_state=active_state,
-                requested_context_provider=str(context_provider or "auto"),
+                requested_context_provider=str(context_provider or "smart"),
                 resolved_context_provider="none",
                 conversation_context_turns=len(conversation_context),
                 semantic_memory_turns=len(semantic_memory_context),
@@ -2542,7 +3237,10 @@ class AILoopEngine:
                 )
             )
             return self._finish_query_result(
-                answer="Invalid context provider. Choose auto, none, document, or web.",
+                answer=(
+                    "Invalid context provider. Choose smart, web, document, "
+                    "or none."
+                ),
                 question=clean_prompt,
                 active_state=active_state,
                 run=run,
@@ -2552,6 +3250,7 @@ class AILoopEngine:
         resolved_context_provider = self._resolve_query_context_provider(
             requested_context_provider,
             active_state,
+            clean_prompt,
         )
         effective_prompt = self._question_with_conversation_context(
             clean_prompt,
@@ -2780,7 +3479,7 @@ class AILoopEngine:
             and self._is_document_identity_question(clean_prompt)
         ):
             return self._finish_query_result(
-                answer=f"The uploaded document is `{active_state.document_name}`.",
+                answer=f"The indexed file is `{active_state.document_name}`.",
                 question=clean_prompt,
                 active_state=active_state,
                 run=run,
@@ -3633,7 +4332,7 @@ class AILoopEngine:
                 return self._finish_query_result(
                     answer=(
                         "Web search evidence is unavailable right now. Try again "
-                        "or switch Evidence to Auto or No external context."
+                        "or switch Evidence to Files only or No external evidence."
                     ),
                     question=clean_prompt,
                     active_state=active_state,
@@ -3678,7 +4377,7 @@ class AILoopEngine:
         semantic_memory_status: str = "not_requested",
         context_provider: Optional[str] = None,
     ) -> str:
-        """Answer a user query using retrieved document context."""
+        """Answer a user query using smart evidence selection."""
         return self.query_with_trace(
             prompt,
             session_id=session_id,

@@ -236,8 +236,12 @@ def create_processed_mock_qa(tmp_path):
 def test_query_before_document_runs_no_context_loop():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
-    assert "mock response" in qa.query("What is this?")
-    result = qa.query_with_trace("What is this?", session_id="direct")
+    assert "mock response" in qa.query("What is this?", context_provider="none")
+    result = qa.query_with_trace(
+        "What is this?",
+        session_id="direct",
+        context_provider="none",
+    )
     assert "mock response" in result.answer
     assert result.trace.question == "What is this?"
     assert result.trace.document_name is None
@@ -286,6 +290,7 @@ def test_no_context_query_uses_same_thread_conversation_history():
     result = qa.query_with_trace(
         "Please explain it in layman terms.",
         session_id="thread_memory",
+        context_provider="none",
         conversation_history=[
             {
                 "role": "user",
@@ -324,6 +329,7 @@ def test_no_context_query_uses_semantic_thread_memory():
     result = qa.query_with_trace(
         "Please explain that algorithm.",
         session_id="thread_memory",
+        context_provider="none",
         semantic_memory=[
             {
                 "role": "user",
@@ -364,6 +370,7 @@ def test_semantic_memory_status_is_sanitized_in_public_loop_metadata():
 
     result = qa.query_with_trace(
         "Say something.",
+        context_provider="none",
         semantic_memory_status="SECRET_STATUS",
     )
 
@@ -423,7 +430,11 @@ def test_no_context_query_strips_inline_citation_markers():
         last_thinking=None,
     )
 
-    result = qa.query_with_trace("What is the answer?", session_id="direct_citation")
+    result = qa.query_with_trace(
+        "What is the answer?",
+        session_id="direct_citation",
+        context_provider="none",
+    )
 
     assert result.answer == "The answer is definitely grounded."
     assert "[1]" not in result.answer
@@ -454,7 +465,7 @@ def test_no_context_query_preserves_attached_bracket_expressions():
         qa = DocumentQA(fast_mode=True, llm_backend="mock")
         qa.llm = SimpleNamespace(invoke=lambda _prompt, answer=raw_answer: answer)
 
-        result = qa.query_with_trace("What is the answer?")
+        result = qa.query_with_trace("What is the answer?", context_provider="none")
 
         assert result.answer == raw_answer
         assert result.trace.citations == []
@@ -480,7 +491,10 @@ def test_no_context_query_preserves_code_indices():
         qa = DocumentQA(fast_mode=True, llm_backend="mock")
         qa.llm = SimpleNamespace(invoke=lambda _prompt, value=answer: value)
 
-        result = qa.query_with_trace("How do I access indexed values?")
+        result = qa.query_with_trace(
+            "How do I access indexed values?",
+            context_provider="none",
+        )
 
         assert result.answer == answer
         assert result.trace.citations == []
@@ -510,7 +524,11 @@ def test_no_context_format_check_retries_compact_markdown_list():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.llm = SimpleNamespace(invoke=invoke, last_thinking=None)
 
-    result = qa.query_with_trace("Explain the sequence.", session_id="format_direct")
+    result = qa.query_with_trace(
+        "Explain the sequence.",
+        session_id="format_direct",
+        context_provider="none",
+    )
 
     assert result.answer == answers[1]
     assert len(prompts) == 2
@@ -554,7 +572,11 @@ def test_no_context_format_check_retries_unlabeled_compact_numbered_list():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.llm = SimpleNamespace(invoke=invoke, last_thinking=None)
 
-    result = qa.query_with_trace("Give me steps.", session_id="format_plain_list")
+    result = qa.query_with_trace(
+        "Give me steps.",
+        session_id="format_plain_list",
+        context_provider="none",
+    )
 
     assert result.answer == answers[1]
     assert len(prompts) == 2
@@ -587,7 +609,9 @@ def test_no_context_format_check_retries_compact_numbered_list_after_intro():
     qa.llm = SimpleNamespace(invoke=invoke, last_thinking=None)
 
     result = qa.query_with_trace(
-        "Give me steps.", session_id="format_intro_plain_list"
+        "Give me steps.",
+        session_id="format_intro_plain_list",
+        context_provider="none",
     )
 
     assert result.answer == answers[1]
@@ -621,7 +645,7 @@ def test_no_context_format_check_does_not_retry_version_prose():
             last_thinking=None,
         )
 
-        result = qa.query_with_trace(question)
+        result = qa.query_with_trace(question, context_provider="none")
 
         assert result.answer == answer
         assert LoopPhase.RETRY not in [
@@ -649,7 +673,11 @@ def test_no_context_format_check_fails_closed_when_retry_still_bad():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.llm = SimpleNamespace(invoke=invoke, last_thinking=None)
 
-    result = qa.query_with_trace("Explain the sequence.", session_id="format_failed")
+    result = qa.query_with_trace(
+        "Explain the sequence.",
+        session_id="format_failed",
+        context_provider="none",
+    )
 
     assert result.answer == answer_loop_module.FORMAT_CHECK_FAILURE_ANSWER
     assert result.trace.error_message == "format_check_failed"
@@ -681,7 +709,11 @@ def test_no_context_empty_draft_fails_closed():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.llm = SimpleNamespace(invoke=lambda _prompt: "   ", last_thinking=None)
 
-    result = qa.query_with_trace("Say something.", session_id="empty_direct")
+    result = qa.query_with_trace(
+        "Say something.",
+        session_id="empty_direct",
+        context_provider="none",
+    )
 
     assert result.answer == (
         "The model returned an empty answer. Please try again or check your LLM backend."
@@ -715,7 +747,11 @@ def test_query_before_document_fails_on_unavailable_llm_not_missing_document(
 
     monkeypatch.setattr(qa, "_initialize_llm", fail_initialize_llm)
 
-    result = qa.query_with_trace("What is this?", session_id="no_llm")
+    result = qa.query_with_trace(
+        "What is this?",
+        session_id="no_llm",
+        context_provider="none",
+    )
 
     assert result.answer == (
         "Language model could not be initialized. Please check your LLM backend setup."
@@ -746,8 +782,8 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
     assert qa.vector_store is not None
     assert qa.retrieval_chain is not None
     assert qa.active_llm_backend == "mock"
-    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
-    mock_answer = qa.query("What is Project Phoenix?")
+    assert qa.query("Which file did I upload?") == "The indexed file is `phoenix.txt`."
+    mock_answer = qa.query("What is Project Phoenix?", context_provider="document")
     assert "Project Phoenix" in mock_answer
     assert "[1]" in mock_answer
 
@@ -777,7 +813,7 @@ def test_process_text_document_with_mock_llm_and_fake_embeddings(tmp_path):
 def test_query_with_trace_returns_retrieved_citations(tmp_path):
     qa, _document = create_processed_mock_qa(tmp_path)
 
-    result = qa.query_with_trace("What is Project Phoenix?")
+    result = qa.query_with_trace("What is Project Phoenix?", context_provider="document")
 
     assert "Project Phoenix" in result.answer
     assert "[1]" in result.answer
@@ -968,19 +1004,1501 @@ def test_web_search_trace_omits_unrelated_active_document(tmp_path):
     assert "old-doc.txt" not in json.dumps(public_report)
 
 
-def test_auto_context_provider_does_not_call_web_search_without_document():
+def test_smart_context_provider_uses_web_search_without_document():
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://www.python.org/",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace("What is Python?", session_id="smart_web")
+
+    assert qa.web_search_client.calls == [("What is Python?", qa.web_search_max_results)]
+    assert result.answer == "Python is a programming language. [1]"
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+
+
+def test_legacy_auto_context_provider_aliases_smart_web_without_document():
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://www.python.org/",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Python?",
+        session_id="auto_web",
+        context_provider="auto",
+    )
+
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "auto"
+
+
+def test_smart_context_provider_uses_active_file_when_available(tmp_path):
     class FailingWebSearchClient:
         def search(self, query, *, max_results=5):
-            raise AssertionError("auto context must not call web search")
+            raise AssertionError("smart context should use the indexed file")
+
+    document = tmp_path / "phoenix.txt"
+    document.write_text(
+        "Project Phoenix is an indexed file about a June 2026 launch.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What does this file say about Project Phoenix?",
+        session_id="smart_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "phoenix.txt"
+
+
+def test_smart_context_provider_ignores_active_file_without_file_intent(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("non-lookup local task must not be sent to web search")
+
+    document = tmp_path / "resume.txt"
+    document.write_text("This resume is for an AI engineer in Hong Kong.", encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+    qa.llm = SimpleNamespace(
+        invoke=lambda _prompt: "Here is a short joke.",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace("Tell me a joke.", session_id="smart_joke")
+
+    assert result.answer == "Here is a short joke."
+    assert result.loop_report.run.context_provider == "none"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+    assert result.trace.citations == []
+
+
+def test_smart_context_provider_uses_web_for_general_lookup_with_active_file(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Jackie Chan",
+                    url="https://example.com/jackie-chan",
+                    snippet="Jackie Chan is an actor and martial artist.",
+                )
+            ]
+
+    document = tmp_path / "resume.txt"
+    document.write_text("This resume is for an AI engineer in Hong Kong.", encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace("Who is Jackie Chan?", session_id="smart_general_web")
+
+    assert qa.web_search_client.calls == [
+        ("Who is Jackie Chan?", qa.web_search_max_results)
+    ]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+def test_smart_context_provider_uses_file_for_local_entity_lookup(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("local file entity must not be sent to web search")
+
+    document = tmp_path / "phoenix.txt"
+    document.write_text(
+        "Project Phoenix is a private launch plan indexed from a local file.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Project Phoenix?",
+        session_id="smart_local_entity_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "phoenix.txt"
+
+
+def test_smart_context_provider_private_entity_question_uses_file(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("private local entity question must not use web search")
+
+    document = tmp_path / "roadmap.txt"
+    document.write_text(
+        "Project Phoenix is a private launch plan indexed from a local file.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is private Project Phoenix?",
+        session_id="smart_private_entity_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "roadmap.txt"
+
+
+def test_smart_context_provider_private_marker_before_entity_uses_file(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("private marker before local entity must not use web")
+
+    document = tmp_path / "roadmap.txt"
+    document.write_text(
+        "The private Project Phoenix is a launch plan.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Project Phoenix?",
+        session_id="smart_private_marker_before_entity",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "roadmap.txt"
+
+
+@pytest.mark.parametrize(
+    ("document_text", "question"),
+    [
+        ("This private note mentions Project Phoenix.", "What is Project Phoenix?"),
+        ("This private note mentions project Phoenix.", "What is Phoenix?"),
+        ("This private note mentions the project Phoenix.", "What is Phoenix?"),
+        ("This private note mentions private project Phoenix.", "What is Phoenix?"),
+        (
+            "This private note mentions the private project Phoenix.",
+            "What is Phoenix?",
+        ),
+        (
+            "This private note includes Project Phoenix in the roadmap.",
+            "What is Project Phoenix?",
+        ),
+        ("This private note includes roadmap Nova.", "What is Nova?"),
+        (
+            "This private note references Ångström Project.",
+            "What is Ångström Project?",
+        ),
+        (
+            "This private note references Project X.",
+            "What is Project X?",
+        ),
+        (
+            "This private note references Project Phoenix for the vendor roadmap.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project Phoenix for comparison in the roadmap.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This internal memo references Project Phoenix for comparison with Atlas.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project Phoenix launch.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project Phoenix release.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project Phoenix's launch.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project Phoenix’s launch.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project X's launch.",
+            "What is Project X?",
+        ),
+        (
+            "This private note references Project Phoenix launches tomorrow.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project Phoenix releases tomorrow.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project Phoenix launched yesterday.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project Phoenix released yesterday.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project Phoenix launching soon.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project Phoenix releasing soon.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project X.",
+            "What is Project X?",
+        ),
+        (
+            "The project is known internally as Project\nPhoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project Phoenix for launch.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project Phoenix Launch.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Private Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Alpha Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Private Alpha Beta Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Private Alpha Beta Project Phoenix Launch.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project-Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project - Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project–Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project — Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project—Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project‑Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project_Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project/Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project: Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project : Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as Project = Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as (Project Phoenix).",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as [Project Phoenix].",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as ‑ Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The project is known internally as − Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note says aka Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note says aka Project\nPhoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note says aka (Project Phoenix).",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note says aka Project_Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note says aka Project/Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note says aka Project–Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "The internal alias is Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "Internal alias: Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private alias is Project X.",
+            "What is Project X?",
+        ),
+        (
+            "The local alias is Phoenix.",
+            "What is Phoenix?",
+        ),
+        (
+            "This private note says codename Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note says codename [Project Phoenix].",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note says project named Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note says project named (Project Phoenix).",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note says project called Project Phoenix.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project\nPhoenix for launch.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Phoenix for launch.",
+            "What is Phoenix?",
+        ),
+        (
+            "This private note references Phoenix Launches Tomorrow.",
+            "What is Phoenix?",
+        ),
+        (
+            "This private note references Phoenix Released Yesterday.",
+            "What is Phoenix?",
+        ),
+        (
+            "This private note references Python internal release.",
+            "What is Python internal release?",
+        ),
+        (
+            "This private note mentions Alpha Beta.",
+            "What is Alpha Beta?",
+        ),
+        (
+            "This private note references Project-Phoenix for launch.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project_Phoenix for launch.",
+            "What is Project Phoenix?",
+        ),
+        (
+            "This private note references Project/Phoenix for launch.",
+            "What is Project Phoenix?",
+        ),
+    ],
+)
+def test_smart_context_provider_private_project_mentions_use_file(
+    tmp_path,
+    document_text,
+    question,
+):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("private project mention must not use web search")
+
+    document = tmp_path / "roadmap.txt"
+    document.write_text(document_text, encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        question,
+        session_id="smart_private_project_mention_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "roadmap.txt"
+
+
+def test_smart_context_provider_private_reference_after_sample_window_uses_file(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("late private reference must not leak to web search")
+
+    filler = " ".join(f"filler{i}" for i in range(3000))
+    document = tmp_path / "late-reference.txt"
+    document.write_text(
+        f"{filler}\n\nThis private note references Project Phoenix for launch.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Project Phoenix?",
+        session_id="smart_late_private_reference_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "late-reference.txt"
+
+
+@pytest.mark.parametrize(
+    "marker_phrase",
+    [
+        "confidential-note",
+        "internal-memo",
+        "internal—memo",
+        "local-note",
+        "private-note",
+        "private–note",
+        "proprietary-note",
+        "secret-note",
+        "secret‑note",
+        "unreleased-note",
+        "uploaded-note",
+    ],
+)
+def test_smart_context_provider_hyphenated_local_markers_use_file(
+    tmp_path,
+    marker_phrase,
+):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("hyphenated local marker must not leak to web search")
+
+    document = tmp_path / "roadmap.txt"
+    document.write_text(
+        f"This {marker_phrase} references Project Phoenix for launch.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Project Phoenix?",
+        session_id="smart_hyphenated_marker_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "roadmap.txt"
+
+
+def test_smart_context_provider_uses_file_for_single_token_local_entity(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("single-token local entity must not be sent to web search")
+
+    document = tmp_path / "phoenix.txt"
+    document.write_text(
+        "Phoenix is a private launch plan indexed from a local file.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Phoenix?",
+        session_id="smart_single_entity_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "phoenix.txt"
+
+
+def test_smart_context_provider_uses_file_for_unicode_local_entity(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("unicode local entity must not be sent to web search")
+
+    document = tmp_path / "private-plan.txt"
+    document.write_text(
+        "Ångström Project is a private launch plan indexed from a local file.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Ångström Project?",
+        session_id="smart_unicode_entity_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "private-plan.txt"
+
+
+def test_smart_context_provider_uses_file_for_lowercase_private_codename(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("private lowercase codename must not be sent to web search")
+
+    document = tmp_path / "roadmap.txt"
+    document.write_text(
+        "The private codename is phoenix.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is phoenix?",
+        session_id="smart_lowercase_codename_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "roadmap.txt"
+
+
+def test_smart_context_provider_uses_file_for_internal_lowercase_codename(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("internal lowercase codename must not be sent to web search")
+
+    document = tmp_path / "roadmap.txt"
+    document.write_text(
+        "Internal codename zxq is used for the project.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is zxq?",
+        session_id="smart_internal_codename_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "roadmap.txt"
+
+
+@pytest.mark.parametrize(
+    "document_text",
+    [
+        "Private codename: phoenix.",
+        "Private codename - phoenix.",
+        "Private codename “phoenix”.",
+        "The private codename is known as phoenix.",
+        "The private project is known internally as phoenix.",
+        "The project is known internally as phoenix.",
+    ],
+)
+def test_smart_context_provider_uses_file_for_punctuated_private_codename(
+    tmp_path,
+    document_text,
+):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("punctuated private codename must not go to web search")
+
+    document = tmp_path / "roadmap.txt"
+    document.write_text(document_text, encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is phoenix?",
+        session_id="smart_punctuated_codename_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "roadmap.txt"
+
+
+def test_smart_context_provider_bare_indexed_marker_still_uses_web(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://example.com/python",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    document = tmp_path / "glossary.txt"
+    document.write_text(
+        "Python is indexed in this glossary as an example.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Python?",
+        session_id="smart_bare_indexed_web",
+    )
+
+    assert qa.web_search_client.calls == [("What is Python?", qa.web_search_max_results)]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+def test_smart_context_provider_locally_installed_public_entity_uses_web(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://example.com/python",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    document = tmp_path / "notes.txt"
+    document.write_text(
+        "Python is locally installed on this machine.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Python?",
+        session_id="smart_locally_installed_web",
+    )
+
+    assert qa.web_search_client.calls == [("What is Python?", qa.web_search_max_results)]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+def test_smart_context_provider_locally_famous_current_entity_uses_web(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Jackie Chan",
+                    url="https://example.com/jackie-chan",
+                    snippet="Jackie Chan lookup should use web evidence.",
+                )
+            ]
+
+    document = tmp_path / "notes.txt"
+    document.write_text(
+        "Jackie Chan is locally famous in this note.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        "Who is Jackie Chan in 2026?",
+        session_id="smart_locally_famous_web",
+    )
+
+    assert qa.web_search_client.calls == [
+        ("Who is Jackie Chan in 2026?", qa.web_search_max_results)
+    ]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+def test_smart_context_provider_can_prefer_web_for_current_questions_with_file(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python in 2026",
+                    url="https://example.com/python-2026",
+                    snippet="Python remains widely used in 2026.",
+                )
+            ]
+
+    document = tmp_path / "phoenix.txt"
+    document.write_text("Project Phoenix is local file evidence.", encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        "Is Python still widely used in 2026?",
+        session_id="smart_current_web",
+    )
+
+    assert qa.web_search_client.calls == [
+        ("Is Python still widely used in 2026?", qa.web_search_max_results)
+    ]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+def test_smart_context_provider_current_pronoun_question_uses_web_with_file(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Local weather",
+                    url="https://example.com/weather",
+                    snippet="Current weather comes from web evidence.",
+                )
+            ]
+
+    document = tmp_path / "resume.txt"
+    document.write_text("This resume is for an AI engineer in Hong Kong.", encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        "Is it raining today?",
+        session_id="smart_current_pronoun_web",
+    )
+
+    assert qa.web_search_client.calls == [
+        ("Is it raining today?", qa.web_search_max_results)
+    ]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+def test_smart_context_provider_lookup_overlap_uses_web_with_file(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Machine learning",
+                    url="https://example.com/machine-learning",
+                    snippet="Machine learning is a field of artificial intelligence.",
+                )
+            ]
+
+    document = tmp_path / "resume.txt"
+    document.write_text(
+        "This resume mentions machine learning, recommender systems, and Python.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is machine learning?",
+        session_id="smart_lookup_overlap_web",
+    )
+
+    assert qa.web_search_client.calls == [
+        ("What is machine learning?", qa.web_search_max_results)
+    ]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+def test_smart_context_provider_public_entity_mention_still_uses_web(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://example.com/python",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    document = tmp_path / "resume.txt"
+    document.write_text(
+        "This resume says the candidate uses Python and JavaScript.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace("What is Python?", session_id="smart_public_python")
+
+    assert qa.web_search_client.calls == [("What is Python?", qa.web_search_max_results)]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+def test_smart_context_provider_current_public_entity_mention_still_uses_web(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="OpenAI news",
+                    url="https://example.com/openai-news",
+                    snippet="OpenAI news should come from web evidence.",
+                )
+            ]
+
+    document = tmp_path / "examples.txt"
+    document.write_text(
+        "These notes mention Python, OpenAI, and Jackie Chan as examples.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is the latest OpenAI news?",
+        session_id="smart_public_openai_news",
+    )
+
+    assert qa.web_search_client.calls == [
+        ("What is the latest OpenAI news?", qa.web_search_max_results)
+    ]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+@pytest.mark.parametrize(
+    ("document_text", "question", "title"),
+    [
+        ("This private note mentions Python.", "What is Python?", "Python"),
+        (
+            "This internal memo mentions OpenAI as a vendor.",
+            "What is OpenAI?",
+            "OpenAI",
+        ),
+        (
+            "This confidential list mentions Jackie Chan as an example.",
+            "Who is Jackie Chan?",
+            "Jackie Chan",
+        ),
+        (
+            "This private note references Python release tomorrow.",
+            "What is Python?",
+            "Python",
+        ),
+        (
+            "This private note references OpenAI launch tomorrow.",
+            "What is OpenAI?",
+            "OpenAI",
+        ),
+        (
+            "This internal memo references React release tomorrow.",
+            "What is React?",
+            "React",
+        ),
+    ],
+)
+def test_smart_context_provider_public_entities_in_private_sentences_use_web(
+    tmp_path,
+    document_text,
+    question,
+    title,
+):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title=title,
+                    url="https://example.com/public-entity",
+                    snippet=f"{title} lookup should use web evidence.",
+                )
+            ]
+
+    document = tmp_path / "notes.txt"
+    document.write_text(document_text, encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        question,
+        session_id="smart_public_entity_private_sentence_web",
+    )
+
+    assert qa.web_search_client.calls == [(question, qa.web_search_max_results)]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+@pytest.mark.parametrize(
+    ("document_text", "question", "title"),
+    [
+        ("Python is mentioned in this private note.", "What is Python?", "Python"),
+        (
+            "OpenAI is mentioned in this internal memo as a vendor.",
+            "What is OpenAI?",
+            "OpenAI",
+        ),
+        (
+            "Jackie Chan is listed in this confidential example.",
+            "Who is Jackie Chan?",
+            "Jackie Chan",
+        ),
+    ],
+)
+def test_smart_context_provider_public_subject_mentions_in_private_text_use_web(
+    tmp_path,
+    document_text,
+    question,
+    title,
+):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title=title,
+                    url="https://example.com/public-subject",
+                    snippet=f"{title} lookup should use web evidence.",
+                )
+            ]
+
+    document = tmp_path / "notes.txt"
+    document.write_text(document_text, encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        question,
+        session_id="smart_public_subject_private_text_web",
+    )
+
+    assert qa.web_search_client.calls == [(question, qa.web_search_max_results)]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+@pytest.mark.parametrize(
+    ("document_text", "question", "title"),
+    [
+        (
+            "This private note mentions a movie called Fight Club.",
+            "What is Fight Club?",
+            "Fight Club",
+        ),
+        (
+            "This internal memo references a library called React.",
+            "What is React?",
+            "React",
+        ),
+        (
+            "This confidential list includes an actor named Jackie Chan.",
+            "Who is Jackie Chan?",
+            "Jackie Chan",
+        ),
+    ],
+)
+def test_smart_context_provider_public_called_named_entities_use_web(
+    tmp_path,
+    document_text,
+    question,
+    title,
+):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title=title,
+                    url="https://example.com/public-called-named",
+                    snippet=f"{title} lookup should use web evidence.",
+                )
+            ]
+
+    document = tmp_path / "notes.txt"
+    document.write_text(document_text, encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        question,
+        session_id="smart_public_called_named_web",
+    )
+
+    assert qa.web_search_client.calls == [(question, qa.web_search_max_results)]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+@pytest.mark.parametrize(
+    ("document_text", "question", "title"),
+    [
+        (
+            "The private movie Fight Club is mentioned in these notes.",
+            "What is Fight Club?",
+            "Fight Club",
+        ),
+        (
+            "The internal library React is mentioned in this memo.",
+            "What is React?",
+            "React",
+        ),
+        (
+            "The confidential actor Jackie Chan is listed in this example.",
+            "Who is Jackie Chan?",
+            "Jackie Chan",
+        ),
+    ],
+)
+def test_smart_context_provider_marker_prefixed_public_entities_use_web(
+    tmp_path,
+    document_text,
+    question,
+    title,
+):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title=title,
+                    url="https://example.com/public-marker-prefixed",
+                    snippet=f"{title} lookup should use web evidence.",
+                )
+            ]
+
+    document = tmp_path / "notes.txt"
+    document.write_text(document_text, encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        question,
+        session_id="smart_marker_prefixed_public_web",
+    )
+
+    assert qa.web_search_client.calls == [(question, qa.web_search_max_results)]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+@pytest.mark.parametrize(
+    ("document_text", "question"),
+    [
+        (
+            "This private note references Project Runway in an example.",
+            "What is Project Runway?",
+        ),
+        (
+            "This private note references Project Runway as an example.",
+            "What is Project Runway?",
+        ),
+        (
+            "This private note references Project Runway for comparison.",
+            "What is Project Runway?",
+        ),
+        (
+            "This private note references Project Runway in passing.",
+            "What is Project Runway?",
+        ),
+        (
+            "This private note references Project Runway for background.",
+            "What is Project Runway?",
+        ),
+        (
+            "This private note references Project Runway for research.",
+            "What is Project Runway?",
+        ),
+        (
+            "This private note references Project Runway.",
+            "What is Project Runway?",
+        ),
+        (
+            "This private note references Project Runway's finale as an example.",
+            "What is Project Runway finale?",
+        ),
+    ],
+)
+def test_smart_context_provider_public_descriptor_led_references_use_web(
+    tmp_path,
+    document_text,
+    question,
+):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Project Runway",
+                    url="https://example.com/project-runway",
+                    snippet="Project Runway lookup should use web evidence.",
+                )
+            ]
+
+    document = tmp_path / "notes.txt"
+    document.write_text(document_text, encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        question,
+        session_id="smart_public_descriptor_reference_web",
+    )
+
+    assert qa.web_search_client.calls == [
+        (question, qa.web_search_max_results)
+    ]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+@pytest.mark.parametrize(
+    "document_text",
+    [
+        "This private note references private Project Runway.",
+        "This private note references internal Project Runway.",
+        "This private note references local Project Runway.",
+        "This private note references Project Runway for launch.",
+        "This private note references Project Runway launch.",
+        "This private note references Project Runway for release.",
+        "This private note references Project Runway release.",
+        "This private note references Project Runway private launch.",
+        "This private note references Project Runway internal release.",
+        "This private note references Project Runway confidential roadmap.",
+    ],
+)
+def test_smart_context_provider_public_exception_with_local_markers_uses_file(
+    tmp_path,
+    document_text,
+):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("explicit local Project Runway reference must not use web")
+
+    document = tmp_path / "notes.txt"
+    document.write_text(document_text, encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Project Runway?",
+        session_id="smart_public_exception_local_file",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "notes.txt"
+
+
+def test_smart_context_provider_localization_does_not_mark_local_entity(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://example.com/python",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    document = tmp_path / "notes.txt"
+    document.write_text(
+        "This note mentions Python localization work.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        "What is Python?",
+        session_id="smart_localization_not_local",
+    )
+
+    assert qa.web_search_client.calls == [("What is Python?", qa.web_search_max_results)]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+def test_smart_context_provider_secretary_does_not_mark_secret_entity(tmp_path):
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="Parker",
+                    url="https://example.com/parker",
+                    snippet="Parker lookup should use web evidence.",
+                )
+            ]
+
+    document = tmp_path / "notes.txt"
+    document.write_text(
+        "This note mentions Secretary Parker in a public example.",
+        encoding="utf-8",
+    )
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace(
+        "Who is Parker?",
+        session_id="smart_secretary_not_secret",
+    )
+
+    assert qa.web_search_client.calls == [("Who is Parker?", qa.web_search_max_results)]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+
+
+def test_smart_context_provider_file_intent_beats_direct_summary_hint(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("file-intent summary must not be sent to web search")
+
+    document = tmp_path / "strategy.txt"
+    document.write_text("The strategy file says Project Phoenix launches in June 2026.", encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+
+    result = qa.query_with_trace(
+        "Summarize this document.",
+        session_id="smart_file_summary",
+    )
+
+    assert result.loop_report.run.context_provider == "document"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] == "strategy.txt"
+
+
+def test_smart_context_provider_lookup_terms_are_not_overblocked_as_code():
+    class FakeWebSearchClient:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query, *, max_results=5):
+            self.calls.append((query, max_results))
+            return [
+                web_search_module.WebSearchHit(
+                    title="QR code",
+                    url="https://example.com/qr-code",
+                    snippet="A QR code is a two-dimensional barcode.",
+                )
+            ]
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+
+    result = qa.query_with_trace("What is QR code?", session_id="smart_qr_code")
+
+    assert qa.web_search_client.calls == [
+        ("What is QR code?", qa.web_search_max_results)
+    ]
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+
+
+def test_smart_context_provider_keeps_private_local_tasks_off_web():
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("private local task must not be sent to web search")
 
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
     qa.web_search_client = FailingWebSearchClient()
+    qa.llm = SimpleNamespace(
+        invoke=lambda _prompt: "Rewritten private draft.",
+        last_thinking=None,
+    )
 
-    result = qa.query_with_trace("What is Python?", session_id="auto_direct")
+    result = qa.query_with_trace(
+        "Rewrite this private draft: SECRET_BOARD_PLAN",
+        session_id="smart_private",
+    )
 
-    assert "mock response" in result.answer
+    assert result.answer == "Rewritten private draft."
     assert result.loop_report.run.context_provider == "none"
-    assert result.loop_report.run.metadata["requested_context_provider"] == "auto"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.trace.citations == []
+
+
+def test_smart_context_provider_keeps_private_local_tasks_off_active_file(tmp_path):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise AssertionError("private local task must not be sent to web search")
+
+    document = tmp_path / "resume.txt"
+    document.write_text("This resume is for an AI engineer in Hong Kong.", encoding="utf-8")
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.process_document(str(document))
+    qa.web_search_client = FailingWebSearchClient()
+    qa.llm = SimpleNamespace(
+        invoke=lambda _prompt: "Rewritten private draft.",
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace(
+        "Rewrite this private draft: SECRET_BOARD_PLAN",
+        session_id="smart_private_with_file",
+    )
+
+    assert result.answer == "Rewritten private draft."
+    assert result.loop_report.run.context_provider == "none"
+    assert result.loop_report.run.metadata["requested_context_provider"] == "smart"
+    assert result.loop_report.run.metadata["document_name"] is None
+    assert result.trace.citations == []
 
 
 def test_recipe_context_provider_applies_when_query_provider_is_omitted():
@@ -1030,7 +2548,7 @@ def test_web_search_provider_failure_reports_query_error():
 
     assert result.answer == (
         "Web search evidence is unavailable right now. Try again or switch "
-        "Evidence to Auto or No external context."
+        "Evidence to Files only or No external evidence."
     )
     assert result.trace.error_message == "web_search_failed"
     assert result.trace.citations == []
@@ -1088,11 +2606,16 @@ def test_web_search_refusal_uses_provider_neutral_evidence_wording():
     )
 
     result = qa.query_with_trace("What is Python?", context_provider="web")
+    response_payload = web_contract_module.query_response_dict(result)
 
     assert result.answer == answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
+    assert response_payload["answer"] == answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
+    assert response_payload["trace"]["answer"] == answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
     assert "provided evidence" in result.answer
     assert "document" not in result.answer.lower()
+    assert response_payload["summary"]["last_error"] is None
     assert result.loop_report.run.final_decision == LoopDecision.REFUSE
+    assert response_payload["trace"]["loop_report"]["public_redaction"]["applied"] is True
 
 
 def test_invalid_context_provider_fails_closed():
@@ -1100,7 +2623,7 @@ def test_invalid_context_provider_fails_closed():
 
     result = qa.query_with_trace("What is Python?", context_provider="internettt")
 
-    assert result.answer == "Invalid context provider. Choose auto, none, document, or web."
+    assert result.answer == "Invalid context provider. Choose smart, web, document, or none."
     assert result.trace.error_message == "invalid_context_provider"
     assert result.loop_report.run.final_decision == LoopDecision.BLOCK
     assert result.loop_report.run.error_message == "invalid_context_provider"
@@ -1153,7 +2676,10 @@ def test_query_trace_counts_only_prompt_included_chunks(tmp_path):
     assert len(qa.vector_store.documents) > 1
     qa.profile["context_chunks"] = 1
 
-    result = qa.query_with_trace("What is the launch date?")
+    result = qa.query_with_trace(
+        "What is the launch date?",
+        context_provider="document",
+    )
 
     assert result.trace.retrieved_chunk_count == 1
     assert len(result.trace.citations) == 1
@@ -1162,7 +2688,11 @@ def test_query_trace_counts_only_prompt_included_chunks(tmp_path):
 def test_query_with_trace_includes_loop_report_for_prompt_evidence(tmp_path):
     qa, _document = create_processed_mock_qa(tmp_path)
 
-    result = qa.query_with_trace("What is Project Phoenix?", session_id="session_a")
+    result = qa.query_with_trace(
+        "What is Project Phoenix?",
+        session_id="session_a",
+        context_provider="document",
+    )
 
     report = result.loop_report
     assert report is not None
@@ -1205,9 +2735,21 @@ def test_query_with_trace_includes_loop_report_for_prompt_evidence(tmp_path):
 def test_query_records_loop_session_and_exports_jsonl(tmp_path):
     qa, _document = create_processed_mock_qa(tmp_path)
 
-    first_result = qa.query_with_trace("What is Project Phoenix?", session_id="alpha")
-    second_result = qa.query_with_trace("What is the launch date?", session_id="alpha")
-    qa.query_with_trace("What is the launch date?", session_id="beta")
+    first_result = qa.query_with_trace(
+        "What is Project Phoenix?",
+        session_id="alpha",
+        context_provider="document",
+    )
+    second_result = qa.query_with_trace(
+        "What is the launch date?",
+        session_id="alpha",
+        context_provider="document",
+    )
+    qa.query_with_trace(
+        "What is the launch date?",
+        session_id="beta",
+        context_provider="document",
+    )
 
     alpha_session = qa.loop_session("alpha")
     beta_session = qa.loop_session("beta")
@@ -1250,7 +2792,11 @@ def test_loop_session_history_is_bounded(tmp_path):
 def test_no_context_query_is_recorded_for_replay(tmp_path):
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
-    result = qa.query_with_trace("What is this?", session_id="direct")
+    result = qa.query_with_trace(
+        "What is this?",
+        session_id="direct",
+        context_provider="none",
+    )
 
     session = qa.loop_session("direct")
 
@@ -2122,7 +3668,7 @@ def test_self_check_rejects_inverted_relationship_claim(tmp_path):
 
     replace_retrieval_chain(qa, InvertedRelationshipChain())
 
-    result = qa.query_with_trace("Who acquired whom?")
+    result = qa.query_with_trace("Who acquired whom?", context_provider="document")
 
     assert result.answer == (
         answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
@@ -3371,7 +4917,7 @@ def test_failed_unsupported_replacement_keeps_previous_document_queryable(tmp_pa
     assert qa.current_document_name == "phoenix.txt"
     assert qa.vector_store is previous_vector_store
     assert qa.retrieval_chain is previous_retrieval_chain
-    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    assert qa.query("Which file did I upload?") == "The indexed file is `phoenix.txt`."
     report = qa.status().processing_report
     assert report.success is False
     assert report.phase == "validate"
@@ -3390,7 +4936,7 @@ def test_query_uses_active_state_snapshot_not_legacy_mixed_state(tmp_path):
     qa.retrieval_chain = None
 
     assert qa.status().document_name == "phoenix.txt"
-    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    assert qa.query("Which file did I upload?") == "The indexed file is `phoenix.txt`."
 
 
 def test_concurrent_replacement_uploads_are_serialized(monkeypatch, tmp_path):
@@ -3452,7 +4998,7 @@ def test_concurrent_replacement_uploads_are_serialized(monkeypatch, tmp_path):
     assert second_load_started.is_set()
     assert errors == []
     assert qa.status().document_name == "second.txt"
-    assert qa.query("Which file did I upload?") == "The uploaded document is `second.txt`."
+    assert qa.query("Which file did I upload?") == "The indexed file is `second.txt`."
 
 
 def test_failed_ambiguous_text_replacement_keeps_previous_document_queryable(tmp_path):
@@ -3468,7 +5014,7 @@ def test_failed_ambiguous_text_replacement_keeps_previous_document_queryable(tmp
     assert qa.current_document_name == "phoenix.txt"
     assert qa.vector_store is previous_vector_store
     assert qa.retrieval_chain is previous_retrieval_chain
-    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    assert qa.query("Which file did I upload?") == "The indexed file is `phoenix.txt`."
     report = qa.status().processing_report
     assert report.success is False
     assert report.phase == "load"
@@ -3501,7 +5047,7 @@ def test_failed_embedding_initialization_keeps_previous_document_queryable(
     assert qa.current_document_name == "phoenix.txt"
     assert qa.vector_store is previous_vector_store
     assert qa.retrieval_chain is previous_retrieval_chain
-    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    assert qa.query("Which file did I upload?") == "The indexed file is `phoenix.txt`."
     report = qa.status().processing_report
     assert report.success is False
     assert report.phase == "initialize_embeddings"
@@ -3524,7 +5070,7 @@ def test_empty_replacement_keeps_previous_document_queryable(tmp_path):
     assert qa.current_document_name == "phoenix.txt"
     assert qa.vector_store is previous_vector_store
     assert qa.retrieval_chain is previous_retrieval_chain
-    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    assert qa.query("Which file did I upload?") == "The indexed file is `phoenix.txt`."
     report = qa.status().processing_report
     assert report.success is False
     assert report.phase == "split"
@@ -3552,7 +5098,7 @@ def test_index_failure_keeps_previous_document_queryable(monkeypatch, tmp_path):
     assert qa.current_document_name == "phoenix.txt"
     assert qa.vector_store is previous_vector_store
     assert qa.retrieval_chain is previous_retrieval_chain
-    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    assert qa.query("Which file did I upload?") == "The indexed file is `phoenix.txt`."
     report = qa.status().processing_report
     assert report.success is False
     assert report.phase == "index"
@@ -3582,7 +5128,7 @@ def test_chain_failure_keeps_previous_document_queryable(monkeypatch, tmp_path):
     assert qa.current_document_name == "phoenix.txt"
     assert qa.vector_store is previous_vector_store
     assert qa.retrieval_chain is previous_retrieval_chain
-    assert qa.query("Which file did I upload?") == "The uploaded document is `phoenix.txt`."
+    assert qa.query("Which file did I upload?") == "The indexed file is `phoenix.txt`."
     report = qa.status().processing_report
     assert report.success is False
     assert report.phase == "chain"

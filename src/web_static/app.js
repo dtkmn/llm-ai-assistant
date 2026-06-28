@@ -170,7 +170,7 @@ function sanitizeRecipe(rawRecipe) {
     instructions: safeField(rawRecipe?.instructions, 4000),
     success_criteria: successCriteria,
     stop_condition: safeField(rawRecipe?.stop_condition, 1000),
-    context_provider: String(rawRecipe?.context_provider || "auto"),
+    context_provider: String(rawRecipe?.context_provider || "smart"),
     model_profile: String(rawRecipe?.model_profile || "quality"),
     verifier: String(rawRecipe?.verifier || "default"),
     metadata:
@@ -513,12 +513,12 @@ async function startNewThread() {
 function renderRuntimeStatus(status) {
   elements.backendPill.textContent = status.backend || "unconfigured";
   elements.modelPill.textContent = status.model || "model unavailable";
-  elements.readyPill.textContent = status.ready_for_queries ? "context indexed" : "direct mode";
+  elements.readyPill.textContent = status.ready_for_queries ? "files indexed" : "smart evidence";
   elements.readyPill.dataset.ready = String(Boolean(status.ready_for_queries));
 
   const rows = [
-    ["Indexed context", status.active_document || "none"],
-    ["Query mode", status.query_mode || (status.ready_for_queries ? "contextual" : "direct")],
+    ["Indexed files", status.active_document || "none"],
+    ["Evidence mode", "Smart Evidence"],
     ["Last attempt", status.last_attempted_document || "none"],
     ["Profile", status.profile || "unknown"],
     ["Max output", status.max_output_tokens ? `${status.max_output_tokens} tokens` : "unknown"],
@@ -544,7 +544,7 @@ function renderMessages() {
   if (!messages.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = "Ask a question, or add context when you need grounded citations.";
+    empty.textContent = "Ask anything. Add files only when you need file-grounded evidence.";
     elements.messages.append(empty);
     return;
   }
@@ -1058,7 +1058,7 @@ function recipePayloadFromForm() {
       .map((criterion) => criterion.trim())
       .filter(Boolean),
     stop_condition: elements.recipeStop.value,
-    context_provider: basis.context_provider || "auto",
+    context_provider: basis.context_provider || "smart",
     model_profile: basis.model_profile || "quality",
     verifier: basis.verifier || "default",
     metadata: basis.metadata || {},
@@ -1073,7 +1073,7 @@ function startNewRecipe() {
     instructions: "",
     success_criteria: [],
     stop_condition: "",
-    context_provider: "auto",
+    context_provider: "smart",
     model_profile: "quality",
     verifier: "default",
     is_default: false,
@@ -1222,7 +1222,7 @@ async function uploadDocument(event) {
   event.preventDefault();
   const file = elements.fileInput.files[0];
   if (!file) {
-    elements.uploadStatus.textContent = "Choose a document first.";
+    elements.uploadStatus.textContent = "Choose a file first.";
     return;
   }
 
@@ -1230,8 +1230,8 @@ async function uploadDocument(event) {
   formData.append("file", file);
   formData.append("text_encoding", elements.textEncoding.value);
 
-  setBusy(elements.uploadButton, true, "Index Context");
-  elements.uploadStatus.textContent = "Indexing context...";
+  setBusy(elements.uploadButton, true, "Index File");
+  elements.uploadStatus.textContent = "Indexing file...";
   try {
     const result = await requestJson("/api/documents", {
       method: "POST",
@@ -1243,7 +1243,7 @@ async function uploadDocument(event) {
     elements.uploadStatus.textContent = error.message;
     await refreshStatus().catch(() => {});
   } finally {
-    setBusy(elements.uploadButton, false, "Index Context");
+    setBusy(elements.uploadButton, false, "Index File");
   }
 }
 

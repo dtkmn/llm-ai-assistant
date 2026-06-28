@@ -22,8 +22,10 @@ from src.DocumentQA import (
     QueryResult,
 )
 from src.loop_engine import (
+    DEFAULT_LOOP_RECIPE_ID,
     LoopDecision,
     LoopPhase,
+    LoopRecipe,
     LoopReport,
     LoopRun,
     LoopStep,
@@ -134,7 +136,7 @@ class FakeQA:
             or self.loaded_model_id
             or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
-        answer = "Project Phoenix is described in the uploaded document."
+        answer = "Project Phoenix is described in the indexed file."
         steps = []
         if self.last_loop_recipe:
             steps.append(
@@ -444,16 +446,16 @@ def test_static_frontend_is_served():
     assert "Threads" in response.text
     assert "Loop Recipe" in response.text
     assert "Durable Runs" in response.text
-    assert "Optional Context" in response.text
-    assert "You can still run the loop without documents" in response.text
+    assert "Files" in response.text
+    assert "Smart Evidence can still use web evidence" in response.text
     assert "Model Thinking" in response.text
     assert "active-thread-memory" in response.text
     assert "memory-status" in response.text
     assert "/assets/app.js" in response.text
     assert script.status_code == 200
     assert script.headers["cache-control"] == "no-store"
-    assert "Ask a question, or add context" in script.text
-    assert "direct mode" in script.text
+    assert "Ask anything. Add files only" in script.text
+    assert "smart evidence" in script.text
     assert "renderMessageThinking" in script.text
     assert "session_id" in script.text
     assert "switchThread" in script.text
@@ -522,7 +524,7 @@ const recipes = [{
   recipe_id: "recipe_general_loop",
   name: "General assistant loop",
   goal: "Answer the request clearly.",
-  context_provider: "auto",
+  context_provider: "smart",
   model_profile: "quality",
   verifier: "default",
   instructions: "Use same-thread memory carefully.",
@@ -750,7 +752,7 @@ assert.ok(
     )
 
 
-def test_static_frontend_omits_context_provider_for_recipe_default():
+def test_static_frontend_sends_smart_context_provider_from_default_selector():
     run_frontend_node(
         r'''
 import assert from "node:assert/strict";
@@ -819,16 +821,13 @@ globalThis.fetch = async (url, options = {}) => {
 
 await importFreshApp();
 await tick();
-assert.equal(dom["query-context"].value, "");
+assert.equal(dom["query-context"].value, "smart");
 dom["query-input"].value = "What changed?";
 await dom["query-form"].dispatch("submit");
 
 assert.equal(queryBodies.length, 1);
 assert.equal(queryBodies[0].recipe_id, "recipe_general_loop");
-assert.ok(
-  !Object.hasOwn(queryBodies[0], "context_provider"),
-  "recipe-default evidence mode must omit context_provider",
-);
+assert.equal(queryBodies[0].context_provider, "smart");
 '''
     )
 
@@ -1060,7 +1059,7 @@ const recipes = [{
   recipe_id: "recipe_general_loop",
   name: "General assistant loop",
   goal: "Answer the request clearly.",
-  context_provider: "auto",
+  context_provider: "smart",
   model_profile: "quality",
   verifier: "default",
   instructions: "Use same-thread memory carefully.",
@@ -1180,7 +1179,7 @@ globalThis.confirm = (message) => {
 const requests = { deleted: [], imported: [], exported: [] };
 const recipes = [
   { recipe_id: "recipe_general_loop", name: "General assistant loop", goal: "Answer the request clearly.", instructions: "Default instructions.", success_criteria: ["Default passes."], stop_condition: "Stop when done.", is_default: true },
-  { recipe_id: "recipe_custom", name: "Custom reviewer", goal: "Find weak assumptions.", instructions: "Be sharp.", success_criteria: ["Names risk."], stop_condition: "Stop after verdict.", context_provider: "auto", model_profile: "quality", verifier: "default", metadata: { source: "test" }, is_default: false },
+  { recipe_id: "recipe_custom", name: "Custom reviewer", goal: "Find weak assumptions.", instructions: "Be sharp.", success_criteria: ["Names risk."], stop_condition: "Stop after verdict.", context_provider: "smart", model_profile: "quality", verifier: "default", metadata: { source: "test" }, is_default: false },
 ];
 globalThis.fetch = async (url, options = {}) => {
   const method = String(options.method || "GET").toUpperCase();
@@ -1194,11 +1193,11 @@ globalThis.fetch = async (url, options = {}) => {
     if (method === "POST") {
       const body = JSON.parse(options.body);
       requests.imported.push(body);
-      const imported = { ...body, is_default: false, context_provider: body.context_provider || "auto", model_profile: body.model_profile || "quality", verifier: body.verifier || "default", metadata: body.metadata || {} };
+      const imported = { ...body, is_default: false, context_provider: body.context_provider || "smart", model_profile: body.model_profile || "quality", verifier: body.verifier || "default", metadata: body.metadata || {} };
       recipes.push(imported);
       return jsonResponse(imported);
     }
-    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes: recipes.map((recipe) => ({ recipe_id: recipe.recipe_id, name: recipe.name, goal: recipe.goal, context_provider: recipe.context_provider || "auto", model_profile: recipe.model_profile || "quality", verifier: recipe.verifier || "default", is_default: recipe.is_default })) });
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes: recipes.map((recipe) => ({ recipe_id: recipe.recipe_id, name: recipe.name, goal: recipe.goal, context_provider: recipe.context_provider || "smart", model_profile: recipe.model_profile || "quality", verifier: recipe.verifier || "default", is_default: recipe.is_default })) });
   }
   if (url === "/api/recipes/recipe_custom/export" && method === "GET") {
     requests.exported.push(url);
@@ -1498,7 +1497,7 @@ def test_upload_document_reports_processing_failure_without_losing_active_status
     assert response.status_code == 400
     payload = response.json()
     assert "failed during load" in payload["message"]
-    assert "Active document remains good.txt" in payload["message"]
+    assert "Active file remains good.txt" in payload["message"]
     assert payload["status"]["active_document"] == "good.txt"
     assert payload["status"]["last_attempted_document"] == "bad.txt"
     assert payload["status"]["last_error"] == "Could not decode text document"
@@ -1531,7 +1530,7 @@ def test_upload_document_unexpected_error_uses_pre_upload_status():
     payload = response.json()
     assert fake_qa.status_calls == 1
     assert "failed during unexpected" in payload["message"]
-    assert "Active document remains good.txt" in payload["message"]
+    assert "Active file remains good.txt" in payload["message"]
     assert payload["status"]["active_document"] == "good.txt"
     assert payload["status"]["phase"] == "unexpected"
     assert payload["status"]["last_error"] == "unexpected boom"
@@ -1644,6 +1643,36 @@ def test_query_endpoint_applies_selected_loop_recipe():
     assert thread["loop_runs"][0]["recipe_id"] == "recipe_custom"
 
 
+def test_query_endpoint_refreshes_stale_builtin_default_recipe():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    stale_default = LoopRecipe(
+        recipe_id=DEFAULT_LOOP_RECIPE_ID,
+        name="General assistant loop",
+        description="Default local-first loop behavior.",
+        goal="Answer using indexed context.",
+        instructions="Use indexed context when present.",
+        success_criteria=("Uses indexed context.",),
+        context_provider="auto",
+        metadata={"built_in": True},
+    )
+    with store._lock:
+        store._insert_recipe(stale_default)
+        store._conn.commit()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "Who is Jackie Chan?"},
+    )
+
+    assert response.status_code == 200
+    assert fake_qa.last_loop_recipe["recipe_id"] == DEFAULT_LOOP_RECIPE_ID
+    assert fake_qa.last_loop_recipe["context_provider"] == "smart"
+    assert "web evidence" in fake_qa.last_loop_recipe["instructions"]
+    assert "indexed context" not in fake_qa.last_loop_recipe["goal"].lower()
+
+
 def test_thread_endpoints_create_list_get_rename_and_delete():
     fake_qa = FakeQA()
     store = ThreadStore.in_memory()
@@ -1699,7 +1728,7 @@ def test_recipe_endpoints_manage_loop_recipes():
             "instructions": "Call out uncertainty.",
             "success_criteria": ["Risks first.", "No vague praise."],
             "stop_condition": "Stop after a clear verdict.",
-            "context_provider": "auto",
+            "context_provider": "smart",
             "model_profile": "quality",
             "verifier": "human_review",
         },
@@ -2179,7 +2208,7 @@ def test_query_endpoint_allows_no_context_loop():
 
     response = client.post(
         "/api/query",
-        json={"message": "What can you do?"},
+        json={"message": "What can you do?", "context_provider": "none"},
     )
 
     assert response.status_code == 200
@@ -2384,8 +2413,9 @@ def test_loop_contract_redacts_guardrail_blocked_draft_everywhere():
 
 def test_answer_trace_redacts_model_thinking_for_refused_results_without_guardrail():
     secret_thinking = "SECRET_REFUSED_MODEL_THINKING"
+    refusal_answer = "I could not find enough relevant information in the provided evidence."
     result = QueryResult(
-        answer="I could not find enough relevant information in the document.",
+        answer=refusal_answer,
         trace=AnswerTrace(
             question="What is unsupported?",
             document_name="phoenix.txt",
@@ -2403,13 +2433,19 @@ def test_answer_trace_redacts_model_thinking_for_refused_results_without_guardra
                 backend="ollama",
                 model_label="Ollama (nemotron-3-nano:4b)",
                 final_decision=LoopDecision.REFUSE,
-                final_answer="I could not find enough relevant information in the document.",
+                final_answer=refusal_answer,
             )
         ),
     )
 
     trace = answer_trace_dict(result)
+    payload = query_response_dict(result)
 
+    assert payload["answer"] == refusal_answer
+    assert payload["trace"]["answer"] == refusal_answer
+    assert payload["trace"]["question"] == "What is unsupported?"
+    assert payload["summary"]["last_error"] is None
+    assert payload["trace"]["loop_report"]["public_redaction"]["applied"] is True
     assert secret_thinking not in json.dumps(trace)
     assert trace["model_thinking"] == {
         "available": False,

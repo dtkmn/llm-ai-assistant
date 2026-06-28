@@ -2,8 +2,9 @@
 AI Loop Engine is a local-first engine for inspecting and hardening AI answer
 loops: context selection, retrieval, drafting, format checks, citation checks,
 claim verification, retries, refusals, middleware guardrails, evals, and replay. The
-current built-in context sources are document upload and explicit web search,
-but the product focus is the loop: making agent behavior visible, testable, and
+current built-in evidence sources are Smart Evidence routing, DuckDuckGo web
+snippets, optional uploaded files, thread memory, and direct model knowledge.
+The product focus is the loop: making agent behavior visible, testable, and
 harder to fake.
 
 ## Features
@@ -16,9 +17,9 @@ harder to fake.
 - **Loop Recipes / Skills:** Provides saved loop recipes for goal, instructions,
   success criteria, stop condition, context provider, model profile, and verifier
   metadata
-- **Explicit Web Evidence:** Allows a query to opt into web-search snippets as
-  prompt evidence with citations; `auto` mode stays local and never searches the
-  web by surprise
+- **Smart Evidence Routing:** Uses web evidence for lookup/current questions,
+  indexed files when a file is active and relevant, or direct model knowledge
+  for private/local tasks such as rewriting, coding, and reasoning
 - **Local-first LLM Backend:** Recommended local path is Ollama; cloud or
   gateway deployment uses a generic OpenAI-compatible chat-completions backend
 - **Vector Search:** Uses FAISS for efficient similarity search with
@@ -203,13 +204,14 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
    The default recipe is selected automatically.
 4. Switch threads from the sidebar when you want separate local conversations,
    memory counts, durable run history, and loop traces.
-5. Choose an Evidence mode for the run. `Auto` uses indexed document context
-   when present and otherwise answers directly; `Web search` explicitly sends
-   the current query to the fixed web-search provider for snippet evidence.
-6. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
-   you want local grounded retrieval, citations, and verifier-backed support
-   checks.
-7. Click "Index Context" to make the uploaded document available to the loop.
+5. Leave Evidence on Smart Evidence for the normal assistant flow. Smart
+   Evidence can use DuckDuckGo snippets for lookup/current questions, indexed
+   files when a file is active and relevant, or direct model knowledge for
+   private/local tasks. Choose No external evidence when you explicitly want to
+   avoid retrieval.
+6. Optionally upload a file (PDF, DOCX, TXT, or MD; max 25 MB) when you want
+   local file-grounded retrieval, citations, and verifier-backed support checks.
+7. Click "Index File" to make the uploaded file available to the loop.
 8. Inspect the Loop Timeline to see recipe selection, context selection, retrieve, draft, format,
    check, verify, retry, refusal, and final-decision steps in order
 9. Inspect Durable Runs to see persisted run evidence for the active thread
@@ -223,15 +225,19 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 - **Context mode:** Direct no-context chat is allowed, but it is reported as
   `not_verified` with no citations. Direct answers should match the depth the
   user asks for, but model knowledge and thread memory are not treated as
-  verified evidence. Document context and explicit web search are optional
-  context providers that upgrade the loop into grounded retrieval plus
+  verified evidence. Smart Evidence, explicit web search, and indexed files are
+  context providers that can upgrade the loop into grounded retrieval plus
   citation/verifier checks.
-- **Current context providers:** document context and explicit web search.
-  `Auto` resolves only to indexed document context or direct/no-context mode;
-  it does not search the web unless the query or recipe requests `web`.
-- **Current document loop shape:** validate/decode -> split -> embed/index -> retrieve -> draft answer -> run format checks -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
-- **Context provider boundary:** `DocumentContextProvider` wraps local document
-  retrieval; per-query web search uses the same retrieve/draft/check/verify loop
+- **Current context providers:** Smart Evidence, web search, indexed files, and
+  no external evidence. `context_provider=smart` is the default; legacy
+  `context_provider=auto` is accepted as an alias. Smart Evidence uses web
+  snippets for lookup/current questions, uses active indexed files for file-
+  relevant questions, and stays in no-external-evidence mode for private/local
+  tasks such as rewriting, coding, and reasoning.
+- **Current evidence loop shape:** select evidence -> retrieve -> draft answer -> run format checks -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
+- **Context provider boundary:** `DocumentContextProvider` is the legacy class
+  name for local indexed-file retrieval; per-query web search uses the same
+  retrieve/draft/check/verify loop
   without becoming durable uploaded context.
 - **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRecipe`, `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopSession`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
 - **Runtime reports:** `AILoopEngine.query_with_trace()` returns a `QueryResult` with both the legacy answer trace and a first-class `LoopReport`
@@ -292,10 +298,11 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 - **Retrieval:** MMR retrieval with source/page grounding
   - **Quality:** `k=6`, `fetch_k=24`
   - **Fast:** `k=3`, `fetch_k=10`
-- **Web search:** explicit `context_provider=web` queries the fixed DuckDuckGo
-  Instant Answer JSON endpoint for snippets only. It does not fetch arbitrary
-  result pages. Configure bounded provider behavior with `WEB_SEARCH_TIMEOUT`
-  and `WEB_SEARCH_MAX_RESULTS`.
+- **Web search:** Smart Evidence lookup/current queries and explicit
+  `context_provider=web` queries use the fixed DuckDuckGo Instant Answer JSON
+  endpoint for snippets only. The app does not fetch arbitrary result pages.
+  Configure bounded provider behavior with `WEB_SEARCH_TIMEOUT` and
+  `WEB_SEARCH_MAX_RESULTS`.
 - **Safety limits:** Max upload size 25 MB, chunk cap 2,000 chunks per document
 - **Native runtime defaults:** unless you override them, app entrypoints
   bootstrap `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
@@ -510,7 +517,7 @@ ollama stop qwen3:8b
   validation expectations, backend honesty rules, encoding policy, and release
   guardrails.
 - `.agents/skills/document-qa/SKILL.md` defines the focused loop-engineering
-  skill for changes to loop contracts, document context, retrieval, model
+  skill for changes to loop contracts, evidence context, retrieval, model
   routing, UI status, evals, and CI publishing.
 - Use the documented loop for non-trivial changes: explore, plan, act, observe,
   verify, review, and ship.

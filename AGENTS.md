@@ -5,9 +5,9 @@
 This repository is AI Loop Engine, a local-first engine for inspecting and
 hardening AI loops: context selection, retrieval, answer
 drafting, mechanical checks, verifier decisions, retries, refusals, evals, and
-eventual replay. The current built-in capability is document context: PDF, DOCX,
-TXT, and MD uploads are chunked, indexed with FAISS, and used as evidence for a
-document-grounded agent loop.
+eventual replay. The current built-in evidence providers are Smart Evidence
+routing, DuckDuckGo web snippets, optional uploaded-file context, thread memory,
+and direct model knowledge.
 
 Primary runtime files:
 
@@ -16,8 +16,8 @@ Primary runtime files:
 - `src/ai_loop_runtime.py`: current runtime implementation module during the
   refactor. It owns loop orchestration, embeddings, LLM backend selection,
   document upload transactionality, and query handling.
-- `src/context_providers.py`: provider protocol, current document context
-  provider, and active context state records.
+- `src/context_providers.py`: provider protocol, current file context provider,
+  and active context state records.
 - `src/retrieval.py`: FAISS vector store, retriever, document retrieval chain,
   prompt evidence formatting, and citation assembly. It is lazy-loaded by the
   runtime indexing/query path and must keep native bootstrap before FAISS/NumPy
@@ -41,7 +41,7 @@ Primary runtime files:
 - `src/model_adapters.py`: Ollama and OpenAI-compatible LLM/embedding adapters,
   provider request helpers, and provider embedding response validation.
   `src/ai_loop_runtime.py` re-exports these names for compatibility.
-- `src/web_search.py`: explicit per-query web-search snippet provider,
+- `src/web_search.py`: per-query web-search snippet provider,
   DuckDuckGo Instant Answer parsing, and web evidence retrieval chain. It must
   not fetch arbitrary result pages.
 - `src/answer_loop.py`: answer self-check policy, citation mechanics, deterministic
@@ -106,12 +106,15 @@ Primary runtime files:
   deterministic refutation prefilters may reject bad answers, but only a real
   backend verifier may label an answer `supported`. Mock/demo mode must report
   mechanically valid answers as `not_verified`, not `supported`.
-- Document and explicit web context are optional at query time. A no-context
-  answer may run through the selected LLM backend, but it must be reported as
+- Smart Evidence is the default query-time context mode. A no-context answer may
+  run through the selected LLM backend, but it must be reported as
   `not_verified`, have zero citations, skip verifier support claims, and show
-  `context_provider="none"` in the loop report. `context_provider=web` may use
-  fixed web-search snippets as prompt evidence; `auto` must not search the web
-  by surprise.
+  `context_provider="none"` in the loop report. `context_provider=smart` may
+  route lookup/current questions to fixed DuckDuckGo web snippets, file-relevant
+  questions to indexed files, and private/local tasks such as rewriting, coding,
+  or reasoning to direct model knowledge; legacy `context_provider=auto` is an
+  alias for `smart`.
+  `context_provider=web`, `document`, and `none` remain explicit user overrides.
 - Ollama model-emitted thinking is a UI/debugging signal, not evidence. Keep it
   separate from the final answer, label it as unverified, never synthesize it in
   mock mode, and redact/drop it whenever the final answer is refused, blocked,
@@ -172,8 +175,8 @@ Primary runtime files:
 - Product direction is local-first. First-party model providers are Ollama and
   generic OpenAI-compatible gateways; do not reintroduce provider-token happy
   paths without an explicit product decision.
-- Product identity is AI Loop Engine. Document answering and explicit web
-  evidence are context provider capabilities, not the repo's strategic identity.
+- Product identity is AI Loop Engine. Uploaded-file answering and web evidence
+  are context provider capabilities, not the repo's strategic identity.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRecipe`, `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`,
   `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`,

@@ -16,7 +16,7 @@
         <div class="status-pills" aria-label="Runtime status">
           <span class="pill" id="backend-pill">backend</span>
           <span class="pill" id="model-pill">model</span>
-          <span class="pill" id="ready-pill">direct mode</span>
+          <span class="pill" id="ready-pill">smart evidence</span>
         </div>
       </header>
 
@@ -79,22 +79,22 @@
           </p>
           <div class="panel-divider"></div>
           <div class="panel-heading">
-            <h2 id="context-title">Optional Context</h2>
+            <h2 id="context-title">Files</h2>
             <button class="ghost-button" id="refresh-status" type="button">Refresh</button>
           </div>
           <form id="upload-form" class="upload-form">
             <label>
-              Document
+              File
               <input id="document-file" name="file" type="file" accept=".pdf,.docx,.txt,.md" />
             </label>
             <label>
               Text encoding
               <select id="text-encoding" name="text_encoding"></select>
             </label>
-            <button id="upload-button" type="submit">Index Context</button>
+            <button id="upload-button" type="submit">Index File</button>
           </form>
           <p class="status-message" id="upload-status">
-            No context indexed. You can still run the loop without documents.
+            No file indexed. Smart Evidence can still use web evidence or direct model knowledge.
           </p>
           <dl class="runtime-grid" id="runtime-grid"></dl>
         </section>
@@ -115,15 +115,14 @@
             <label class="query-context-control">
               Evidence
               <select id="query-context" name="context_provider">
-                <option value="">Recipe default</option>
-                <option value="auto">Auto</option>
-                <option value="document">Indexed document</option>
+                <option value="smart">Smart Evidence</option>
                 <option value="web">Web search</option>
-                <option value="none">No external context</option>
+                <option value="document">Files only</option>
+                <option value="none">No external evidence</option>
               </select>
             </label>
             <label class="visually-hidden" for="query-input">Question</label>
-            <textarea id="query-input" rows="3" placeholder="Ask anything, or ask against indexed context"></textarea>
+            <textarea id="query-input" rows="3" placeholder="Ask anything"></textarea>
             <button id="query-button" type="submit">Run Loop</button>
           </form>
         </section>

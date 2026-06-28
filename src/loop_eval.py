@@ -320,7 +320,13 @@ def evaluate_model(
             for case in cases:
                 try:
                     case_results.append(
-                        score_case(case, qa.query_with_trace(case.question))
+                        score_case(
+                            case,
+                            qa.query_with_trace(
+                                case.question,
+                                context_provider="document",
+                            ),
+                        )
                     )
                 except Exception as exc:
                     case_results.append(failed_case(case, exc))

@@ -1,6 +1,6 @@
 ---
 name: loop-engineering
-description: Use when changing loop contracts, document context, retrieval, LLM backend routing, FastAPI/web upload/query behavior, evals, or CI release policy for AI Loop Engine.
+description: Use when changing loop contracts, evidence context, retrieval, LLM backend routing, FastAPI/web upload/query behavior, evals, or CI release policy for AI Loop Engine.
 ---
 
 # Loop Engineering
@@ -8,8 +8,9 @@ description: Use when changing loop contracts, document context, retrieval, LLM 
 ## Purpose
 
 Use this skill to evolve the workbench without weakening its core promise: make
-agent loops observable, testable, local-first, and honest. Document upload is the
-first context provider, not the product boundary.
+agent loops observable, testable, local-first, and honest. Smart Evidence,
+web snippets, uploaded files, thread memory, and direct model knowledge are
+evidence providers; none of them is the whole product boundary.
 
 ## Operating Loop
 
@@ -60,17 +61,21 @@ first context provider, not the product boundary.
   hashing for deterministic demos/tests.
 - `LLM_BACKEND=auto` must select Ollama only. It must not silently select mock,
   provider-specific hosted backends, or in-process model loading.
-- Product identity is AI Loop Engine. Treat document answering and explicit web
+- Product identity is AI Loop Engine. Treat uploaded-file answering and web
   evidence as context provider capabilities, not the repo's strategic identity.
-- Document and web evidence are `ContextProvider`-shaped capabilities; keep
+- File and web evidence are `ContextProvider`-shaped capabilities; keep
   provider identity in loop reports instead of hardcoding document-specific
   assumptions in UI code.
-- Document context is optional at query time, and web context must be explicit.
-  No-context answers may draft with the selected LLM backend, but they must
-  report `context_provider="none"`, zero citations, and `not_verified`; do not
-  run verifier support claims without prompt evidence. `context_provider=web`
-  may use fixed web-search snippets as prompt evidence; `auto` must not search
-  the web by surprise.
+- Smart Evidence is the default query-time context mode. No-context answers may
+  draft with the selected LLM backend, but they must report
+  `context_provider="none"`, zero citations, and `not_verified`; do not run
+  verifier support claims without prompt evidence. `context_provider=smart` may
+  route lookup/current questions to fixed DuckDuckGo web snippets, file-relevant
+  questions to indexed files, and private/local tasks such as rewriting, coding,
+  or reasoning to direct model knowledge; legacy `context_provider=auto` is an
+  alias for `smart`.
+  `context_provider=web`, `document`, and `none` remain explicit user
+  overrides.
 - Typed loop records are the contract surface for future agent work. Add or
   update `LoopRecipe`, `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`,
   `LoopPolicy`, `LoopSession`, `GuardrailDecision`, `LoopMiddleware`,

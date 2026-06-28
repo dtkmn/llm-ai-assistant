@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="650" viewBox="0 0 1600 650" role="img" aria-labelledby="title desc">
   <title id="title">AI Loop Engine flow</title>
-  <desc id="desc">A diagram of AI Loop Engine showing document context, loop execution, guardrails, loop reports, sessions, replay, and optional framework adapters.</desc>
+  <desc id="desc">A diagram of AI Loop Engine showing smart evidence routing, loop execution, guardrails, loop reports, sessions, replay, and optional framework adapters.</desc>
   <defs>
     <style>
       .bg { fill: #f8fafc; }
@@ -37,16 +37,16 @@
   <text class="subtitle" x="54" y="84">Local-first loop inspection for context, drafting, format checks, verification, retries, refusals, sessions, and replay.</text>
 
   <rect class="band context" x="54" y="120" rx="14" ry="14" width="294" height="360"/>
-  <text class="label" x="80" y="158">Context Provider</text>
+  <text class="label" x="80" y="158">Evidence Providers</text>
   <rect class="box" x="80" y="186" rx="10" ry="10" width="238" height="68"/>
-  <text class="small" x="102" y="214">Upload PDF, DOCX, TXT, MD</text>
-  <text class="tiny" x="102" y="236">Safe decode and validation</text>
+  <text class="small" x="102" y="214">Smart Evidence</text>
+  <text class="tiny" x="102" y="236">Web, files, or direct</text>
   <rect class="box" x="80" y="274" rx="10" ry="10" width="238" height="68"/>
-  <text class="small" x="102" y="302">Transactional index</text>
-  <text class="tiny" x="102" y="324">Split, embed, FAISS commit</text>
+  <text class="small" x="102" y="302">Web snippets</text>
+  <text class="tiny" x="102" y="324">DuckDuckGo evidence</text>
   <rect class="box" x="80" y="362" rx="10" ry="10" width="238" height="70"/>
-  <text class="small" x="102" y="390">Active document state</text>
-  <text class="tiny" x="102" y="412">Atomic status snapshot</text>
+  <text class="small" x="102" y="390">Indexed files</text>
+  <text class="tiny" x="102" y="412">Transactional local FAISS</text>
 
   <rect class="band loop" x="410" y="120" rx="14" ry="14" width="534" height="360"/>
   <text class="label" x="436" y="158">Runtime Answer Loop</text>
