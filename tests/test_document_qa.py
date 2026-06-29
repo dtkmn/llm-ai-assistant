@@ -1115,6 +1115,436 @@ def test_web_verifier_retry_still_fails_closed_when_retry_fails(verifier_outcome
     assert "production autonomy" not in public_json
 
 
+def test_smart_web_verifier_failure_falls_back_to_unverified_direct_answer():
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Loop engineering",
+                    url="https://example.test/loop-engineering",
+                    snippet="Loop engineering is discussed in AI agent workflows.",
+                )
+            ]
+
+    class FallbackLLM:
+        last_thinking = None
+
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, prompt):
+            self.calls.append(prompt)
+            if prompt.startswith("You are a strict citation verifier"):
+                return json.dumps(
+                    {"outcome": "insufficient", "reason": "snippet too thin"}
+                )
+            if prompt.startswith("You are AI Loop Engine running without"):
+                return (
+                    "Loop engineering means designing and inspecting the repeated "
+                    "AI workflow around context, drafting, checking, retrying, and "
+                    "refusing when needed."
+                )
+            return "Loop engineering is a complete agent architecture pattern [1]."
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = FallbackLLM()
+    qa.active_llm_backend = "openai-compatible"
+    qa.loaded_model_label = "Fake verifier gateway"
+
+    result = qa.query_with_trace(
+        "What is loop engineering when talking about agents?",
+        session_id="smart_web_fallback",
+    )
+
+    assert result.answer.startswith("Loop engineering means designing")
+    assert result.trace.citations == []
+    assert result.trace.self_check.outcome == "not_verified"
+    assert result.trace.self_check.reasons == [
+        "no_context_provider",
+        "verifier_requires_prompt_evidence",
+        "smart_web_evidence_fallback",
+    ]
+    assert result.loop_report.run.context_provider == "none"
+    assert result.loop_report.run.final_decision == LoopDecision.NOT_VERIFIED
+    assert result.loop_report.run.metadata["attempted_context_provider"] == "web"
+    assert result.loop_report.run.metadata["evidence_fallback"] is True
+    assert result.loop_report.run.metadata["evidence_fallback_reason"] == (
+        "web_evidence_not_verified"
+    )
+    response_payload = web_contract_module.query_response_dict(result)
+    assert response_payload["summary"]["context_provider"] == "none"
+    assert response_payload["summary"]["attempted_context_provider"] == "web"
+    assert response_payload["summary"]["evidence_fallback"] is True
+    assert response_payload["summary"]["evidence_fallback_reason"] == (
+        "web_evidence_not_verified"
+    )
+    fallback_step = next(
+        step
+        for step in result.loop_report.run.steps
+        if step.name == "Fallback to direct model knowledge"
+    )
+    assert fallback_step.metadata["source_self_check_outcome"] == "needs_refusal"
+    assert fallback_step.metadata["source_self_check_reasons"] == [
+        "llm_verifier_insufficient"
+    ]
+    assert any("Web evidence retry instruction:" in call for call in qa.llm.calls)
+
+
+def test_smart_web_mechanical_failure_does_not_fallback_to_direct_answer():
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Loop engineering",
+                    url="https://example.test/loop-engineering",
+                    snippet=(
+                        "Loop engineering means designing AI agent loops rather "
+                        "than one-off prompts."
+                    ),
+                )
+            ]
+
+    class MissingCitationLLM:
+        last_thinking = None
+
+        def invoke(self, prompt):
+            if prompt.startswith("You are AI Loop Engine running without"):
+                raise AssertionError(
+                    "mechanical citation failure must not fallback to direct answer"
+                )
+            return "Loop engineering means designing AI agent loops."
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = MissingCitationLLM()
+    qa.active_llm_backend = "openai-compatible"
+    qa.loaded_model_label = "Fake verifier gateway"
+
+    result = qa.query_with_trace(
+        "What is loop engineering?",
+        session_id="smart_web_mechanical_failure",
+    )
+
+    assert result.answer == answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert "missing_inline_citation" in result.trace.self_check.reasons
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.final_decision == LoopDecision.REFUSE
+    assert all(
+        step.name != "Fallback to direct model knowledge"
+        for step in result.loop_report.run.steps
+    )
+
+
+def test_smart_web_verifier_failure_with_broken_direct_fallback_returns_safe_error(
+    caplog,
+):
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Loop engineering",
+                    url="https://example.test/loop-engineering",
+                    snippet="Loop engineering is discussed in AI agent workflows.",
+                )
+            ]
+
+    class BrokenFallbackLLM:
+        last_thinking = None
+
+        def __init__(self):
+            self.verifier_calls = 0
+
+        def invoke(self, prompt):
+            if prompt.startswith("You are a strict citation verifier"):
+                self.verifier_calls += 1
+                return json.dumps(
+                    {"outcome": "insufficient", "reason": "snippet too thin"}
+                )
+            if prompt.startswith("You are AI Loop Engine running without"):
+                raise RuntimeError("DIRECT_MODEL_SECRET_FAILURE")
+            return "SECRET_REJECTED_WEB_DRAFT is not supported enough [1]."
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = BrokenFallbackLLM()
+    qa.active_llm_backend = "openai-compatible"
+    qa.loaded_model_label = "Fake verifier gateway"
+    caplog.set_level(logging.WARNING, logger=ai_loop_runtime_module.LOGGER.name)
+
+    result = qa.query_with_trace(
+        "What is loop engineering when talking about agents?",
+        session_id="smart_web_broken_verifier_fallback",
+    )
+    public_payload = web_contract_module.query_response_dict(result)
+    public_json = json.dumps(public_payload)
+
+    assert result.answer == (
+        "I hit an internal error while processing your question. Please try again."
+    )
+    assert result.trace.error_message == "direct_fallback_failed"
+    assert result.trace.citations == []
+    assert result.trace.self_check is None
+    assert result.loop_report.run.final_decision == LoopDecision.ERROR
+    assert result.loop_report.run.error_message == "direct_fallback_failed"
+    assert result.loop_report.run.context_provider == "none"
+    assert result.loop_report.run.metadata["context_provider"] == "none"
+    assert result.loop_report.run.metadata["attempted_context_provider"] == "web"
+    assert result.loop_report.run.metadata["evidence_fallback"] is True
+    assert result.loop_report.run.metadata["fallback_error"] == "direct_fallback_failed"
+    assert public_payload["summary"]["context_provider"] == "none"
+    assert public_payload["summary"]["attempted_context_provider"] == "web"
+    assert any(
+        step.name == "Smart Evidence fallback"
+        and step.error_message == "direct_fallback_failed"
+        and step.metadata["source_self_check_reasons"] == [
+            "llm_verifier_insufficient"
+        ]
+        for step in result.loop_report.run.steps
+    )
+    assert all(
+        step.output_summary == "[redacted: failed evidence fallback]"
+        for step in result.loop_report.run.steps
+        if step.phase == LoopPhase.DRAFT
+    )
+    assert "DIRECT_MODEL_SECRET_FAILURE" not in public_json
+    assert "SECRET_REJECTED_WEB_DRAFT" not in public_json
+    assert "snippet too thin" not in public_json
+    assert "DIRECT_MODEL_SECRET_FAILURE" not in caplog.text
+
+
+def test_explicit_web_verifier_failure_does_not_fallback_to_direct_answer():
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Loop engineering",
+                    url="https://example.test/loop-engineering",
+                    snippet="Loop engineering is discussed in AI agent workflows.",
+                )
+            ]
+
+    class RefusingVerifierLLM:
+        last_thinking = None
+
+        def invoke(self, prompt):
+            if prompt.startswith("You are a strict citation verifier"):
+                return json.dumps(
+                    {"outcome": "insufficient", "reason": "snippet too thin"}
+                )
+            if prompt.startswith("You are AI Loop Engine running without"):
+                raise AssertionError("explicit web must not fallback to direct answer")
+            return "Loop engineering is a complete agent architecture pattern [1]."
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = RefusingVerifierLLM()
+    qa.active_llm_backend = "openai-compatible"
+    qa.loaded_model_label = "Fake verifier gateway"
+
+    result = qa.query_with_trace(
+        "What is loop engineering when talking about agents?",
+        context_provider="web",
+    )
+
+    assert result.answer == answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert result.loop_report.run.context_provider == "web"
+    assert result.loop_report.run.final_decision == LoopDecision.REFUSE
+    assert all(
+        step.name != "Fallback to direct model knowledge"
+        for step in result.loop_report.run.steps
+    )
+
+
+def test_smart_web_search_failure_falls_back_to_unverified_direct_answer():
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise web_search_module.WebSearchError("provider_down")
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FailingWebSearchClient()
+    qa.llm = SimpleNamespace(
+        invoke=lambda prompt: (
+            "I can explain loop engineering from model knowledge, but this "
+            "answer is not verified by web evidence."
+            if prompt.startswith("You are AI Loop Engine running without")
+            else "unexpected"
+        ),
+        last_thinking=None,
+    )
+
+    result = qa.query_with_trace(
+        "What is loop engineering when talking about agents?",
+        session_id="smart_web_error_fallback",
+    )
+
+    assert result.answer.startswith("I can explain loop engineering")
+    assert result.trace.error_message is None
+    assert result.trace.self_check.outcome == "not_verified"
+    assert result.loop_report.run.context_provider == "none"
+    assert result.loop_report.run.final_decision == LoopDecision.NOT_VERIFIED
+    assert result.loop_report.run.metadata["attempted_context_provider"] == "web"
+    assert result.loop_report.run.metadata["evidence_fallback_reason"] == (
+        "web_search_failed"
+    )
+    assert any(
+        step.name == "Web search retrieval" and step.decision == LoopDecision.ERROR
+        for step in result.loop_report.run.steps
+    )
+    assert any(
+        step.name == "Fallback to direct model knowledge"
+        for step in result.loop_report.run.steps
+    )
+
+
+def test_smart_web_search_failure_with_broken_direct_fallback_returns_safe_error(
+    caplog,
+):
+    class FailingWebSearchClient:
+        def search(self, query, *, max_results=5):
+            raise web_search_module.WebSearchError("provider_down")
+
+    class BrokenFallbackLLM:
+        last_thinking = None
+
+        def invoke(self, prompt):
+            if prompt.startswith("You are AI Loop Engine running without"):
+                raise RuntimeError("DIRECT_MODEL_SECRET_FAILURE")
+            return "unexpected"
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FailingWebSearchClient()
+    qa.llm = BrokenFallbackLLM()
+    caplog.set_level(logging.WARNING, logger=ai_loop_runtime_module.LOGGER.name)
+
+    result = qa.query_with_trace(
+        "What is loop engineering when talking about agents?",
+        session_id="smart_web_broken_fallback",
+    )
+    public_payload = web_contract_module.query_response_dict(result)
+    public_json = json.dumps(public_payload)
+
+    assert result.answer == (
+        "I hit an internal error while processing your question. Please try again."
+    )
+    assert result.trace.error_message == "direct_fallback_failed"
+    assert result.trace.citations == []
+    assert result.trace.self_check is None
+    assert result.loop_report.run.final_decision == LoopDecision.ERROR
+    assert result.loop_report.run.error_message == "direct_fallback_failed"
+    assert result.loop_report.run.context_provider == "none"
+    assert result.loop_report.run.metadata["context_provider"] == "none"
+    assert result.loop_report.run.metadata["attempted_context_provider"] == "web"
+    assert result.loop_report.run.metadata["evidence_fallback"] is True
+    assert result.loop_report.run.metadata["fallback_error"] == "direct_fallback_failed"
+    assert public_payload["summary"]["context_provider"] == "none"
+    assert public_payload["summary"]["attempted_context_provider"] == "web"
+    assert any(
+        step.name == "Smart Evidence fallback"
+        and step.error_message == "direct_fallback_failed"
+        for step in result.loop_report.run.steps
+    )
+    assert "DIRECT_MODEL_SECRET_FAILURE" not in public_json
+    assert "provider_down" not in public_json
+    assert "DIRECT_MODEL_SECRET_FAILURE" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("trigger", "fallback_answer", "expected_error", "secret"),
+    [
+        (
+            "verifier_failure",
+            "",
+            "empty_direct_answer",
+            "SECRET_REJECTED_WEB_DRAFT",
+        ),
+        (
+            "web_search_failure",
+            "",
+            "empty_direct_answer",
+            "SECRET_EMPTY_FALLBACK_THINKING",
+        ),
+        (
+            "verifier_failure",
+            "1. SECRET_FALLBACK_FORMAT_DRAFT. 2. run tests.",
+            "format_check_failed",
+            "SECRET_FALLBACK_FORMAT_DRAFT",
+        ),
+        (
+            "web_search_failure",
+            "1. SECRET_PROVIDER_FORMAT_DRAFT. 2. run tests.",
+            "format_check_failed",
+            "SECRET_PROVIDER_FORMAT_DRAFT",
+        ),
+    ],
+)
+def test_smart_web_terminal_fallback_errors_redact_draft_outputs(
+    trigger,
+    fallback_answer,
+    expected_error,
+    secret,
+):
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            if trigger == "web_search_failure":
+                raise web_search_module.WebSearchError("provider_down")
+            return [
+                web_search_module.WebSearchHit(
+                    title="Loop engineering",
+                    url="https://example.test/loop-engineering",
+                    snippet="Loop engineering is discussed in AI agent workflows.",
+                )
+            ]
+
+    class TerminalFallbackErrorLLM:
+        def __init__(self):
+            self.last_thinking = None
+
+        def invoke(self, prompt):
+            if prompt.startswith("You are a strict citation verifier"):
+                return json.dumps(
+                    {"outcome": "insufficient", "reason": "snippet too thin"}
+                )
+            if prompt.startswith("You are AI Loop Engine running without"):
+                if expected_error == "empty_direct_answer":
+                    self.last_thinking = "SECRET_EMPTY_FALLBACK_THINKING"
+                return fallback_answer
+            return "SECRET_REJECTED_WEB_DRAFT is not supported enough [1]."
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = TerminalFallbackErrorLLM()
+    qa.active_llm_backend = "openai-compatible"
+    qa.loaded_model_label = "Fake verifier gateway"
+
+    result = qa.query_with_trace(
+        "What is loop engineering when talking about agents?",
+        session_id=f"smart_web_{trigger}_{expected_error}",
+    )
+    public_payload = web_contract_module.query_response_dict(result)
+    public_json = json.dumps(public_payload)
+
+    assert result.loop_report.run.final_decision == LoopDecision.ERROR
+    assert result.loop_report.run.error_message == expected_error
+    assert result.trace.error_message == expected_error
+    assert result.trace.citations == []
+    assert result.trace.self_check is None
+    assert result.loop_report.run.metadata["attempted_context_provider"] == "web"
+    assert result.loop_report.run.metadata["evidence_fallback"] is True
+    assert all(
+        step.output_summary == "[redacted: failed evidence fallback]"
+        for step in result.loop_report.run.steps
+        if step.phase == LoopPhase.DRAFT
+    )
+    assert secret not in public_json
+    assert "SECRET_REJECTED_WEB_DRAFT" not in public_json
+    assert "SECRET_EMPTY_FALLBACK_THINKING" not in public_json
+    assert "provider_down" not in public_json
+    assert "snippet too thin" not in public_json
+
+
 def test_web_search_query_does_not_send_thread_memory_to_provider():
     class RecordingWebSearchClient:
         def __init__(self):
@@ -2739,8 +3169,8 @@ def test_web_search_provider_failure_reports_query_error():
     )
 
     assert result.answer == (
-        "Web search evidence is unavailable right now. Try again or switch "
-        "Evidence to Files only or No external evidence."
+        "Web search evidence is unavailable right now. Try again or ask "
+        "without requiring web evidence."
     )
     assert result.trace.error_message == "web_search_failed"
     assert result.trace.citations == []

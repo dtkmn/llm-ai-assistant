@@ -3234,6 +3234,412 @@ class AILoopEngine:
             },
         )
 
+    def _smart_web_can_fallback_to_direct(self, requested_context_provider: str) -> bool:
+        return requested_context_provider in {"smart", "auto"}
+
+    def _smart_web_self_check_can_fallback(self, self_check: AnswerSelfCheck) -> bool:
+        return self_check.outcome == "needs_refusal" and bool(
+            set(self_check.reasons) & _answer_loop.WEB_VERIFIER_RETRY_REASONS
+        )
+
+    def _redact_draft_outputs_for_failed_evidence_fallback(
+        self, run: LoopRun
+    ) -> LoopRun:
+        redacted_steps = []
+        for step in run.steps:
+            if step.phase != LoopPhase.DRAFT:
+                redacted_steps.append(step)
+                continue
+            metadata = {
+                **dict(step.metadata),
+                "output_redacted": True,
+                "redaction_reason": "failed_evidence_fallback",
+            }
+            redacted_steps.append(
+                replace(
+                    step,
+                    output_summary="[redacted: failed evidence fallback]",
+                    metadata=metadata,
+                )
+            )
+        return replace(run, steps=tuple(redacted_steps))
+
+    def _finish_failed_smart_web_direct_fallback(
+        self,
+        *,
+        run: LoopRun,
+        question: str,
+        active_state: ActiveDocumentState,
+        requested_context_provider: str,
+        fallback_reason: str,
+        fallback_exc: Exception,
+        source_self_check: Optional[AnswerSelfCheck] = None,
+    ) -> QueryResult:
+        safe_run = self._redact_draft_outputs_for_failed_evidence_fallback(run)
+        safe_run = replace(
+            safe_run,
+            context_provider="none",
+            metadata={
+                **dict(safe_run.metadata),
+                "context_provider": "none",
+                "context_provider_name": None,
+                "document_name": None,
+                "attempted_context_provider": "web",
+                "evidence_fallback": True,
+                "evidence_fallback_reason": fallback_reason,
+                "fallback_error": "direct_fallback_failed",
+            },
+        )
+        error_metadata: Dict[str, Any] = {
+            "error_type": fallback_exc.__class__.__name__,
+            "requested_context_provider": requested_context_provider,
+            "attempted_context_provider": "web",
+            "context_provider": "none",
+            "evidence_fallback": True,
+            "evidence_fallback_reason": fallback_reason,
+        }
+        if source_self_check:
+            error_metadata["source_self_check_outcome"] = source_self_check.outcome
+            error_metadata["source_self_check_reasons"] = list(
+                source_self_check.reasons
+            )
+        safe_run = safe_run.with_step(
+            self._loop_step(
+                LoopPhase.ERROR,
+                decision=LoopDecision.ERROR,
+                name="Smart Evidence fallback",
+                output_summary="direct_fallback_failed",
+                error_message="direct_fallback_failed",
+                metadata=error_metadata,
+            )
+        )
+        return self._finish_query_result(
+            answer=(
+                "I hit an internal error while processing your question. "
+                "Please try again."
+            ),
+            question=question,
+            active_state=active_state,
+            run=safe_run,
+            final_decision=LoopDecision.ERROR,
+            error_message="direct_fallback_failed",
+            metadata={
+                "context_provider": "none",
+                "attempted_context_provider": "web",
+                "evidence_fallback": True,
+                "evidence_fallback_reason": fallback_reason,
+                "fallback_error": "direct_fallback_failed",
+            },
+        )
+
+    def _run_smart_web_direct_fallback_safely(
+        self,
+        *,
+        run: LoopRun,
+        question: str,
+        active_state: ActiveDocumentState,
+        requested_context_provider: str,
+        conversation_context: Sequence[Mapping[str, str]],
+        semantic_memory_context: Sequence[Mapping[str, str]],
+        loop_recipe_context: Optional[Mapping[str, Any]],
+        fallback_reason: str,
+        session_id: str,
+        session_revision: Tuple[int, int],
+        source_self_check: Optional[AnswerSelfCheck] = None,
+    ) -> QueryResult:
+        try:
+            return self._run_smart_web_direct_fallback(
+                run=run,
+                question=question,
+                active_state=active_state,
+                requested_context_provider=requested_context_provider,
+                conversation_context=conversation_context,
+                semantic_memory_context=semantic_memory_context,
+                loop_recipe_context=loop_recipe_context,
+                fallback_reason=fallback_reason,
+                session_id=session_id,
+                session_revision=session_revision,
+                source_self_check=source_self_check,
+            )
+        except Exception as fallback_exc:
+            LOGGER.warning(
+                "Smart Evidence direct fallback failed with %s.",
+                fallback_exc.__class__.__name__,
+            )
+            return self._finish_failed_smart_web_direct_fallback(
+                run=run,
+                question=question,
+                active_state=active_state,
+                requested_context_provider=requested_context_provider,
+                fallback_reason=fallback_reason,
+                fallback_exc=fallback_exc,
+                source_self_check=source_self_check,
+            )
+
+    def _run_smart_web_direct_fallback(
+        self,
+        *,
+        run: LoopRun,
+        question: str,
+        active_state: ActiveDocumentState,
+        requested_context_provider: str,
+        conversation_context: Sequence[Mapping[str, str]],
+        semantic_memory_context: Sequence[Mapping[str, str]],
+        loop_recipe_context: Optional[Mapping[str, Any]],
+        fallback_reason: str,
+        session_id: str,
+        session_revision: Tuple[int, int],
+        source_self_check: Optional[AnswerSelfCheck] = None,
+    ) -> QueryResult:
+        fallback_metadata = {
+            **dict(run.metadata),
+            "context_provider": "none",
+            "context_provider_name": None,
+            "document_name": None,
+            "attempted_context_provider": "web",
+            "evidence_fallback": True,
+            "evidence_fallback_reason": fallback_reason,
+        }
+        run = replace(run, context_provider="none", metadata=fallback_metadata)
+        fallback_step_metadata: Dict[str, Any] = {
+            "requested_context_provider": requested_context_provider,
+            "attempted_context_provider": "web",
+            "context_provider": "none",
+            "context_provider_name": None,
+            "evidence_fallback": True,
+            "evidence_fallback_reason": fallback_reason,
+        }
+        if source_self_check:
+            fallback_step_metadata["source_self_check_outcome"] = source_self_check.outcome
+            fallback_step_metadata["source_self_check_reasons"] = list(
+                source_self_check.reasons
+            )
+
+        run, guardrail_decision = self._append_loop_step(
+            run,
+            self._loop_step(
+                LoopPhase.CONTEXT_SELECT,
+                decision=LoopDecision.CONTINUE,
+                name="Fallback to direct model knowledge",
+                output_summary="no_context_provider",
+                metadata=fallback_step_metadata,
+            ),
+        )
+        if guardrail_decision:
+            return self._finish_guardrail_query_result(
+                decision=guardrail_decision,
+                question=question,
+                active_state=active_state,
+                run=run,
+            )
+
+        planned_draft_step = self._planned_loop_step(
+            LoopPhase.DRAFT,
+            name="Draft direct fallback answer",
+            input_summary=question,
+        )
+        guardrail_decision = self._prepare_loop_step(run, planned_draft_step)
+        if guardrail_decision:
+            return self._finish_guardrail_query_result(
+                decision=guardrail_decision,
+                question=question,
+                active_state=active_state,
+                run=run,
+            )
+
+        (
+            raw_response,
+            response,
+            model_thinking,
+            removed_inline_citation_ids,
+        ) = self._draft_direct_answer(
+            question,
+            conversation_history=conversation_context,
+            semantic_memory=semantic_memory_context,
+            loop_recipe=loop_recipe_context,
+        )
+        if len(response) < 3:
+            model_thinking = None
+            error_metadata = {
+                "context_provider": "none",
+                "requested_context_provider": requested_context_provider,
+                "attempted_context_provider": "web",
+                "evidence_fallback": True,
+                "evidence_fallback_reason": fallback_reason,
+                "raw_answer_chars": len(raw_response),
+                "removed_inline_citation_ids": removed_inline_citation_ids,
+            }
+            run, guardrail_decision = self._record_loop_step(
+                run,
+                self._loop_step(
+                    LoopPhase.DRAFT,
+                    decision=LoopDecision.ERROR,
+                    name="Draft direct fallback answer",
+                    input_summary=question,
+                    output_summary="empty_direct_answer",
+                    error_message="empty_direct_answer",
+                    metadata=error_metadata,
+                ),
+            )
+            if guardrail_decision:
+                return self._finish_guardrail_query_result(
+                    decision=guardrail_decision,
+                    question=question,
+                    active_state=active_state,
+                    run=run,
+                )
+            safe_run = self._redact_draft_outputs_for_failed_evidence_fallback(run)
+            return self._finish_query_result(
+                answer=(
+                    "The model returned an empty answer after web evidence "
+                    "fallback. Please try again or check your LLM backend."
+                ),
+                question=question,
+                active_state=active_state,
+                run=safe_run,
+                final_decision=LoopDecision.ERROR,
+                error_message="empty_direct_answer",
+                metadata=error_metadata,
+            )
+
+        draft_metadata = {
+            "answer_chars": len(response),
+            "context_provider": "none",
+            "requested_context_provider": requested_context_provider,
+            "attempted_context_provider": "web",
+            "evidence_fallback": True,
+            "evidence_fallback_reason": fallback_reason,
+            "inline_citation_ids": self._direct_citation_marker_ids(response),
+            "model_thinking_available": bool(model_thinking),
+            "removed_inline_citation_ids": removed_inline_citation_ids,
+            "semantic_memory_count": len(semantic_memory_context),
+            "trace_available": True,
+        }
+        if model_thinking:
+            draft_metadata["model_thinking_chars"] = len(model_thinking)
+        run, guardrail_decision = self._record_loop_step(
+            run,
+            self._loop_step(
+                LoopPhase.DRAFT,
+                decision=LoopDecision.CONTINUE,
+                name="Draft direct fallback answer",
+                input_summary=question,
+                output_summary=str(response).strip()[:500],
+                metadata=draft_metadata,
+            ),
+        )
+        if guardrail_decision:
+            return self._finish_guardrail_query_result(
+                decision=guardrail_decision,
+                question=question,
+                active_state=active_state,
+                run=run,
+            )
+
+        run, guardrail_decision, format_check = self._run_format_check_with_loop(
+            run=run,
+            answer=response,
+        )
+        if guardrail_decision:
+            return self._finish_guardrail_query_result(
+                decision=guardrail_decision,
+                question=question,
+                active_state=active_state,
+                run=run,
+            )
+        if format_check.outcome != "format_passed":
+            (
+                run,
+                guardrail_decision,
+                response,
+                format_check,
+            ) = self._sanitize_format_check_failure_if_possible(
+                run=run,
+                answer=response,
+                format_check=format_check,
+            )
+            if guardrail_decision:
+                return self._finish_guardrail_query_result(
+                    decision=guardrail_decision,
+                    question=question,
+                    active_state=active_state,
+                    run=run,
+                )
+        if format_check.outcome != "format_passed":
+            safe_run = self._redact_draft_outputs_for_failed_evidence_fallback(run)
+            return self._finish_format_check_failed_query_result(
+                format_check=format_check,
+                question=question,
+                active_state=active_state,
+                run=safe_run,
+            )
+
+        self_check = AnswerSelfCheck(
+            outcome="not_verified",
+            reasons=[
+                *NO_CONTEXT_SELF_CHECK_REASONS,
+                "smart_web_evidence_fallback",
+            ],
+            retry_attempted=False,
+        )
+        verify_step = self._loop_step(
+            LoopPhase.VERIFY,
+            decision=LoopDecision.NOT_VERIFIED,
+            name="No-context verification boundary",
+            input_summary="fallback answer without prompt evidence",
+            output_summary=self_check.outcome,
+            verification=self._verification_result_for_self_check(self_check),
+            metadata={
+                "reasons": list(self_check.reasons),
+                "citation_count": 0,
+                "retry_attempted": False,
+                "verifier_skipped": True,
+                "attempted_context_provider": "web",
+                "evidence_fallback_reason": fallback_reason,
+            },
+        )
+        run, guardrail_decision = self._record_loop_step(run, verify_step)
+        if guardrail_decision:
+            return self._finish_guardrail_query_result(
+                decision=guardrail_decision,
+                question=question,
+                active_state=active_state,
+                run=run,
+            )
+
+        result = self._finish_query_result(
+            answer=response,
+            question=question,
+            active_state=active_state,
+            run=run,
+            final_decision=LoopDecision.NOT_VERIFIED,
+            retrieved_chunk_count=0,
+            citations=[],
+            self_check=self_check,
+            model_thinking=model_thinking,
+            metadata={
+                "context_provider": "none",
+                "attempted_context_provider": "web",
+                "evidence_fallback": True,
+                "evidence_fallback_reason": fallback_reason,
+                "self_check_outcome": self_check.outcome,
+                "retry_attempted": False,
+                "recipe_id": (
+                    loop_recipe_context["recipe_id"] if loop_recipe_context else None
+                ),
+                "recipe_name": (
+                    loop_recipe_context["name"] if loop_recipe_context else None
+                ),
+            },
+        )
+        self._record_chat_history_entry(
+            session_id=session_id,
+            question=question,
+            result=result,
+            expected_session_revision=session_revision,
+        )
+        return result
+
     def query_with_trace(
         self,
         prompt: str,
@@ -4382,6 +4788,26 @@ class AILoopEngine:
                     )
 
             if self_check and self_check.outcome not in SELF_CHECK_PASS_OUTCOMES:
+                if (
+                    context_provider_type == "web"
+                    and self._smart_web_can_fallback_to_direct(
+                        requested_context_provider
+                    )
+                    and self._smart_web_self_check_can_fallback(self_check)
+                ):
+                    return self._run_smart_web_direct_fallback_safely(
+                        run=run,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        requested_context_provider=requested_context_provider,
+                        conversation_context=conversation_context,
+                        semantic_memory_context=semantic_memory_context,
+                        loop_recipe_context=loop_recipe_context,
+                        fallback_reason="web_evidence_not_verified",
+                        session_id=session_id,
+                        session_revision=session_revision,
+                        source_self_check=self_check,
+                    )
                 response = SELF_CHECK_REFUSAL_ANSWER
                 if self_check.outcome != "needs_refusal":
                     self_check = self._fail_closed_self_check(self_check)
@@ -4461,10 +4887,23 @@ class AILoopEngine:
                         metadata={"error_type": exc.__class__.__name__},
                     )
                 )
+                if self._smart_web_can_fallback_to_direct(requested_context_provider):
+                    return self._run_smart_web_direct_fallback_safely(
+                        run=run,
+                        question=clean_prompt,
+                        active_state=active_state,
+                        requested_context_provider=requested_context_provider,
+                        conversation_context=conversation_context,
+                        semantic_memory_context=semantic_memory_context,
+                        loop_recipe_context=loop_recipe_context,
+                        fallback_reason="web_search_failed",
+                        session_id=session_id,
+                        session_revision=session_revision,
+                    )
                 return self._finish_query_result(
                     answer=(
                         "Web search evidence is unavailable right now. Try again "
-                        "or switch Evidence to Files only or No external evidence."
+                        "or ask without requiring web evidence."
                     ),
                     question=clean_prompt,
                     active_state=active_state,

@@ -305,6 +305,9 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
     if query_result is None:
         return {
             "context_provider": None,
+            "attempted_context_provider": None,
+            "evidence_fallback": False,
+            "evidence_fallback_reason": None,
             "document": None,
             "backend": None,
             "model": None,
@@ -354,6 +357,15 @@ def loop_summary_dict(query_result: Optional[QueryResult]) -> dict:
 
     return {
         "context_provider": run.get("context_provider"),
+        "attempted_context_provider": run.get("metadata", {}).get(
+            "attempted_context_provider"
+        ),
+        "evidence_fallback": bool(
+            run.get("metadata", {}).get("evidence_fallback")
+        ),
+        "evidence_fallback_reason": run.get("metadata", {}).get(
+            "evidence_fallback_reason"
+        ),
         "document": trace.document_name,
         "backend": trace.backend,
         "model": trace.model_label,

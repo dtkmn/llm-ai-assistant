@@ -451,6 +451,9 @@ def test_static_frontend_is_served():
     assert "Model Thinking" in response.text
     assert "active-thread-memory" in response.text
     assert "memory-status" in response.text
+    assert "Ask</button>" in response.text
+    assert "Run Loop" not in response.text
+    assert "query-context-control" not in response.text
     assert "/assets/app.js" in response.text
     assert script.status_code == 200
     assert script.headers["cache-control"] == "no-store"
@@ -752,7 +755,7 @@ assert.ok(
     )
 
 
-def test_static_frontend_sends_smart_context_provider_from_default_selector():
+def test_static_frontend_omits_context_provider_for_automatic_recipe_default():
     run_frontend_node(
         r'''
 import assert from "node:assert/strict";
@@ -821,13 +824,13 @@ globalThis.fetch = async (url, options = {}) => {
 
 await importFreshApp();
 await tick();
-assert.equal(dom["query-context"].value, "smart");
+assert.equal(dom["query-context"].value, "");
 dom["query-input"].value = "What changed?";
 await dom["query-form"].dispatch("submit");
 
 assert.equal(queryBodies.length, 1);
 assert.equal(queryBodies[0].recipe_id, "recipe_general_loop");
-assert.equal(queryBodies[0].context_provider, "smart");
+assert.equal(Object.hasOwn(queryBodies[0], "context_provider"), false);
 '''
     )
 
@@ -842,6 +845,7 @@ const {
   findNode,
   importFreshApp,
   jsonResponse,
+  nodeText,
   tick,
 } = await import(process.env.FRONTEND_HARNESS_URL);
 
@@ -928,9 +932,11 @@ const {
   createDom,
   createThreadPayload,
   deferred,
+  errorResponse,
   findNode,
   importFreshApp,
   jsonResponse,
+  nodeText,
   tick,
 } = await import(process.env.FRONTEND_HARNESS_URL);
 
@@ -944,9 +950,22 @@ const recipes = [{
   is_default: true,
 }];
 
+async function clickThreadByTitle(dom, title) {
+  const button = dom["thread-list"].children.find((node) =>
+    nodeText(node).includes(title),
+  );
+  assert.ok(button, `thread button should exist for ${title}`);
+  await button.dispatch("click");
+  await tick();
+}
+
 const switchDom = createDom();
 const queryBodies = [];
-const serverThreads = [createThreadPayload("thread_initial")];
+const switchQuery = deferred();
+const serverThreads = [
+  createThreadPayload("thread_initial"),
+  createThreadPayload("thread_other"),
+];
 globalThis.fetch = async (url, options = {}) => {
   const method = String(options.method || "GET").toUpperCase();
   if (url === "/api/config") {
@@ -975,6 +994,9 @@ globalThis.fetch = async (url, options = {}) => {
   }
   if (url === "/api/query") {
     queryBodies.push(JSON.parse(options.body));
+    if (queryBodies.length === 2) {
+      await switchQuery.promise;
+    }
     return jsonResponse({ answer: "Loop answer", timeline: { rows: [], final_decision: "not_verified" }, summary: {}, trace: { model_thinking: null } });
   }
   if (url === "/api/chat/clear") {
@@ -989,10 +1011,127 @@ await switchDom["query-form"].dispatch("submit");
 const firstThreadId = queryBodies[0].session_id;
 await switchDom["new-thread"].dispatch("click");
 switchDom["query-input"].value = "Second thread question";
-await switchDom["query-form"].dispatch("submit");
+const pendingSwitchSubmit = switchDom["query-form"].dispatch("submit");
+await tick();
 assert.equal(queryBodies.length, 2);
 assert.notEqual(queryBodies[1].session_id, firstThreadId);
-assert.equal(switchDom["thread-list"].children.length, 2);
+const secondThreadId = queryBodies[1].session_id;
+await clickThreadByTitle(switchDom, "First thread question");
+const secondServerThread = serverThreads.find((thread) => thread.id === secondThreadId);
+secondServerThread.messages = [
+  { role: "user", content: "Second thread question" },
+  { role: "assistant", content: "Loop answer" },
+];
+secondServerThread.message_count = 2;
+await clickThreadByTitle(switchDom, "Second thread question");
+switchQuery.resolve();
+await pendingSwitchSubmit;
+const switchedAnswers = switchDom.messages.children.filter(
+  (node) =>
+    node.className === "message assistant" &&
+    nodeText(node).includes("Loop answer"),
+);
+assert.equal(
+  switchedAnswers.length,
+  1,
+  "server-persisted in-flight answer should not be duplicated after switching",
+);
+assert.equal(switchDom["thread-list"].children.length, 3);
+
+const repeatDom = createDom();
+const repeatQuery = deferred();
+const slowRepeatDetail = { enabled: false, gate: null };
+const repeatThreads = [
+  createThreadPayload("thread_repeat", [
+    { role: "user", content: "Repeat question" },
+    { role: "assistant", content: "Old answer" },
+  ]),
+  createThreadPayload("thread_repeat_other"),
+];
+repeatThreads[0].title = "Repeat thread";
+repeatThreads[1].title = "Other thread";
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: repeatThreads });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    if (id === "thread_repeat" && slowRepeatDetail.enabled) {
+      await slowRepeatDetail.gate.promise;
+    }
+    return jsonResponse(repeatThreads.find((item) => item.id === id) || repeatThreads[0]);
+  }
+  if (url === "/api/query") {
+    await repeatQuery.promise;
+    return jsonResponse({ answer: "New repeat answer", timeline: { rows: [], final_decision: "not_verified" }, summary: {}, trace: { model_thinking: null } });
+  }
+  if (url === "/api/chat/clear") {
+    return jsonResponse({ timeline: { rows: [], final_decision: null }, summary: {}, trace: {} });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await importFreshApp();
+await tick();
+repeatDom["query-input"].value = "Repeat question";
+const pendingRepeatSubmit = repeatDom["query-form"].dispatch("submit");
+await tick();
+await clickThreadByTitle(repeatDom, "Other thread");
+await clickThreadByTitle(repeatDom, "Repeat thread");
+assert.equal(repeatDom["final-decision"].textContent, "running");
+const pendingRepeatUserTurns = repeatDom.messages.children.filter(
+  (node) =>
+    node.className === "message user" &&
+    nodeText(node).includes("Repeat question"),
+);
+assert.equal(
+  pendingRepeatUserTurns.length,
+  2,
+  "same-text pending user turn should survive thread reload",
+);
+slowRepeatDetail.enabled = true;
+slowRepeatDetail.gate = deferred();
+const slowRepeatSwitch = clickThreadByTitle(repeatDom, "Repeat thread");
+await tick();
+await clickThreadByTitle(repeatDom, "Other thread");
+slowRepeatDetail.gate.resolve();
+await slowRepeatSwitch;
+slowRepeatDetail.enabled = false;
+assert.equal(repeatDom["active-thread-title"].textContent, "Other thread");
+assert.equal(
+  repeatDom["final-decision"].textContent,
+  "idle",
+  "late thread-detail response should not repaint another thread's running loop",
+);
+repeatQuery.resolve();
+await pendingRepeatSubmit;
+repeatThreads[0].messages = [
+  { role: "user", content: "Repeat question" },
+  { role: "assistant", content: "Old answer" },
+  { role: "user", content: "Repeat question" },
+  { role: "assistant", content: "New repeat answer" },
+];
+repeatThreads[0].message_count = 4;
+await clickThreadByTitle(repeatDom, "Repeat thread");
+const repeatUserTurns = repeatDom.messages.children.filter(
+  (node) =>
+    node.className === "message user" &&
+    nodeText(node).includes("Repeat question"),
+);
+assert.equal(repeatUserTurns.length, 2, "same-text follow-up user turn should survive thread reload");
+assert.ok(nodeText(repeatDom.messages).includes("New repeat answer"));
 
 const staleDom = createDom();
 const staleQuery = deferred();
@@ -1031,11 +1170,69 @@ await tick();
 staleDom["query-input"].value = "Question that will be cleared";
 const pendingSubmit = staleDom["query-form"].dispatch("submit");
 await tick();
+const pendingAssistant = findNode(
+  staleDom.messages,
+  (node) => node.className === "message assistant pending",
+);
+assert.ok(pendingAssistant, "pending assistant message should render while query runs");
+assert.ok(
+  nodeText(pendingAssistant).includes("Thinking"),
+  "pending assistant message should explain that the model is working",
+);
+assert.equal(staleDom["query-button"].disabled, true);
+assert.equal(staleDom["query-input"].disabled, true);
+assert.equal(staleDom["query-context"].disabled, true);
+assert.equal(staleDom["final-decision"].textContent, "running");
 await staleDom["clear-chat"].dispatch("click");
+assert.equal(staleDom["query-button"].disabled, false);
+assert.equal(staleDom["query-input"].disabled, false);
+assert.equal(staleDom["query-context"].disabled, false);
+assert.equal(staleDom["final-decision"].textContent, "idle");
 staleQuery.resolve();
 await pendingSubmit;
 const staleAssistant = findNode(staleDom.messages, (node) => node.className === "message assistant");
 assert.equal(staleAssistant, null);
+assert.equal(staleDom["query-button"].disabled, false);
+assert.equal(staleDom["query-input"].disabled, false);
+assert.equal(staleDom["query-context"].disabled, false);
+
+const errorDom = createDom();
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: [createThreadPayload("thread_error")] });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    return jsonResponse(createThreadPayload("thread_error"));
+  }
+  if (url === "/api/query") {
+    return errorResponse(503, { detail: "backend unavailable" });
+  }
+  if (url === "/api/chat/clear") {
+    return jsonResponse({ timeline: { rows: [], final_decision: null }, summary: {}, trace: {} });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await importFreshApp();
+await tick();
+errorDom["query-input"].value = "Question that errors";
+await errorDom["query-form"].dispatch("submit");
+assert.equal(errorDom["final-decision"].textContent, "error");
+assert.ok(nodeText(errorDom.messages).includes("backend unavailable"));
+assert.ok(errorDom["trace-json"].textContent.includes("query_failed"));
+assert.equal(errorDom["trace-json"].textContent.includes("backend unavailable"), false);
 '''
     )
 

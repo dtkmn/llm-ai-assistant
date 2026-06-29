@@ -195,8 +195,8 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 
 ## Usage
 1. Open your browser and go to `http://localhost:7860`
-2. Start a new thread or use the default thread, then ask directly to run the
-   loop without external context. Recent same-thread messages and retrieved
+2. Start a new thread or use the default thread, then ask normally. Recent
+   same-thread messages and retrieved
    semantic thread memories are supplied to the model as bounded conversation
    context, and threads/messages are restored after app restart from the local
    SQLite store.
@@ -204,11 +204,13 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
    The default recipe is selected automatically.
 4. Switch threads from the sidebar when you want separate local conversations,
    memory counts, durable run history, and loop traces.
-5. Leave Evidence on Smart Evidence for the normal assistant flow. Smart
-   Evidence can use DuckDuckGo snippets for lookup/current questions, indexed
-   files when a file is active and relevant, or direct model knowledge for
-   private/local tasks. Choose No external evidence when you explicitly want to
-   avoid retrieval.
+5. Ask normally. The default Smart Evidence loop automatically decides whether
+   to use DuckDuckGo snippets for lookup/current questions, indexed files when
+   a file is active and relevant, or direct model knowledge for private/local
+   tasks. If automatically selected web evidence fails or cannot verify an
+   answer, Smart Evidence falls back to direct model knowledge and marks the
+   result `not_verified`. Explicit `context_provider` overrides remain
+   available through the API and recipes for tests or power-user workflows.
 6. Optionally upload a file (PDF, DOCX, TXT, or MD; max 25 MB) when you want
    local file-grounded retrieval, citations, and verifier-backed support checks.
 7. Click "Index File" to make the uploaded file available to the loop.
@@ -233,7 +235,9 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   `context_provider=auto` is accepted as an alias. Smart Evidence uses web
   snippets for lookup/current questions, uses active indexed files for file-
   relevant questions, and stays in no-external-evidence mode for private/local
-  tasks such as rewriting, coding, and reasoning.
+  tasks such as rewriting, coding, and reasoning. Automatic web attempts may
+  degrade to a direct `not_verified` answer when snippets or verifier checks
+  are insufficient; explicit `context_provider=web` remains evidence-strict.
 - **Current evidence loop shape:** select evidence -> retrieve -> draft answer -> run format checks -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
 - **Context provider boundary:** `DocumentContextProvider` is the legacy class
   name for local indexed-file retrieval; per-query web search uses the same

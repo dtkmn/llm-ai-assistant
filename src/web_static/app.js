@@ -5,6 +5,7 @@ const DEFAULT_THREAD_TITLE = "New thread";
 const MAX_THREADS = 30;
 const MAX_THREAD_MESSAGES = 100;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$/;
+const QUERY_PROGRESS_INTERVAL_MS = 1000;
 
 const state = {
   threads: [],
@@ -13,6 +14,7 @@ const state = {
   activeRecipeId: null,
   recipeDraft: null,
   latest: null,
+  runningQuery: null,
 };
 
 const elements = {
@@ -72,6 +74,17 @@ function setBusy(button, busy, label) {
   }
 }
 
+function setQueryControlsBusy(busy) {
+  elements.queryButton.disabled = busy;
+  elements.queryButton.textContent = busy ? "Thinking..." : "Ask";
+  elements.queryInput.disabled = busy;
+  if (elements.queryContext) {
+    elements.queryContext.disabled = busy;
+  }
+  elements.queryForm.dataset.running = String(Boolean(busy));
+  elements.messages.dataset.running = String(Boolean(busy));
+}
+
 async function requestJson(url, options = {}) {
   const response = await fetch(url, options);
   const contentType = response.headers.get("content-type") || "";
@@ -112,6 +125,243 @@ function nonNegativeInteger(value) {
 
 function plural(count, singular, pluralForm = `${singular}s`) {
   return count === 1 ? singular : pluralForm;
+}
+
+function elapsedSeconds(startedAt) {
+  const started = Number(startedAt);
+  if (!Number.isFinite(started) || started <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.floor((Date.now() - started) / 1000));
+}
+
+function activeRecipeName() {
+  const recipe = state.recipes.find(
+    (item) => item.recipe_id === state.activeRecipeId,
+  );
+  return recipe?.name || "General assistant loop";
+}
+
+function selectedEvidenceLabel() {
+  const value = String(elements.queryContext?.value || "smart");
+  const option = Array.from(elements.queryContext?.children || []).find(
+    (item) => item.value === value,
+  );
+  if (option?.textContent) {
+    return option.textContent;
+  }
+  return value && value !== "smart" ? value : "Automatic";
+}
+
+function pendingAssistantMessage({
+  contextLabel,
+  recipeName,
+  queryId,
+  userContent,
+  baseMessageCount,
+}) {
+  const startedAt = Date.now();
+  return {
+    role: "assistant",
+    content: "",
+    pending: true,
+    pending_id: `pending_${startedAt}_${Math.random().toString(36).slice(2, 8)}`,
+    local_query_id: queryId,
+    user_content: userContent,
+    base_message_count: nonNegativeInteger(baseMessageCount),
+    started_at: startedAt,
+    context_label: contextLabel,
+    recipe_name: recipeName,
+  };
+}
+
+function pendingMessageContent(message) {
+  const seconds = elapsedSeconds(message.started_at);
+  return [
+    "**Thinking...**",
+    "",
+    `${seconds}s elapsed. Choosing context, drafting an answer, and checking the result.`,
+    `Evidence: ${message.context_label || "Automatic"}.`,
+  ].join("\n");
+}
+
+function runningLoopPayload(message) {
+  const seconds = elapsedSeconds(message.started_at);
+  return {
+    timeline: {
+      rows: [
+        {
+          index: 1,
+          phase: "Input",
+          phase_key: "input",
+          step: "Apply loop recipe",
+          decision: "continue",
+          signals: message.recipe_name || "General assistant loop",
+        },
+        {
+          index: 2,
+          phase: "Context",
+          phase_key: "context_select",
+          step: "Choose context",
+          decision: "continue",
+          signals: message.context_label || "Automatic",
+        },
+        {
+          index: 3,
+          phase: "Draft",
+          phase_key: "draft",
+          step: "Waiting for model",
+          decision: "running",
+          signals: `${seconds}s elapsed; local models can take longer with web evidence or large context`,
+        },
+        {
+          index: 4,
+          phase: "Check",
+          phase_key: "verify",
+          step: "Format and verify answer",
+          decision: "pending",
+          signals: "will update when the loop returns",
+        },
+      ],
+      final_decision: "running",
+      last_error: null,
+    },
+    summary: {
+      status: "running",
+      context_provider: message.context_label || "Automatic",
+      elapsed_seconds: seconds,
+    },
+    trace: {
+      model_thinking: {
+        available: false,
+        redacted: false,
+        label: "Model Thinking",
+        note: "Model thinking appears only after the model response is returned.",
+      },
+    },
+  };
+}
+
+function queryErrorLoopPayload(message) {
+  const visibleMessage = safeText(message, "request failed", 240);
+  return {
+    timeline: {
+      rows: [
+        {
+          index: 1,
+          phase: "Error",
+          phase_key: "error",
+          step: "Query failed",
+          decision: "error",
+          signals: visibleMessage,
+        },
+      ],
+      final_decision: "error",
+      last_error: visibleMessage,
+    },
+    summary: {
+      status: "error",
+      last_error: visibleMessage,
+    },
+    trace: {
+      error: "query_failed",
+    },
+  };
+}
+
+function removePendingMessage(thread, pendingId) {
+  if (!thread || !pendingId) {
+    return false;
+  }
+  const originalLength = thread.messages.length;
+  thread.messages = thread.messages.filter(
+    (message) => message.pending_id !== pendingId,
+  );
+  return thread.messages.length !== originalLength;
+}
+
+function startQueryProgress(threadId, pendingId) {
+  stopQueryProgress();
+  state.runningQuery = {
+    threadId,
+    pendingId,
+    timerId: globalThis.setInterval(() => {
+      const thread = threadById(threadId);
+      const pending = thread?.messages.find(
+        (message) => message.pending_id === pendingId,
+      );
+      if (!pending) {
+        stopQueryProgress();
+        return;
+      }
+      if (state.activeThreadId === threadId) {
+        renderMessages();
+        renderLoopPayload(runningLoopPayload(pending));
+      }
+    }, QUERY_PROGRESS_INTERVAL_MS),
+  };
+}
+
+function stopQueryProgress(pendingId = null) {
+  if (!state.runningQuery) {
+    return;
+  }
+  if (pendingId && state.runningQuery.pendingId !== pendingId) {
+    return;
+  }
+  globalThis.clearInterval(state.runningQuery.timerId);
+  state.runningQuery = null;
+}
+
+function preserveLocalInFlightThreadState(serverThread, existingThread) {
+  if (!existingThread || state.runningQuery?.threadId !== serverThread.id) {
+    return serverThread;
+  }
+  const pending = existingThread.messages.find(
+    (message) => message.pending_id === state.runningQuery.pendingId,
+  );
+  if (!pending) {
+    return serverThread;
+  }
+  const baseMessageCount = nonNegativeInteger(pending.base_message_count);
+  const serverMessageCount = nonNegativeInteger(serverThread.messageCount);
+  const serverHasPendingUser = serverMessageCount > baseMessageCount;
+  const serverHasPendingAnswer = serverMessageCount >= baseMessageCount + 2;
+  const localUserMessages = existingThread.messages.filter(
+    (message) =>
+      message.role === "user" &&
+      message.local_query_id &&
+      message.local_query_id === pending.local_query_id,
+  );
+  const serverMessages = serverThread.messages.filter(
+    (message) => !message.pending_id,
+  );
+  const mergedMessages = [...serverMessages];
+  if (!serverHasPendingUser) {
+    for (const localMessage of localUserMessages) {
+      mergedMessages.push(localMessage);
+    }
+  }
+  if (!serverHasPendingAnswer) {
+    mergedMessages.push(pending);
+  }
+  return {
+    ...serverThread,
+    messages: mergedMessages.slice(-MAX_THREAD_MESSAGES),
+    revision: normalizedRevision(existingThread.revision),
+    messageCount: Math.max(existingThread.messageCount, serverThread.messageCount),
+    updatedAt: existingThread.updatedAt || serverThread.updatedAt,
+  };
+}
+
+function runningPayloadForThread(threadId) {
+  if (state.runningQuery?.threadId !== threadId) {
+    return null;
+  }
+  const pending = threadById(threadId)?.messages.find(
+    (message) => message.pending_id === state.runningQuery.pendingId,
+  );
+  return pending ? runningLoopPayload(pending) : null;
 }
 
 function sanitizeMessage(message) {
@@ -316,11 +566,13 @@ function upsertThread(thread, { moveToTop = false } = {}) {
 }
 
 async function loadThreadDetail(threadId) {
+  const existingThread = threadById(threadId);
   const detail = sanitizeThread(
     await requestJson(`/api/threads/${encodeURIComponent(threadId)}`),
   );
-  upsertThread(detail);
-  return detail;
+  const merged = preserveLocalInFlightThreadState(detail, existingThread);
+  upsertThread(merged);
+  return merged;
 }
 
 async function loadThreads() {
@@ -484,11 +736,16 @@ async function switchThread(threadId) {
   state.activeThreadId = threadId;
   persistActiveThreadId();
   await loadThreadDetail(threadId);
+  if (state.activeThreadId !== threadId) {
+    return;
+  }
   renderThreads();
   renderActiveThreadTitle();
   renderMessages();
   renderRuns(activeThread().loopRuns);
-  renderLoopPayload(activeThread().latest || emptyLoopPayload());
+  renderLoopPayload(
+    runningPayloadForThread(threadId) || activeThread().latest || emptyLoopPayload(),
+  );
 }
 
 async function startNewThread() {
@@ -551,11 +808,13 @@ function renderMessages() {
 
   for (const message of messages) {
     const bubble = document.createElement("article");
-    bubble.className = `message ${message.role}`;
+    bubble.className = `message ${message.role}${message.pending ? " pending" : ""}`;
     const role = document.createElement("span");
     role.className = "message-role";
     role.textContent = message.role === "user" ? "You" : "Loop";
-    const content = renderMessageContent(message.content);
+    const content = renderMessageContent(
+      message.pending ? pendingMessageContent(message) : message.content,
+    );
     bubble.append(role, content);
     const thinking = renderMessageThinking(message.thinking);
     if (thinking) {
@@ -1256,21 +1515,37 @@ async function runQuery(event) {
 
   const requestThread = activeThread();
   const requestThreadId = requestThread.id;
+  const baseMessageCount = nonNegativeInteger(requestThread.messageCount);
+  const queryId = `query_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const requestRevision = bumpThreadRevision(requestThread);
   const isFirstUserMessage = !requestThread.messages.some(
     (item) => item.role === "user",
   );
-  requestThread.messages.push({ role: "user", content: message });
+  requestThread.messages.push({
+    role: "user",
+    content: message,
+    local_query_id: queryId,
+  });
   if (isFirstUserMessage) {
     requestThread.title = titleFromMessage(message);
   }
+  const pendingMessage = pendingAssistantMessage({
+    contextLabel: selectedEvidenceLabel(),
+    recipeName: activeRecipeName(),
+    queryId,
+    userContent: message,
+    baseMessageCount,
+  });
+  requestThread.messages.push(pendingMessage);
   touchThread(requestThread);
   renderThreads();
   renderActiveThreadTitle();
   renderMessages();
+  renderLoopPayload(runningLoopPayload(pendingMessage));
   elements.queryInput.value = "";
 
-  setBusy(elements.queryButton, true, "Run Loop");
+  setQueryControlsBusy(true);
+  startQueryProgress(requestThreadId, pendingMessage.pending_id);
   try {
     const queryPayload = {
       message,
@@ -1290,11 +1565,17 @@ async function runQuery(event) {
     if (!targetThread || normalizedRevision(targetThread.revision) !== requestRevision) {
       return;
     }
-    targetThread.messages.push({
-      role: "assistant",
-      content: result.answer,
-      thinking: result.trace?.model_thinking || null,
-    });
+    const removedPending = removePendingMessage(
+      targetThread,
+      pendingMessage.pending_id,
+    );
+    if (removedPending) {
+      targetThread.messages.push({
+        role: "assistant",
+        content: result.answer,
+        thinking: result.trace?.model_thinking || null,
+      });
+    }
     if (result.run?.run_id) {
       const run = sanitizeLoopRun(result.run);
       const priorRunCount = Number.isSafeInteger(targetThread.loopRunCount)
@@ -1329,14 +1610,21 @@ async function runQuery(event) {
     if (!targetThread || normalizedRevision(targetThread.revision) !== requestRevision) {
       return;
     }
+    removePendingMessage(targetThread, pendingMessage.pending_id);
     targetThread.messages.push({ role: "assistant", content: error.message });
     touchThread(targetThread);
     renderThreads();
     if (state.activeThreadId === requestThreadId) {
       renderMessages();
+      renderLoopPayload(queryErrorLoopPayload(error.message));
     }
   } finally {
-    setBusy(elements.queryButton, false, "Run Loop");
+    const ownsRunningState =
+      state.runningQuery?.pendingId === pendingMessage.pending_id;
+    stopQueryProgress(pendingMessage.pending_id);
+    if (ownsRunningState || !state.runningQuery) {
+      setQueryControlsBusy(false);
+    }
   }
 }
 
@@ -1350,9 +1638,15 @@ async function clearChat() {
   thread.memoryCount = 0;
   thread.latest = null;
   touchThread(thread);
+  if (state.runningQuery?.threadId === threadId) {
+    stopQueryProgress(state.runningQuery.pendingId);
+    setQueryControlsBusy(false);
+  }
   renderThreads();
   renderActiveThreadTitle();
   renderMessages();
+  renderRuns(thread.loopRuns);
+  renderLoopPayload(emptyLoopPayload());
   try {
     const payload = await requestJson("/api/chat/clear", {
       method: "POST",
