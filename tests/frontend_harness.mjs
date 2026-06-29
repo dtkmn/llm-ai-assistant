@@ -192,6 +192,7 @@ export function createDom() {
     "refresh-status",
     "runtime-grid",
     "query-form",
+    "query-context",
     "query-input",
     "query-button",
     "clear-chat",
@@ -209,6 +210,7 @@ export function createDom() {
     "trace-json",
   ];
   const byId = Object.fromEntries(ids.map((id) => [id, new Element("div")]));
+  byId["query-context"].value = "";
   byId["query-input"].value = "";
   const summary = new Element("summary");
   summary.append(new Element("span"));

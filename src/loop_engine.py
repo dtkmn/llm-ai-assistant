@@ -15,18 +15,20 @@ LOOP_RECIPE_SCHEMA_VERSION = "loop-recipe/v1"
 DEFAULT_LOOP_RECIPE_ID = "recipe_general_loop"
 DEFAULT_LOOP_RECIPE_NAME = "General assistant loop"
 DEFAULT_LOOP_RECIPE_GOAL = (
-    "Answer the current user request clearly, using indexed context when it is "
-    "available and direct model reasoning when it is not."
+    "Answer the current user request clearly, using smart evidence selection "
+    "to choose web evidence, uploaded files, or direct model knowledge as "
+    "appropriate."
 )
 DEFAULT_LOOP_RECIPE_INSTRUCTIONS = (
     "Prefer useful, specific answers. Use same-thread memory only to resolve "
-    "references. Do not invent citations. Surface uncertainty when evidence is "
-    "missing."
+    "references. Prefer web evidence for current or general lookup questions, "
+    "use uploaded files only when the question is about those files, do not "
+    "invent citations, and surface uncertainty when evidence is missing."
 )
 DEFAULT_LOOP_RECIPE_SUCCESS_CRITERIA = (
     "The answer addresses the current request.",
-    "Context-grounded claims use retrieved evidence and citations.",
-    "No-context answers are marked not_verified instead of supported.",
+    "Evidence-grounded claims use retrieved web or file evidence and citations.",
+    "Model-knowledge answers are marked not_verified instead of supported.",
 )
 DEFAULT_LOOP_RECIPE_STOP_CONDITION = (
     "Stop when the answer passes mechanical checks, is refused, or reaches the "
@@ -141,7 +143,7 @@ class LoopRecipe:
     instructions: str = ""
     success_criteria: Tuple[str, ...] = ()
     stop_condition: str = DEFAULT_LOOP_RECIPE_STOP_CONDITION
-    context_provider: str = "auto"
+    context_provider: str = "smart"
     model_profile: str = "quality"
     verifier: str = "default"
     recipe_id: str = field(default_factory=lambda: _new_id("recipe"))
@@ -187,7 +189,7 @@ class LoopRecipe:
         object.__setattr__(
             self,
             "context_provider",
-            _clean_text(self.context_provider, max_chars=64) or "auto",
+            _clean_text(self.context_provider, max_chars=64) or "smart",
         )
         object.__setattr__(
             self,
@@ -269,7 +271,7 @@ class LoopRecipe:
             stop_condition=str(
                 data.get("stop_condition") or DEFAULT_LOOP_RECIPE_STOP_CONDITION
             ),
-            context_provider=str(data.get("context_provider") or "auto"),
+            context_provider=str(data.get("context_provider") or "smart"),
             model_profile=str(data.get("model_profile") or "quality"),
             verifier=str(data.get("verifier") or "default"),
             created_at=_datetime_from_json(data.get("created_at")) or utc_now(),
@@ -288,7 +290,7 @@ def default_loop_recipe(*, created_at: Optional[datetime] = None) -> LoopRecipe:
         instructions=DEFAULT_LOOP_RECIPE_INSTRUCTIONS,
         success_criteria=DEFAULT_LOOP_RECIPE_SUCCESS_CRITERIA,
         stop_condition=DEFAULT_LOOP_RECIPE_STOP_CONDITION,
-        context_provider="auto",
+        context_provider="smart",
         model_profile="quality",
         verifier="default",
         created_at=timestamp,

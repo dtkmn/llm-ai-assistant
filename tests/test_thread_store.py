@@ -5,6 +5,7 @@ from src.loop_engine import (
     LoopDecision,
     LoopPhase,
     LoopReport,
+    LoopRecipe,
     LoopRun,
     LoopStep,
 )
@@ -441,6 +442,30 @@ def test_thread_store_persists_loop_recipes(tmp_path):
         "Risks are listed.",
         "Next actions are clear.",
     )
+
+
+def test_thread_store_refreshes_builtin_default_recipe():
+    store = ThreadStore.in_memory()
+    stale_default = LoopRecipe(
+        recipe_id=DEFAULT_LOOP_RECIPE_ID,
+        name="General assistant loop",
+        description="Default local-first loop behavior.",
+        goal="Answer with indexed context.",
+        instructions="Use indexed context when available.",
+        success_criteria=("Uses indexed context.",),
+        context_provider="auto",
+        metadata={"built_in": True},
+    )
+    with store._lock:
+        store._insert_recipe(stale_default)
+        store._conn.commit()
+
+    refreshed = store.ensure_default_recipe()
+
+    assert refreshed.recipe_id == DEFAULT_LOOP_RECIPE_ID
+    assert refreshed.context_provider == "smart"
+    assert "web evidence" in refreshed.instructions
+    assert "indexed context" not in refreshed.goal.lower()
 
 
 def test_thread_store_updates_and_deletes_custom_recipes_only():

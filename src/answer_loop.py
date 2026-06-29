@@ -12,13 +12,17 @@ except ImportError:
 
 
 SELF_CHECK_REFUSAL_ANSWER = (
-    "I could not find enough relevant information in the document to answer that."
+    "I could not find enough relevant information in the provided evidence to answer that."
 )
 FORMAT_CHECK_FAILURE_ANSWER = (
     "The model answer failed formatting checks after retry. Please try again."
 )
 SELF_CHECK_PASS_OUTCOMES = {"supported", "not_verified"}
 VERIFIER_OUTCOMES = {"supported", "unsupported", "insufficient"}
+WEB_VERIFIER_RETRY_REASONS = {
+    "llm_verifier_unsupported",
+    "llm_verifier_insufficient",
+}
 
 ANSWER_SUPPORT_STOPWORDS = {
     "a",
@@ -159,6 +163,65 @@ def format_check_answer(
         reasons=["clean_web_markdown"],
         retry_attempted=retry_attempted,
     )
+
+
+def sanitize_internal_verification_labels(answer: str) -> str:
+    text = str(answer or "").strip()
+    protected_blocks: List[str] = []
+
+    def protect(match: re.Match[str]) -> str:
+        protected_blocks.append(match.group(0))
+        return f"@@AI_LOOP_PROTECTED_{len(protected_blocks) - 1}@@"
+
+    text = re.sub(r"```.*?```", protect, text, flags=re.DOTALL)
+    text = re.sub(r"`[^`\n]+`", protect, text)
+    text = re.sub(
+        r"^\s*(?:[-*]\s*)?(?:\*\*)?\s*Answer\s*:\s*(?:\*\*)?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
+    text = re.sub(
+        r"\s*(?:\*\*)?\s*Note\s*:\s*(?:\*\*)?\s*"
+        r"(?:This|The)\s+(?:answer|response)\s+[^.?!]*\b"
+        r"(?:not_verified|mechanical_checks_passed|needs_retry|needs_refusal|"
+        r"llm_verifier_[a-z_]+|self_check_[a-z_]+)\b[^.?!]*(?:[.?!]|$)",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\s*(?:This|The)\s+(?:answer|response)\s+[^.?!]*\b"
+        r"(?:not_verified|mechanical_checks_passed|needs_retry|needs_refusal|"
+        r"llm_verifier_[a-z_]+|self_check_[a-z_]+)\b[^.?!]*(?:[.?!]|$)",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    replacements = {
+        "not_verified": "not verified",
+        "mechanical_checks_passed": "mechanical checks passed",
+        "needs_retry": "needs retry",
+        "needs_refusal": "needs refusal",
+    }
+
+    def replace_label(match: re.Match[str]) -> str:
+        label = match.group(0)
+        return replacements.get(label.lower(), label.replace("_", " "))
+
+    text = re.sub(
+        r"\b(?:not_verified|mechanical_checks_passed|needs_retry|needs_refusal|"
+        r"llm_verifier_[a-z_]+|self_check_[a-z_]+)\b",
+        replace_label,
+        text,
+        flags=re.IGNORECASE,
+    )
+    for index, value in enumerate(protected_blocks):
+        text = text.replace(f"@@AI_LOOP_PROTECTED_{index}@@", value)
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
 def loop_decision_for_format_check(
@@ -615,7 +678,7 @@ def verifier_prompt(
         for citation in cited_citations
     )
     return (
-        "You are a strict citation verifier for a document QA system.\n"
+        "You are a strict citation verifier for an evidence-grounded AI loop.\n"
         "Use only the cited excerpts. Do not use outside knowledge.\n"
         "Decide whether every factual claim in the answer is directly supported "
         "by the cited excerpts.\n"
@@ -717,6 +780,26 @@ def self_check_retry_instruction(self_check: AnswerSelfCheck) -> str:
         f"({reasons}). Answer again using only the context above. Include at least "
         "one bracketed citation like [1] for supported claims. If the context does "
         "not contain the answer, say that clearly."
+    )
+
+
+def should_retry_web_verifier_failure(self_check: AnswerSelfCheck) -> bool:
+    return (
+        self_check.outcome == "needs_refusal"
+        and not self_check.retry_attempted
+        and bool(WEB_VERIFIER_RETRY_REASONS & set(self_check.reasons))
+    )
+
+
+def web_evidence_retry_instruction(self_check: AnswerSelfCheck) -> str:
+    reasons = ", ".join(self_check.reasons)
+    return (
+        "Web evidence retry instruction: the previous answer could not be verified "
+        f"against the snippets ({reasons}). Answer again using only facts stated "
+        "plainly in the web search snippets above. Keep the answer short, cite every "
+        "factual claim with bracketed source numbers like [1], and omit any claim "
+        "that is not directly supported by the snippets. If the snippets still do "
+        "not contain enough evidence, say that clearly."
     )
 
 

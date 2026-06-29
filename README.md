@@ -2,8 +2,10 @@
 AI Loop Engine is a local-first engine for inspecting and hardening AI answer
 loops: context selection, retrieval, drafting, format checks, citation checks,
 claim verification, retries, refusals, middleware guardrails, evals, and replay. The
-current built-in context source is document upload, but the product focus is the
-loop: making agent behavior visible, testable, and harder to fake.
+current built-in evidence sources are Smart Evidence routing, DuckDuckGo web
+snippets, optional uploaded files, thread memory, and direct model knowledge.
+The product focus is the loop: making agent behavior visible, testable, and
+harder to fake.
 
 ## Features
 - **Loop Engineering Core:** Treats retrieval, drafting, format checks, self-checking, retry, refusal, middleware guardrails, and evals as the product surface rather than hidden plumbing
@@ -15,6 +17,9 @@ loop: making agent behavior visible, testable, and harder to fake.
 - **Loop Recipes / Skills:** Provides saved loop recipes for goal, instructions,
   success criteria, stop condition, context provider, model profile, and verifier
   metadata
+- **Smart Evidence Routing:** Uses web evidence for lookup/current questions,
+  indexed files when a file is active and relevant, or direct model knowledge
+  for private/local tasks such as rewriting, coding, and reasoning
 - **Local-first LLM Backend:** Recommended local path is Ollama; cloud or
   gateway deployment uses a generic OpenAI-compatible chat-completions backend
 - **Vector Search:** Uses FAISS for efficient similarity search with
@@ -190,8 +195,8 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 
 ## Usage
 1. Open your browser and go to `http://localhost:7860`
-2. Start a new thread or use the default thread, then ask directly to run the
-   loop without external context. Recent same-thread messages and retrieved
+2. Start a new thread or use the default thread, then ask normally. Recent
+   same-thread messages and retrieved
    semantic thread memories are supplied to the model as bounded conversation
    context, and threads/messages are restored after app restart from the local
    SQLite store.
@@ -199,15 +204,22 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
    The default recipe is selected automatically.
 4. Switch threads from the sidebar when you want separate local conversations,
    memory counts, durable run history, and loop traces.
-5. Optionally upload document context (PDF, DOCX, TXT, or MD; max 25 MB) when
-   you want grounded retrieval, citations, and verifier-backed support checks
-6. Click "Index Context" to make the uploaded document available to the loop
-7. Inspect the Loop Timeline to see recipe selection, context selection, retrieve, draft, format,
+5. Ask normally. The default Smart Evidence loop automatically decides whether
+   to use DuckDuckGo snippets for lookup/current questions, indexed files when
+   a file is active and relevant, or direct model knowledge for private/local
+   tasks. If automatically selected web evidence fails or cannot verify an
+   answer, Smart Evidence falls back to direct model knowledge and marks the
+   result `not_verified`. Explicit `context_provider` overrides remain
+   available through the API and recipes for tests or power-user workflows.
+6. Optionally upload a file (PDF, DOCX, TXT, or MD; max 25 MB) when you want
+   local file-grounded retrieval, citations, and verifier-backed support checks.
+7. Click "Index File" to make the uploaded file available to the loop.
+8. Inspect the Loop Timeline to see recipe selection, context selection, retrieve, draft, format,
    check, verify, retry, refusal, and final-decision steps in order
-8. Inspect Durable Runs to see persisted run evidence for the active thread
-9. Inspect the loop summary for memory usage, provider, recipe, draft count,
+9. Inspect Durable Runs to see persisted run evidence for the active thread
+10. Inspect the loop summary for memory usage, provider, recipe, draft count,
    checks, verifier, retry/refusal state, final decision, and last error
-10. Open the answer trace when you need the detailed redacted `LoopReport`
+11. Open the answer trace when you need the detailed redacted `LoopReport`
 
 ## Technical Details
 
@@ -215,13 +227,22 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 - **Context mode:** Direct no-context chat is allowed, but it is reported as
   `not_verified` with no citations. Direct answers should match the depth the
   user asks for, but model knowledge and thread memory are not treated as
-  verified evidence. Document context is optional and upgrades the loop into
-  grounded retrieval plus citation/verifier checks.
-- **Current context provider:** Document context
-- **Current document loop shape:** validate/decode -> split -> embed/index -> retrieve -> draft answer -> run format checks -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
-- **Context provider boundary:** `DocumentContextProvider` wraps the current
-  document vector store and retrieval chain so later providers can plug into the
-  loop without changing the product identity again
+  verified evidence. Smart Evidence, explicit web search, and indexed files are
+  context providers that can upgrade the loop into grounded retrieval plus
+  citation/verifier checks.
+- **Current context providers:** Smart Evidence, web search, indexed files, and
+  no external evidence. `context_provider=smart` is the default; legacy
+  `context_provider=auto` is accepted as an alias. Smart Evidence uses web
+  snippets for lookup/current questions, uses active indexed files for file-
+  relevant questions, and stays in no-external-evidence mode for private/local
+  tasks such as rewriting, coding, and reasoning. Automatic web attempts may
+  degrade to a direct `not_verified` answer when snippets or verifier checks
+  are insufficient; explicit `context_provider=web` remains evidence-strict.
+- **Current evidence loop shape:** select evidence -> retrieve -> draft answer -> run format checks -> run mechanical checks -> verify cited claims -> retry once or fail closed -> return trace/status
+- **Context provider boundary:** `DocumentContextProvider` is the legacy class
+  name for local indexed-file retrieval; per-query web search uses the same
+  retrieve/draft/check/verify loop
+  without becoming durable uploaded context.
 - **Typed loop primitives:** `src/loop_engine.py` defines provider-neutral `LoopRecipe`, `LoopRun`, `LoopStep`, `LoopDecision`, `LoopReport`, `LoopSession`, `LoopPolicy`, `GuardrailDecision`, `LoopMiddleware`, `VerificationResult`, and `HumanReviewRequest`
 - **Runtime reports:** `AILoopEngine.query_with_trace()` returns a `QueryResult` with both the legacy answer trace and a first-class `LoopReport`
 - **Thread state:** browser threads are backed by a local SQLite store for
@@ -281,6 +302,11 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
 - **Retrieval:** MMR retrieval with source/page grounding
   - **Quality:** `k=6`, `fetch_k=24`
   - **Fast:** `k=3`, `fetch_k=10`
+- **Web search:** Smart Evidence lookup/current queries and explicit
+  `context_provider=web` queries use fixed DuckDuckGo Instant Answer and result
+  snippet endpoints for snippets only. The app does not fetch arbitrary result
+  pages. Configure bounded provider behavior with `WEB_SEARCH_TIMEOUT` and
+  `WEB_SEARCH_MAX_RESULTS`.
 - **Safety limits:** Max upload size 25 MB, chunk cap 2,000 chunks per document
 - **Native runtime defaults:** unless you override them, app entrypoints
   bootstrap `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
@@ -495,7 +521,7 @@ ollama stop qwen3:8b
   validation expectations, backend honesty rules, encoding policy, and release
   guardrails.
 - `.agents/skills/document-qa/SKILL.md` defines the focused loop-engineering
-  skill for changes to loop contracts, document context, retrieval, model
+  skill for changes to loop contracts, evidence context, retrieval, model
   routing, UI status, evals, and CI publishing.
 - Use the documented loop for non-trivial changes: explore, plan, act, observe,
   verify, review, and ship.

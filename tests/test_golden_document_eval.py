@@ -111,7 +111,10 @@ def test_golden_document_supported_answer_is_cited_and_verified(tmp_path):
     qa, document = build_golden_qa(tmp_path)
     status = qa.status()
 
-    result = qa.query_with_trace("When does Project Phoenix launch?")
+    result = qa.query_with_trace(
+        "When does Project Phoenix launch?",
+        context_provider="document",
+    )
 
     assert status.ready_for_queries is True
     assert status.active_backend == "ollama"
@@ -165,7 +168,10 @@ def test_golden_document_supported_answer_is_cited_and_verified(tmp_path):
 def test_golden_document_unsupported_answer_fails_closed(tmp_path):
     qa, _document = build_golden_qa(tmp_path, scenario="unsupported_answer")
 
-    result = qa.query_with_trace("Where is the Project Phoenix launch venue?")
+    result = qa.query_with_trace(
+        "Where is the Project Phoenix launch venue?",
+        context_provider="document",
+    )
 
     assert result.answer == SELF_CHECK_REFUSAL_ANSWER
     assert result.trace.self_check.outcome == "needs_refusal"
@@ -199,7 +205,10 @@ def test_golden_document_missing_citation_retries_then_passes(tmp_path):
         tmp_path, scenario="missing_citation_then_supported"
     )
 
-    result = qa.query_with_trace("When does Project Phoenix launch?")
+    result = qa.query_with_trace(
+        "When does Project Phoenix launch?",
+        context_provider="document",
+    )
 
     assert result.answer == "Project Phoenix launches in June 2026 [1]."
     assert result.trace.self_check.outcome == "supported"

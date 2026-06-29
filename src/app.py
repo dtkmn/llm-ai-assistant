@@ -90,6 +90,7 @@ class QueryRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
     recipe_id: Optional[str] = None
+    context_provider: Optional[str] = None
 
 
 class ClearChatRequest(BaseModel):
@@ -477,7 +478,7 @@ def create_app(
                 instructions=request.instructions or "",
                 success_criteria=tuple(request.success_criteria or ()),
                 stop_condition=request.stop_condition or "",
-                context_provider=request.context_provider or "auto",
+                context_provider=request.context_provider or "smart",
                 model_profile=request.model_profile or "quality",
                 verifier=request.verifier or "default",
                 metadata=request.metadata or {},
@@ -604,9 +605,10 @@ def create_app(
             if request.recipe_id
             else DEFAULT_LOOP_RECIPE_ID
         )
-        recipe = store.get_recipe(recipe_id)
-        if recipe is None and recipe_id == DEFAULT_LOOP_RECIPE_ID:
+        if recipe_id == DEFAULT_LOOP_RECIPE_ID:
             recipe = store.ensure_default_recipe()
+        else:
+            recipe = store.get_recipe(recipe_id)
         if recipe is None:
             raise HTTPException(status_code=404, detail="Recipe not found.")
         expected_generation = thread.generation
@@ -631,6 +633,7 @@ def create_app(
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
                 loop_recipe=recipe.runtime_dict(),
+                context_provider=request.context_provider,
             )
         )
         raw_loop_report = (

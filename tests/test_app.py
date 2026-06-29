@@ -22,8 +22,10 @@ from src.DocumentQA import (
     QueryResult,
 )
 from src.loop_engine import (
+    DEFAULT_LOOP_RECIPE_ID,
     LoopDecision,
     LoopPhase,
+    LoopRecipe,
     LoopReport,
     LoopRun,
     LoopStep,
@@ -120,19 +122,21 @@ class FakeQA:
         semantic_memory=None,
         semantic_memory_status="not_requested",
         loop_recipe=None,
+        context_provider=None,
     ):
         self.last_query_session_id = session_id
         self.last_conversation_history = list(conversation_history or [])
         self.last_semantic_memory = list(semantic_memory or [])
         self.last_semantic_memory_status = semantic_memory_status
         self.last_loop_recipe = dict(loop_recipe or {})
+        self.last_context_provider = context_provider
         active_backend = self.active_llm_backend or self.llm_backend
         active_model_label = (
             self.loaded_model_label
             or self.loaded_model_id
             or ("MockLLM (explicit demo)" if active_backend == "mock" else "unknown")
         )
-        answer = "Project Phoenix is described in the uploaded document."
+        answer = "Project Phoenix is described in the indexed file."
         steps = []
         if self.last_loop_recipe:
             steps.append(
@@ -442,16 +446,19 @@ def test_static_frontend_is_served():
     assert "Threads" in response.text
     assert "Loop Recipe" in response.text
     assert "Durable Runs" in response.text
-    assert "Optional Context" in response.text
-    assert "You can still run the loop without documents" in response.text
+    assert "Files" in response.text
+    assert "Smart Evidence can still use web evidence" in response.text
     assert "Model Thinking" in response.text
     assert "active-thread-memory" in response.text
     assert "memory-status" in response.text
+    assert "Ask</button>" in response.text
+    assert "Run Loop" not in response.text
+    assert "query-context-control" not in response.text
     assert "/assets/app.js" in response.text
     assert script.status_code == 200
     assert script.headers["cache-control"] == "no-store"
-    assert "Ask a question, or add context" in script.text
-    assert "direct mode" in script.text
+    assert "Ask anything. Add files only" in script.text
+    assert "smart evidence" in script.text
     assert "renderMessageThinking" in script.text
     assert "session_id" in script.text
     assert "switchThread" in script.text
@@ -520,7 +527,7 @@ const recipes = [{
   recipe_id: "recipe_general_loop",
   name: "General assistant loop",
   goal: "Answer the request clearly.",
-  context_provider: "auto",
+  context_provider: "smart",
   model_profile: "quality",
   verifier: "default",
   instructions: "Use same-thread memory carefully.",
@@ -632,12 +639,14 @@ globalThis.fetch = async (url, options = {}) => {
 
 await importFreshApp();
 await tick();
+dom["query-context"].value = "web";
 dom["query-input"].value = "What happened?";
 await dom["query-form"].dispatch("submit");
 
 assert.equal(queryBodies.length, 1);
 assert.ok(queryBodies[0].session_id.startsWith("thread_"));
 assert.equal(queryBodies[0].recipe_id, "recipe_general_loop");
+assert.equal(queryBodies[0].context_provider, "web");
 const assistantMessage = findNode(
   dom.messages,
   (node) => node.className === "message assistant",
@@ -746,6 +755,86 @@ assert.ok(
     )
 
 
+def test_static_frontend_omits_context_provider_for_automatic_recipe_default():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  importFreshApp,
+  jsonResponse,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
+
+const dom = createDom();
+const queryBodies = [];
+const recipes = [{
+  recipe_id: "recipe_general_loop",
+  name: "Web recipe",
+  goal: "Use web evidence by default.",
+  context_provider: "web",
+  model_profile: "quality",
+  verifier: "default",
+  instructions: "Search when evidence is needed.",
+  success_criteria: ["Uses the recipe context provider."],
+  stop_condition: "Stop when answered.",
+  is_default: true,
+}];
+
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ title: "AI Loop Engine" });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({
+      backend: "mock",
+      model: "MockLLM",
+      ready_for_queries: false,
+      query_mode: "direct",
+      profile: "FAST",
+    });
+  }
+  if (url === "/api/threads") {
+    return jsonResponse({ threads: [createThreadPayload("thread_initial")] });
+  }
+  if (url === "/api/threads/thread_initial" && method === "GET") {
+    return jsonResponse(createThreadPayload("thread_initial"));
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/query" && method === "POST") {
+    const request = JSON.parse(options.body);
+    queryBodies.push(request);
+    return jsonResponse({
+      answer: "Using recipe context.",
+      summary: { context_provider: "web" },
+      timeline: { rows: [], final_decision: "not_verified" },
+      trace: {},
+      thread: createThreadPayload(request.session_id),
+    });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+
+await importFreshApp();
+await tick();
+assert.equal(dom["query-context"].value, "");
+dom["query-input"].value = "What changed?";
+await dom["query-form"].dispatch("submit");
+
+assert.equal(queryBodies.length, 1);
+assert.equal(queryBodies[0].recipe_id, "recipe_general_loop");
+assert.equal(Object.hasOwn(queryBodies[0], "context_provider"), false);
+'''
+    )
+
+
 def test_static_frontend_renders_inline_fences_and_hides_empty_thinking():
     run_frontend_node(
         r'''
@@ -756,6 +845,7 @@ const {
   findNode,
   importFreshApp,
   jsonResponse,
+  nodeText,
   tick,
 } = await import(process.env.FRONTEND_HARNESS_URL);
 
@@ -842,9 +932,11 @@ const {
   createDom,
   createThreadPayload,
   deferred,
+  errorResponse,
   findNode,
   importFreshApp,
   jsonResponse,
+  nodeText,
   tick,
 } = await import(process.env.FRONTEND_HARNESS_URL);
 
@@ -858,9 +950,22 @@ const recipes = [{
   is_default: true,
 }];
 
+async function clickThreadByTitle(dom, title) {
+  const button = dom["thread-list"].children.find((node) =>
+    nodeText(node).includes(title),
+  );
+  assert.ok(button, `thread button should exist for ${title}`);
+  await button.dispatch("click");
+  await tick();
+}
+
 const switchDom = createDom();
 const queryBodies = [];
-const serverThreads = [createThreadPayload("thread_initial")];
+const switchQuery = deferred();
+const serverThreads = [
+  createThreadPayload("thread_initial"),
+  createThreadPayload("thread_other"),
+];
 globalThis.fetch = async (url, options = {}) => {
   const method = String(options.method || "GET").toUpperCase();
   if (url === "/api/config") {
@@ -889,6 +994,9 @@ globalThis.fetch = async (url, options = {}) => {
   }
   if (url === "/api/query") {
     queryBodies.push(JSON.parse(options.body));
+    if (queryBodies.length === 2) {
+      await switchQuery.promise;
+    }
     return jsonResponse({ answer: "Loop answer", timeline: { rows: [], final_decision: "not_verified" }, summary: {}, trace: { model_thinking: null } });
   }
   if (url === "/api/chat/clear") {
@@ -903,10 +1011,127 @@ await switchDom["query-form"].dispatch("submit");
 const firstThreadId = queryBodies[0].session_id;
 await switchDom["new-thread"].dispatch("click");
 switchDom["query-input"].value = "Second thread question";
-await switchDom["query-form"].dispatch("submit");
+const pendingSwitchSubmit = switchDom["query-form"].dispatch("submit");
+await tick();
 assert.equal(queryBodies.length, 2);
 assert.notEqual(queryBodies[1].session_id, firstThreadId);
-assert.equal(switchDom["thread-list"].children.length, 2);
+const secondThreadId = queryBodies[1].session_id;
+await clickThreadByTitle(switchDom, "First thread question");
+const secondServerThread = serverThreads.find((thread) => thread.id === secondThreadId);
+secondServerThread.messages = [
+  { role: "user", content: "Second thread question" },
+  { role: "assistant", content: "Loop answer" },
+];
+secondServerThread.message_count = 2;
+await clickThreadByTitle(switchDom, "Second thread question");
+switchQuery.resolve();
+await pendingSwitchSubmit;
+const switchedAnswers = switchDom.messages.children.filter(
+  (node) =>
+    node.className === "message assistant" &&
+    nodeText(node).includes("Loop answer"),
+);
+assert.equal(
+  switchedAnswers.length,
+  1,
+  "server-persisted in-flight answer should not be duplicated after switching",
+);
+assert.equal(switchDom["thread-list"].children.length, 3);
+
+const repeatDom = createDom();
+const repeatQuery = deferred();
+const slowRepeatDetail = { enabled: false, gate: null };
+const repeatThreads = [
+  createThreadPayload("thread_repeat", [
+    { role: "user", content: "Repeat question" },
+    { role: "assistant", content: "Old answer" },
+  ]),
+  createThreadPayload("thread_repeat_other"),
+];
+repeatThreads[0].title = "Repeat thread";
+repeatThreads[1].title = "Other thread";
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: repeatThreads });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    if (id === "thread_repeat" && slowRepeatDetail.enabled) {
+      await slowRepeatDetail.gate.promise;
+    }
+    return jsonResponse(repeatThreads.find((item) => item.id === id) || repeatThreads[0]);
+  }
+  if (url === "/api/query") {
+    await repeatQuery.promise;
+    return jsonResponse({ answer: "New repeat answer", timeline: { rows: [], final_decision: "not_verified" }, summary: {}, trace: { model_thinking: null } });
+  }
+  if (url === "/api/chat/clear") {
+    return jsonResponse({ timeline: { rows: [], final_decision: null }, summary: {}, trace: {} });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await importFreshApp();
+await tick();
+repeatDom["query-input"].value = "Repeat question";
+const pendingRepeatSubmit = repeatDom["query-form"].dispatch("submit");
+await tick();
+await clickThreadByTitle(repeatDom, "Other thread");
+await clickThreadByTitle(repeatDom, "Repeat thread");
+assert.equal(repeatDom["final-decision"].textContent, "running");
+const pendingRepeatUserTurns = repeatDom.messages.children.filter(
+  (node) =>
+    node.className === "message user" &&
+    nodeText(node).includes("Repeat question"),
+);
+assert.equal(
+  pendingRepeatUserTurns.length,
+  2,
+  "same-text pending user turn should survive thread reload",
+);
+slowRepeatDetail.enabled = true;
+slowRepeatDetail.gate = deferred();
+const slowRepeatSwitch = clickThreadByTitle(repeatDom, "Repeat thread");
+await tick();
+await clickThreadByTitle(repeatDom, "Other thread");
+slowRepeatDetail.gate.resolve();
+await slowRepeatSwitch;
+slowRepeatDetail.enabled = false;
+assert.equal(repeatDom["active-thread-title"].textContent, "Other thread");
+assert.equal(
+  repeatDom["final-decision"].textContent,
+  "idle",
+  "late thread-detail response should not repaint another thread's running loop",
+);
+repeatQuery.resolve();
+await pendingRepeatSubmit;
+repeatThreads[0].messages = [
+  { role: "user", content: "Repeat question" },
+  { role: "assistant", content: "Old answer" },
+  { role: "user", content: "Repeat question" },
+  { role: "assistant", content: "New repeat answer" },
+];
+repeatThreads[0].message_count = 4;
+await clickThreadByTitle(repeatDom, "Repeat thread");
+const repeatUserTurns = repeatDom.messages.children.filter(
+  (node) =>
+    node.className === "message user" &&
+    nodeText(node).includes("Repeat question"),
+);
+assert.equal(repeatUserTurns.length, 2, "same-text follow-up user turn should survive thread reload");
+assert.ok(nodeText(repeatDom.messages).includes("New repeat answer"));
 
 const staleDom = createDom();
 const staleQuery = deferred();
@@ -945,11 +1170,69 @@ await tick();
 staleDom["query-input"].value = "Question that will be cleared";
 const pendingSubmit = staleDom["query-form"].dispatch("submit");
 await tick();
+const pendingAssistant = findNode(
+  staleDom.messages,
+  (node) => node.className === "message assistant pending",
+);
+assert.ok(pendingAssistant, "pending assistant message should render while query runs");
+assert.ok(
+  nodeText(pendingAssistant).includes("Thinking"),
+  "pending assistant message should explain that the model is working",
+);
+assert.equal(staleDom["query-button"].disabled, true);
+assert.equal(staleDom["query-input"].disabled, true);
+assert.equal(staleDom["query-context"].disabled, true);
+assert.equal(staleDom["final-decision"].textContent, "running");
 await staleDom["clear-chat"].dispatch("click");
+assert.equal(staleDom["query-button"].disabled, false);
+assert.equal(staleDom["query-input"].disabled, false);
+assert.equal(staleDom["query-context"].disabled, false);
+assert.equal(staleDom["final-decision"].textContent, "idle");
 staleQuery.resolve();
 await pendingSubmit;
 const staleAssistant = findNode(staleDom.messages, (node) => node.className === "message assistant");
 assert.equal(staleAssistant, null);
+assert.equal(staleDom["query-button"].disabled, false);
+assert.equal(staleDom["query-input"].disabled, false);
+assert.equal(staleDom["query-context"].disabled, false);
+
+const errorDom = createDom();
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: [createThreadPayload("thread_error")] });
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    return jsonResponse(createThreadPayload("thread_error"));
+  }
+  if (url === "/api/query") {
+    return errorResponse(503, { detail: "backend unavailable" });
+  }
+  if (url === "/api/chat/clear") {
+    return jsonResponse({ timeline: { rows: [], final_decision: null }, summary: {}, trace: {} });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+await importFreshApp();
+await tick();
+errorDom["query-input"].value = "Question that errors";
+await errorDom["query-form"].dispatch("submit");
+assert.equal(errorDom["final-decision"].textContent, "error");
+assert.ok(nodeText(errorDom.messages).includes("backend unavailable"));
+assert.ok(errorDom["trace-json"].textContent.includes("query_failed"));
+assert.equal(errorDom["trace-json"].textContent.includes("backend unavailable"), false);
 '''
     )
 
@@ -973,7 +1256,7 @@ const recipes = [{
   recipe_id: "recipe_general_loop",
   name: "General assistant loop",
   goal: "Answer the request clearly.",
-  context_provider: "auto",
+  context_provider: "smart",
   model_profile: "quality",
   verifier: "default",
   instructions: "Use same-thread memory carefully.",
@@ -1093,7 +1376,7 @@ globalThis.confirm = (message) => {
 const requests = { deleted: [], imported: [], exported: [] };
 const recipes = [
   { recipe_id: "recipe_general_loop", name: "General assistant loop", goal: "Answer the request clearly.", instructions: "Default instructions.", success_criteria: ["Default passes."], stop_condition: "Stop when done.", is_default: true },
-  { recipe_id: "recipe_custom", name: "Custom reviewer", goal: "Find weak assumptions.", instructions: "Be sharp.", success_criteria: ["Names risk."], stop_condition: "Stop after verdict.", context_provider: "auto", model_profile: "quality", verifier: "default", metadata: { source: "test" }, is_default: false },
+  { recipe_id: "recipe_custom", name: "Custom reviewer", goal: "Find weak assumptions.", instructions: "Be sharp.", success_criteria: ["Names risk."], stop_condition: "Stop after verdict.", context_provider: "smart", model_profile: "quality", verifier: "default", metadata: { source: "test" }, is_default: false },
 ];
 globalThis.fetch = async (url, options = {}) => {
   const method = String(options.method || "GET").toUpperCase();
@@ -1107,11 +1390,11 @@ globalThis.fetch = async (url, options = {}) => {
     if (method === "POST") {
       const body = JSON.parse(options.body);
       requests.imported.push(body);
-      const imported = { ...body, is_default: false, context_provider: body.context_provider || "auto", model_profile: body.model_profile || "quality", verifier: body.verifier || "default", metadata: body.metadata || {} };
+      const imported = { ...body, is_default: false, context_provider: body.context_provider || "smart", model_profile: body.model_profile || "quality", verifier: body.verifier || "default", metadata: body.metadata || {} };
       recipes.push(imported);
       return jsonResponse(imported);
     }
-    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes: recipes.map((recipe) => ({ recipe_id: recipe.recipe_id, name: recipe.name, goal: recipe.goal, context_provider: recipe.context_provider || "auto", model_profile: recipe.model_profile || "quality", verifier: recipe.verifier || "default", is_default: recipe.is_default })) });
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes: recipes.map((recipe) => ({ recipe_id: recipe.recipe_id, name: recipe.name, goal: recipe.goal, context_provider: recipe.context_provider || "smart", model_profile: recipe.model_profile || "quality", verifier: recipe.verifier || "default", is_default: recipe.is_default })) });
   }
   if (url === "/api/recipes/recipe_custom/export" && method === "GET") {
     requests.exported.push(url);
@@ -1411,7 +1694,7 @@ def test_upload_document_reports_processing_failure_without_losing_active_status
     assert response.status_code == 400
     payload = response.json()
     assert "failed during load" in payload["message"]
-    assert "Active document remains good.txt" in payload["message"]
+    assert "Active file remains good.txt" in payload["message"]
     assert payload["status"]["active_document"] == "good.txt"
     assert payload["status"]["last_attempted_document"] == "bad.txt"
     assert payload["status"]["last_error"] == "Could not decode text document"
@@ -1444,7 +1727,7 @@ def test_upload_document_unexpected_error_uses_pre_upload_status():
     payload = response.json()
     assert fake_qa.status_calls == 1
     assert "failed during unexpected" in payload["message"]
-    assert "Active document remains good.txt" in payload["message"]
+    assert "Active file remains good.txt" in payload["message"]
     assert payload["status"]["active_document"] == "good.txt"
     assert payload["status"]["phase"] == "unexpected"
     assert payload["status"]["last_error"] == "unexpected boom"
@@ -1506,6 +1789,24 @@ def test_query_endpoint_passes_session_id_to_loop_runtime():
     )
 
 
+def test_query_endpoint_passes_context_provider_to_loop_runtime():
+    fake_qa = FakeQA()
+    client = TestClient(web_app.create_app(fake_qa))
+
+    response = client.post(
+        "/api/query",
+        json={
+            "message": "What changed today?",
+            "session_id": "thread_web",
+            "context_provider": "web",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_qa.last_query_session_id == "thread_web"
+    assert fake_qa.last_context_provider == "web"
+
+
 def test_query_endpoint_applies_selected_loop_recipe():
     fake_qa = FakeQA()
     store = ThreadStore.in_memory()
@@ -1537,6 +1838,36 @@ def test_query_endpoint_applies_selected_loop_recipe():
     assert payload["recipe"]["recipe_id"] == "recipe_custom"
     assert payload["summary"]["recipe_name"] == "Custom recipe"
     assert thread["loop_runs"][0]["recipe_id"] == "recipe_custom"
+
+
+def test_query_endpoint_refreshes_stale_builtin_default_recipe():
+    fake_qa = FakeQA()
+    store = ThreadStore.in_memory()
+    stale_default = LoopRecipe(
+        recipe_id=DEFAULT_LOOP_RECIPE_ID,
+        name="General assistant loop",
+        description="Default local-first loop behavior.",
+        goal="Answer using indexed context.",
+        instructions="Use indexed context when present.",
+        success_criteria=("Uses indexed context.",),
+        context_provider="auto",
+        metadata={"built_in": True},
+    )
+    with store._lock:
+        store._insert_recipe(stale_default)
+        store._conn.commit()
+    client = TestClient(web_app.create_app(fake_qa, thread_store=store))
+
+    response = client.post(
+        "/api/query",
+        json={"message": "Who is Jackie Chan?"},
+    )
+
+    assert response.status_code == 200
+    assert fake_qa.last_loop_recipe["recipe_id"] == DEFAULT_LOOP_RECIPE_ID
+    assert fake_qa.last_loop_recipe["context_provider"] == "smart"
+    assert "web evidence" in fake_qa.last_loop_recipe["instructions"]
+    assert "indexed context" not in fake_qa.last_loop_recipe["goal"].lower()
 
 
 def test_thread_endpoints_create_list_get_rename_and_delete():
@@ -1594,7 +1925,7 @@ def test_recipe_endpoints_manage_loop_recipes():
             "instructions": "Call out uncertainty.",
             "success_criteria": ["Risks first.", "No vague praise."],
             "stop_condition": "Stop after a clear verdict.",
-            "context_provider": "auto",
+            "context_provider": "smart",
             "model_profile": "quality",
             "verifier": "human_review",
         },
@@ -1833,6 +2164,7 @@ def test_query_endpoint_does_not_persist_partial_turn_on_runtime_failure():
             semantic_memory=None,
             semantic_memory_status="not_requested",
             loop_recipe=None,
+            context_provider=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
@@ -1875,12 +2207,14 @@ def test_clear_chat_blocks_stale_in_flight_query_persistence():
             semantic_memory=None,
             semantic_memory_status="not_requested",
             loop_recipe=None,
+            context_provider=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
             self.last_semantic_memory = list(semantic_memory or [])
             self.last_semantic_memory_status = semantic_memory_status
             self.last_loop_recipe = dict(loop_recipe or {})
+            self.last_context_provider = context_provider
             self.started.set()
             if not self.release.wait(timeout=5):
                 raise RuntimeError("timed out waiting for test release")
@@ -1891,6 +2225,7 @@ def test_clear_chat_blocks_stale_in_flight_query_persistence():
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
                 loop_recipe=loop_recipe,
+                context_provider=context_provider,
             )
 
     fake_qa = BlockingQA()
@@ -1940,12 +2275,14 @@ def test_delete_thread_blocks_stale_in_flight_query_resurrection():
             semantic_memory=None,
             semantic_memory_status="not_requested",
             loop_recipe=None,
+            context_provider=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
             self.last_semantic_memory = list(semantic_memory or [])
             self.last_semantic_memory_status = semantic_memory_status
             self.last_loop_recipe = dict(loop_recipe or {})
+            self.last_context_provider = context_provider
             self.started.set()
             if not self.release.wait(timeout=5):
                 raise RuntimeError("timed out waiting for test release")
@@ -1956,6 +2293,7 @@ def test_delete_thread_blocks_stale_in_flight_query_resurrection():
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
                 loop_recipe=loop_recipe,
+                context_provider=context_provider,
             )
 
     fake_qa = BlockingQA()
@@ -1997,12 +2335,14 @@ def test_delete_recreate_blocks_stale_in_flight_query_resurrection():
             semantic_memory=None,
             semantic_memory_status="not_requested",
             loop_recipe=None,
+            context_provider=None,
         ):
             self.last_query_session_id = session_id
             self.last_conversation_history = list(conversation_history or [])
             self.last_semantic_memory = list(semantic_memory or [])
             self.last_semantic_memory_status = semantic_memory_status
             self.last_loop_recipe = dict(loop_recipe or {})
+            self.last_context_provider = context_provider
             self.started.set()
             if not self.release.wait(timeout=5):
                 raise RuntimeError("timed out waiting for test release")
@@ -2013,6 +2353,7 @@ def test_delete_recreate_blocks_stale_in_flight_query_resurrection():
                 semantic_memory=semantic_memory,
                 semantic_memory_status=semantic_memory_status,
                 loop_recipe=loop_recipe,
+                context_provider=context_provider,
             )
 
     fake_qa = BlockingQA()
@@ -2064,7 +2405,7 @@ def test_query_endpoint_allows_no_context_loop():
 
     response = client.post(
         "/api/query",
-        json={"message": "What can you do?"},
+        json={"message": "What can you do?", "context_provider": "none"},
     )
 
     assert response.status_code == 200
@@ -2269,8 +2610,9 @@ def test_loop_contract_redacts_guardrail_blocked_draft_everywhere():
 
 def test_answer_trace_redacts_model_thinking_for_refused_results_without_guardrail():
     secret_thinking = "SECRET_REFUSED_MODEL_THINKING"
+    refusal_answer = "I could not find enough relevant information in the provided evidence."
     result = QueryResult(
-        answer="I could not find enough relevant information in the document.",
+        answer=refusal_answer,
         trace=AnswerTrace(
             question="What is unsupported?",
             document_name="phoenix.txt",
@@ -2288,13 +2630,19 @@ def test_answer_trace_redacts_model_thinking_for_refused_results_without_guardra
                 backend="ollama",
                 model_label="Ollama (nemotron-3-nano:4b)",
                 final_decision=LoopDecision.REFUSE,
-                final_answer="I could not find enough relevant information in the document.",
+                final_answer=refusal_answer,
             )
         ),
     )
 
     trace = answer_trace_dict(result)
+    payload = query_response_dict(result)
 
+    assert payload["answer"] == refusal_answer
+    assert payload["trace"]["answer"] == refusal_answer
+    assert payload["trace"]["question"] == "What is unsupported?"
+    assert payload["summary"]["last_error"] is None
+    assert payload["trace"]["loop_report"]["public_redaction"]["applied"] is True
     assert secret_thinking not in json.dumps(trace)
     assert trace["model_thinking"] == {
         "available": False,

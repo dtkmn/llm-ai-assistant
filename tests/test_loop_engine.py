@@ -87,7 +87,7 @@ def test_loop_recipe_round_trips_and_summarizes():
         instructions="Be direct.",
         success_criteria=("Addresses the request.", "Names uncertainty."),
         stop_condition="Stop after a safe final answer.",
-        context_provider="auto",
+        context_provider="smart",
         model_profile="quality",
         verifier="default",
         created_at=utc("2026-06-23T10:00:00"),

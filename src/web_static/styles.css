@@ -122,6 +122,11 @@ h2 {
   color: var(--accent);
 }
 
+.decision-chip[data-decision="running"] {
+  border-color: rgb(117 167 255 / 55%);
+  color: #9bb8ff;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(260px, 0.85fr) minmax(360px, 1.2fr) minmax(360px, 1fr);
@@ -379,6 +384,15 @@ textarea {
 
 .message.assistant {
   background: rgb(99 210 151 / 9%);
+}
+
+.message.pending {
+  border-color: rgb(99 210 151 / 45%);
+  box-shadow: inset 3px 0 0 rgb(99 210 151 / 75%);
+}
+
+.message.pending .message-content {
+  color: var(--muted);
 }
 
 .message-content {
