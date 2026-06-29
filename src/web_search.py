@@ -7,6 +7,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, List, Optional
 
 try:
@@ -16,7 +17,12 @@ except ImportError:
 
 
 DUCKDUCKGO_INSTANT_ANSWER_URL = "https://api.duckduckgo.com/"
+DUCKDUCKGO_HTML_SEARCH_URL = "https://html.duckduckgo.com/html/"
 WEB_SEARCH_USER_AGENT = "AI-Loop-Engine/0.1 (+local-first evidence retrieval)"
+WEB_SEARCH_HTML_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+)
 MAX_WEB_SEARCH_QUERY_CHARS = 500
 MAX_WEB_SEARCH_RESPONSE_BYTES = 1_000_000
 MAX_WEB_SEARCH_RESULTS = 5
@@ -65,6 +71,27 @@ def _safe_result_url(value: Any) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, netloc, path, "", ""))
 
 
+def _safe_duckduckgo_result_url(value: Any) -> str:
+    raw_url = str(value or "").strip()
+    if not raw_url:
+        return ""
+    if raw_url.startswith("//"):
+        raw_url = f"https:{raw_url}"
+    elif raw_url.startswith("/"):
+        raw_url = urllib.parse.urljoin(DUCKDUCKGO_HTML_SEARCH_URL, raw_url)
+    try:
+        parsed = urllib.parse.urlsplit(raw_url)
+    except ValueError:
+        return ""
+    hostname = (parsed.hostname or "").casefold()
+    if hostname == "duckduckgo.com" or hostname.endswith(".duckduckgo.com"):
+        query = urllib.parse.parse_qs(parsed.query)
+        redirected = query.get("uddg") or []
+        if redirected:
+            return _safe_result_url(redirected[0])
+    return _safe_result_url(raw_url)
+
+
 def _title_from_hit(*values: Any, fallback_url: str = "") -> str:
     for value in values:
         text = _clean_text(value, max_chars=100)
@@ -109,6 +136,35 @@ class DuckDuckGoInstantAnswerSearch:
         if not clean_query:
             return []
         clean_query = clean_query[:MAX_WEB_SEARCH_QUERY_CHARS]
+        max_results = max(0, min(int(max_results), MAX_WEB_SEARCH_RESULTS))
+        if max_results <= 0:
+            return []
+
+        hits = self._search_instant_answer(clean_query, max_results=max_results)
+        if len(hits) >= max_results:
+            return hits
+
+        try:
+            html_hits = self._search_html_results(clean_query, max_results=max_results)
+        except WebSearchError:
+            if hits:
+                return hits
+            raise
+        return _dedupe_hits([*hits, *html_hits], limit=max_results)
+
+    def _read_request_body(self, request: urllib.request.Request, *, error_code: str) -> bytes:
+        try:
+            with self.opener(request, timeout=self.timeout) as response:
+                body = response.read(MAX_WEB_SEARCH_RESPONSE_BYTES + 1)
+        except (OSError, urllib.error.URLError, ValueError) as exc:
+            raise WebSearchError(error_code) from exc
+        if len(body) > MAX_WEB_SEARCH_RESPONSE_BYTES:
+            raise WebSearchError("web_search_response_too_large")
+        return body
+
+    def _search_instant_answer(
+        self, clean_query: str, *, max_results: int
+    ) -> List[WebSearchHit]:
         params = urllib.parse.urlencode(
             {
                 "q": clean_query,
@@ -125,13 +181,10 @@ class DuckDuckGoInstantAnswerSearch:
             },
             method="GET",
         )
-        try:
-            with self.opener(request, timeout=self.timeout) as response:
-                body = response.read(MAX_WEB_SEARCH_RESPONSE_BYTES + 1)
-        except (OSError, urllib.error.URLError, ValueError) as exc:
-            raise WebSearchError("web_search_request_failed") from exc
-        if len(body) > MAX_WEB_SEARCH_RESPONSE_BYTES:
-            raise WebSearchError("web_search_response_too_large")
+        body = self._read_request_body(
+            request,
+            error_code="web_search_request_failed",
+        )
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -139,6 +192,28 @@ class DuckDuckGoInstantAnswerSearch:
         if not isinstance(payload, dict):
             raise WebSearchError("web_search_invalid_payload")
         return parse_duckduckgo_instant_answer(payload, max_results=max_results)
+
+    def _search_html_results(
+        self, clean_query: str, *, max_results: int
+    ) -> List[WebSearchHit]:
+        params = urllib.parse.urlencode({"q": clean_query})
+        request = urllib.request.Request(
+            f"{DUCKDUCKGO_HTML_SEARCH_URL}?{params}",
+            headers={
+                "accept": "text/html",
+                "accept-language": "en-US,en;q=0.9",
+                "user-agent": WEB_SEARCH_HTML_USER_AGENT,
+            },
+            method="GET",
+        )
+        body = self._read_request_body(
+            request,
+            error_code="web_search_request_failed",
+        )
+        html_text = body.decode("utf-8", errors="replace")
+        if "anomaly.js" in html_text:
+            raise WebSearchError("web_search_challenge")
+        return parse_duckduckgo_html_results(html_text, max_results=max_results)
 
 
 def parse_duckduckgo_instant_answer(
@@ -189,6 +264,115 @@ def parse_duckduckgo_instant_answer(
         visit_related(related_topics)
 
     return _dedupe_hits(hits, limit=max(0, int(max_results)))
+
+
+def _attrs_dict(attrs: List[tuple[str, Optional[str]]]) -> Dict[str, str]:
+    return {str(key).lower(): str(value or "") for key, value in attrs}
+
+
+def _class_names(attrs: Dict[str, str]) -> set[str]:
+    return {value.strip() for value in attrs.get("class", "").split() if value.strip()}
+
+
+class _DuckDuckGoHtmlResultParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hits: List[WebSearchHit] = []
+        self._current: Optional[Dict[str, str]] = None
+        self._capture: Optional[str] = None
+        self._capture_depth = 0
+        self._title_parts: List[str] = []
+        self._snippet_parts: List[str] = []
+        self._skip_ad_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: List[tuple[str, Optional[str]]]) -> None:
+        attrs_map = _attrs_dict(attrs)
+        classes = _class_names(attrs_map)
+        if self._skip_ad_depth:
+            self._skip_ad_depth += 1
+            return
+        if tag == "div" and "result--ad" in classes:
+            self._finish_current()
+            self._skip_ad_depth = 1
+            return
+        if self._capture:
+            self._capture_depth += 1
+        if tag == "a" and "result__a" in classes:
+            self._finish_current()
+            self._current = {
+                "title": "",
+                "url": _safe_duckduckgo_result_url(attrs_map.get("href")),
+                "snippet": "",
+            }
+            self._capture = "title"
+            self._capture_depth = 1
+            self._title_parts = []
+            return
+        if self._current is not None and (
+            "result__snippet" in classes or "result-snippet" in classes
+        ):
+            self._capture = "snippet"
+            self._capture_depth = 1
+            self._snippet_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_ad_depth:
+            return
+        if self._capture == "title":
+            self._title_parts.append(data)
+        elif self._capture == "snippet":
+            self._snippet_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._skip_ad_depth:
+            self._skip_ad_depth -= 1
+            return
+        if not self._capture:
+            return
+        self._capture_depth -= 1
+        if self._capture_depth > 0:
+            return
+        if self._current is None:
+            self._clear_capture()
+            return
+        if self._capture == "title":
+            self._current["title"] = _clean_text(" ".join(self._title_parts), max_chars=120)
+        elif self._capture == "snippet":
+            self._current["snippet"] = _clean_text(" ".join(self._snippet_parts))
+            self._finish_current()
+        self._clear_capture()
+
+    def close(self) -> None:
+        super().close()
+        self._finish_current()
+
+    def _clear_capture(self) -> None:
+        self._capture = None
+        self._capture_depth = 0
+
+    def _finish_current(self) -> None:
+        if self._current is None:
+            return
+        snippet = _clean_text(self._current.get("snippet"))
+        url = _safe_result_url(self._current.get("url"))
+        if snippet and url:
+            self.hits.append(
+                WebSearchHit(
+                    title=_title_from_hit(self._current.get("title"), fallback_url=url),
+                    url=url,
+                    snippet=snippet,
+                )
+            )
+        self._current = None
+
+
+def parse_duckduckgo_html_results(
+    html_text: str, *, max_results: int = MAX_WEB_SEARCH_RESULTS
+) -> List[WebSearchHit]:
+    parser = _DuckDuckGoHtmlResultParser()
+    parser.feed(str(html_text or ""))
+    parser.close()
+    return _dedupe_hits(parser.hits, limit=max(0, int(max_results)))
 
 
 class WebSearchRetrievalChain:

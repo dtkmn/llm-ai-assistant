@@ -1689,6 +1689,48 @@ class AILoopEngine:
     ) -> str:
         return _answer_loop.format_check_retry_instruction(format_check)
 
+    def _sanitize_format_check_failure_if_possible(
+        self,
+        *,
+        run: LoopRun,
+        answer: str,
+        format_check: AnswerFormatCheck,
+    ) -> Tuple[LoopRun, Optional[GuardrailDecision], str, AnswerFormatCheck]:
+        clean_answer = str(answer or "").strip()
+        if format_check.outcome == "format_passed":
+            return run, None, clean_answer, format_check
+        if set(format_check.reasons) != {"internal_verification_label"}:
+            return run, None, clean_answer, format_check
+
+        sanitized = _answer_loop.sanitize_internal_verification_labels(clean_answer)
+        if not sanitized or sanitized == clean_answer:
+            return run, None, clean_answer, format_check
+
+        sanitized_check = self._format_check_answer(
+            sanitized,
+            retry_attempted=format_check.retry_attempted,
+        )
+        if sanitized_check.outcome != "format_passed":
+            return run, None, clean_answer, format_check
+
+        run, guardrail_decision = self._record_loop_step(
+            run,
+            self._loop_step(
+                LoopPhase.FORMAT_CHECK,
+                decision=LoopDecision.CONTINUE,
+                name="Sanitize answer format",
+                input_summary="draft answer",
+                output_summary="format_sanitized",
+                retry_count=1 if format_check.retry_attempted else 0,
+                metadata={
+                    "reasons": list(format_check.reasons),
+                    "answer_chars": len(sanitized),
+                    "sanitized_internal_labels": True,
+                },
+            ),
+        )
+        return run, guardrail_decision, sanitized, sanitized_check
+
     def _verification_result_for_self_check(
         self, self_check: AnswerSelfCheck
     ) -> VerificationResult:
@@ -1862,6 +1904,12 @@ class AILoopEngine:
 
     def _self_check_retry_instruction(self, self_check: AnswerSelfCheck) -> str:
         return _answer_loop.self_check_retry_instruction(self_check)
+
+    def _should_retry_web_verifier_failure(self, self_check: AnswerSelfCheck) -> bool:
+        return _answer_loop.should_retry_web_verifier_failure(self_check)
+
+    def _web_evidence_retry_instruction(self, self_check: AnswerSelfCheck) -> str:
+        return _answer_loop.web_evidence_retry_instruction(self_check)
 
     def _query_result(
         self,
@@ -2400,7 +2448,7 @@ class AILoopEngine:
             context_provider = self._active_context_provider_for_run(active_state)
             return context_provider.display_name if context_provider else None
         if provider_type == "web":
-            return "DuckDuckGo Instant Answer"
+            return "DuckDuckGo web snippets"
         return None
 
     def _build_web_search_chain(self):
@@ -3751,6 +3799,24 @@ class AILoopEngine:
                             run=run,
                         )
                     if format_check.outcome != "format_passed":
+                        (
+                            run,
+                            guardrail_decision,
+                            response,
+                            format_check,
+                        ) = self._sanitize_format_check_failure_if_possible(
+                            run=run,
+                            answer=response,
+                            format_check=format_check,
+                        )
+                        if guardrail_decision:
+                            return self._finish_guardrail_query_result(
+                                decision=guardrail_decision,
+                                question=clean_prompt,
+                                active_state=active_state,
+                                run=run,
+                            )
+                    if format_check.outcome != "format_passed":
                         return self._finish_format_check_failed_query_result(
                             format_check=format_check,
                             question=clean_prompt,
@@ -4021,6 +4087,24 @@ class AILoopEngine:
                             run=run,
                         )
                 if format_check.outcome != "format_passed":
+                    (
+                        run,
+                        guardrail_decision,
+                        response,
+                        format_check,
+                    ) = self._sanitize_format_check_failure_if_possible(
+                        run=run,
+                        answer=response,
+                        format_check=format_check,
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                if format_check.outcome != "format_passed":
                     return self._finish_format_check_failed_query_result(
                         format_check=format_check,
                         question=clean_prompt,
@@ -4045,17 +4129,29 @@ class AILoopEngine:
                         outcome="needs_refusal",
                         reasons=["self_check_interrupted"],
                     )
-                if self_check.outcome == "needs_retry" and hasattr(
-                    context_retrieval_chain, "retry_with_trace"
-                ):
+                retry_web_verifier_failure = (
+                    context_provider_type == "web"
+                    and self._should_retry_web_verifier_failure(self_check)
+                )
+                if (
+                    self_check.outcome == "needs_retry"
+                    or retry_web_verifier_failure
+                ) and hasattr(context_retrieval_chain, "retry_with_trace"):
                     run, guardrail_decision = self._append_loop_step(
                         run,
                         self._loop_step(
                             LoopPhase.RETRY,
                             decision=LoopDecision.RETRY,
                             name="Retry answer",
-                            output_summary="retrying after self-check failure",
-                            metadata={"reasons": list(self_check.reasons)},
+                            output_summary=(
+                                "retrying after web verifier failure"
+                                if retry_web_verifier_failure
+                                else "retrying after self-check failure"
+                            ),
+                            metadata={
+                                "reasons": list(self_check.reasons),
+                                "context_provider": context_provider_type,
+                            },
                         ),
                     )
                     if guardrail_decision:
@@ -4084,8 +4180,10 @@ class AILoopEngine:
                     retry_result = context_retrieval_chain.retry_with_trace(
                         draft_prompt,
                         chain_result,
-                        self_check_instruction=self._self_check_retry_instruction(
-                            self_check
+                        self_check_instruction=(
+                            self._web_evidence_retry_instruction(self_check)
+                            if retry_web_verifier_failure
+                            else self._self_check_retry_instruction(self_check)
                         ),
                     )
                     response = retry_result.answer
@@ -4136,6 +4234,24 @@ class AILoopEngine:
                             active_state=active_state,
                             run=run,
                         )
+                    if _format_check.outcome != "format_passed":
+                        (
+                            run,
+                            guardrail_decision,
+                            response,
+                            _format_check,
+                        ) = self._sanitize_format_check_failure_if_possible(
+                            run=run,
+                            answer=response,
+                            format_check=_format_check,
+                        )
+                        if guardrail_decision:
+                            return self._finish_guardrail_query_result(
+                                decision=guardrail_decision,
+                                question=clean_prompt,
+                                active_state=active_state,
+                                run=run,
+                            )
                     if _format_check.outcome != "format_passed":
                         return self._finish_format_check_failed_query_result(
                             format_check=_format_check,
@@ -4218,6 +4334,24 @@ class AILoopEngine:
                         run=run,
                     )
                 if _format_check.outcome != "format_passed":
+                    (
+                        run,
+                        guardrail_decision,
+                        response,
+                        _format_check,
+                    ) = self._sanitize_format_check_failure_if_possible(
+                        run=run,
+                        answer=str(response),
+                        format_check=_format_check,
+                    )
+                    if guardrail_decision:
+                        return self._finish_guardrail_query_result(
+                            decision=guardrail_decision,
+                            question=clean_prompt,
+                            active_state=active_state,
+                            run=run,
+                        )
+                if _format_check.outcome != "format_passed":
                     return self._finish_format_check_failed_query_result(
                         format_check=_format_check,
                         question=clean_prompt,
@@ -4228,7 +4362,6 @@ class AILoopEngine:
             response = str(response).strip()
             if len(response) < 3 and not direct_context:
                 response = SELF_CHECK_REFUSAL_ANSWER
-                model_thinking = None
                 run, guardrail_decision, self_check = self._run_self_check_with_loop(
                     run=run,
                     answer=response,
@@ -4250,7 +4383,6 @@ class AILoopEngine:
 
             if self_check and self_check.outcome not in SELF_CHECK_PASS_OUTCOMES:
                 response = SELF_CHECK_REFUSAL_ANSWER
-                model_thinking = None
                 if self_check.outcome != "needs_refusal":
                     self_check = self._fail_closed_self_check(self_check)
                 run, guardrail_decision = self._append_loop_step(

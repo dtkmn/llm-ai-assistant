@@ -299,9 +299,9 @@ Ollama and fails closed if Ollama is not reachable. Use explicit
   - **Quality:** `k=6`, `fetch_k=24`
   - **Fast:** `k=3`, `fetch_k=10`
 - **Web search:** Smart Evidence lookup/current queries and explicit
-  `context_provider=web` queries use the fixed DuckDuckGo Instant Answer JSON
-  endpoint for snippets only. The app does not fetch arbitrary result pages.
-  Configure bounded provider behavior with `WEB_SEARCH_TIMEOUT` and
+  `context_provider=web` queries use fixed DuckDuckGo Instant Answer and result
+  snippet endpoints for snippets only. The app does not fetch arbitrary result
+  pages. Configure bounded provider behavior with `WEB_SEARCH_TIMEOUT` and
   `WEB_SEARCH_MAX_RESULTS`.
 - **Safety limits:** Max upload size 25 MB, chunk cap 2,000 chunks per document
 - **Native runtime defaults:** unless you override them, app entrypoints

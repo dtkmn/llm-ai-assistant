@@ -659,6 +659,69 @@ def test_no_context_format_check_does_not_retry_version_prose():
         assert format_step.output_summary == "format_passed"
 
 
+def test_no_context_format_check_sanitizes_internal_label_after_retry():
+    prompts = []
+    bad_answer = (
+        "- **Answer:** I do not have a specific name. This response is based "
+        "on model knowledge and is marked **not_verified**."
+    )
+
+    def invoke(prompt):
+        prompts.append(prompt)
+        return bad_answer
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(invoke=invoke, last_thinking=None)
+
+    result = qa.query_with_trace(
+        "Do you have name?",
+        session_id="format_internal_label_sanitized",
+        context_provider="none",
+    )
+
+    assert result.answer == "I do not have a specific name."
+    assert result.trace.error_message is None
+    assert result.trace.self_check.outcome == "not_verified"
+    assert len(prompts) == 2
+    assert result.loop_report.run.final_decision == LoopDecision.NOT_VERIFIED
+    sanitize_step = next(
+        step
+        for step in result.loop_report.run.steps
+        if step.name == "Sanitize answer format"
+    )
+    assert sanitize_step.output_summary == "format_sanitized"
+    assert sanitize_step.metadata["reasons"] == ["internal_verification_label"]
+    assert "not_verified" not in result.answer
+    assert "**Answer:**" not in result.answer
+
+
+def test_no_context_format_sanitizer_preserves_code_literals():
+    prompts = []
+    bad_answer = (
+        "Use `status == 'not_verified'` in tests. "
+        "This response is marked **not_verified**."
+    )
+
+    def invoke(prompt):
+        prompts.append(prompt)
+        return bad_answer
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.llm = SimpleNamespace(invoke=invoke, last_thinking=None)
+
+    result = qa.query_with_trace(
+        "How should I compare the status literal?",
+        session_id="format_internal_label_preserve_code",
+        context_provider="none",
+    )
+
+    assert result.answer == "Use `status == 'not_verified'` in tests."
+    assert result.trace.error_message is None
+    assert result.trace.self_check.outcome == "not_verified"
+    assert result.loop_report.run.final_decision == LoopDecision.NOT_VERIFIED
+    assert len(prompts) == 2
+
+
 def test_no_context_format_check_fails_closed_when_retry_still_bad():
     prompts = []
     bad_answer = (
@@ -886,7 +949,7 @@ def test_query_with_trace_uses_explicit_web_search_context():
     assert run.context_provider == "web"
     assert run.metadata["requested_context_provider"] == "web"
     assert run.metadata["context_provider"] == "web"
-    assert run.metadata["context_provider_name"] == "DuckDuckGo Instant Answer"
+    assert run.metadata["context_provider_name"] == "DuckDuckGo web snippets"
     assert "web_search_results" in run.metadata["untrusted_inputs"]
     assert "document_text" not in run.metadata["untrusted_inputs"]
     retrieve_step = next(step for step in run.steps if step.phase == LoopPhase.RETRIEVE)
@@ -921,6 +984,135 @@ def test_query_with_trace_web_search_works_with_real_mock_llm():
     assert result.trace.self_check.outcome == "not_verified"
     assert result.loop_report.run.context_provider == "web"
     assert result.loop_report.run.final_decision == LoopDecision.NOT_VERIFIED
+
+
+def test_web_verifier_failure_retries_with_snippet_bounded_answer():
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Loop engineering",
+                    url="https://example.test/loop-engineering",
+                    snippet=(
+                        "Loop engineering means designing AI agent loops rather "
+                        "than one-off prompts."
+                    ),
+                )
+            ]
+
+    class RetryVerifierLLM:
+        def __init__(self):
+            self.calls = []
+
+        def invoke(self, prompt):
+            self.calls.append(prompt)
+            if prompt.startswith("You are a strict citation verifier"):
+                if (
+                    "Loop engineering means designing AI agent loops rather than "
+                    "one-off prompts [1]."
+                ) in prompt:
+                    return json.dumps(
+                        {"outcome": "supported", "reason": "snippet supports answer"}
+                    )
+                return json.dumps(
+                    {"outcome": "unsupported", "reason": "draft overreaches"}
+                )
+            if "Web evidence retry instruction:" in prompt:
+                return (
+                    "Loop engineering means designing AI agent loops rather than "
+                    "one-off prompts [1]."
+                )
+            return (
+                "Loop engineering designs AI agent loops, tools, governance, and "
+                "production workflows [1]."
+            )
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = RetryVerifierLLM()
+    qa.active_llm_backend = "openai-compatible"
+    qa.loaded_model_label = "Fake verifier gateway"
+
+    result = qa.query_with_trace(
+        "What is loop engineering?",
+        context_provider="web",
+    )
+
+    assert result.answer == (
+        "Loop engineering means designing AI agent loops rather than "
+        "one-off prompts [1]."
+    )
+    assert result.trace.self_check.outcome == "supported"
+    assert result.trace.self_check.retry_attempted is True
+    verifier_calls = [
+        call for call in qa.llm.calls if call.startswith("You are a strict")
+    ]
+    assert len(verifier_calls) == 2
+    retry_steps = [
+        step for step in result.loop_report.run.steps if step.phase == LoopPhase.RETRY
+    ]
+    assert retry_steps
+    assert retry_steps[-1].output_summary == "retrying after web verifier failure"
+    assert result.loop_report.run.final_decision == LoopDecision.SUPPORTED
+
+
+@pytest.mark.parametrize("verifier_outcome", ["unsupported", "insufficient"])
+def test_web_verifier_retry_still_fails_closed_when_retry_fails(verifier_outcome):
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Loop engineering",
+                    url="https://example.test/loop-engineering",
+                    snippet=(
+                        "Loop engineering means designing AI agent loops rather "
+                        "than one-off prompts."
+                    ),
+                )
+            ]
+
+    class StillFailingVerifierLLM:
+        def __init__(self):
+            self.calls = []
+            self.last_thinking = None
+
+        def invoke(self, prompt):
+            self.calls.append(prompt)
+            if prompt.startswith("You are a strict citation verifier"):
+                return json.dumps(
+                    {"outcome": verifier_outcome, "reason": "still not supported"}
+                )
+            self.last_thinking = "SECRET_WEB_DRAFT_THINKING"
+            return "Loop engineering also guarantees production autonomy [1]."
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = StillFailingVerifierLLM()
+    qa.active_llm_backend = "openai-compatible"
+    qa.loaded_model_label = "Fake verifier gateway"
+
+    result = qa.query_with_trace(
+        "What is loop engineering?",
+        context_provider="web",
+    )
+
+    assert result.answer == answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
+    assert result.trace.self_check.outcome == "needs_refusal"
+    assert result.trace.self_check.reasons == [f"llm_verifier_{verifier_outcome}"]
+    assert result.trace.self_check.retry_attempted is True
+    verifier_calls = [
+        call for call in qa.llm.calls if call.startswith("You are a strict")
+    ]
+    assert len(verifier_calls) == 2
+    retry_steps = [
+        step for step in result.loop_report.run.steps if step.phase == LoopPhase.RETRY
+    ]
+    assert len(retry_steps) == 1
+    assert result.loop_report.run.final_decision == LoopDecision.REFUSE
+    public_payload = web_contract_module.query_response_dict(result)
+    public_json = json.dumps(public_payload)
+    assert "SECRET_WEB_DRAFT_THINKING" not in public_json
+    assert "production autonomy" not in public_json
 
 
 def test_web_search_query_does_not_send_thread_memory_to_provider():
@@ -2618,6 +2810,41 @@ def test_web_search_refusal_uses_provider_neutral_evidence_wording():
     assert response_payload["trace"]["loop_report"]["public_redaction"]["applied"] is True
 
 
+def test_web_search_refusal_redacts_captured_model_thinking_publicly():
+    class FakeWebSearchClient:
+        def search(self, query, *, max_results=5):
+            return [
+                web_search_module.WebSearchHit(
+                    title="Python",
+                    url="https://www.python.org/",
+                    snippet="Python is a programming language.",
+                )
+            ]
+
+    class ThinkingLLM:
+        last_thinking = "SECRET_WEB_THINKING"
+
+        def invoke(self, _prompt):
+            return "Python is useful."
+
+    qa = DocumentQA(fast_mode=True, llm_backend="mock")
+    qa.web_search_client = FakeWebSearchClient()
+    qa.llm = ThinkingLLM()
+
+    result = qa.query_with_trace("What is Python?", context_provider="web")
+    response_payload = web_contract_module.query_response_dict(result)
+    response_json = json.dumps(response_payload)
+
+    assert result.answer == answer_loop_module.SELF_CHECK_REFUSAL_ANSWER
+    assert result.trace.model_thinking == "SECRET_WEB_THINKING"
+    assert response_payload["trace"]["model_thinking"]["available"] is False
+    assert response_payload["trace"]["model_thinking"]["redacted"] is True
+    assert response_payload["trace"]["model_thinking"]["content"] == (
+        web_contract_module.MODEL_THINKING_REDACTION
+    )
+    assert "SECRET_WEB_THINKING" not in response_json
+
+
 def test_invalid_context_provider_fails_closed():
     qa = DocumentQA(fast_mode=True, llm_backend="mock")
 
@@ -2659,6 +2886,150 @@ def test_duckduckgo_instant_answer_parser_sanitizes_hits():
     assert hits[1].url == ""
     assert hits[1].snippet == "Python - Official website"
     assert hits[2].url == "https://www.python.org/downloads/"
+
+
+def test_duckduckgo_search_uses_html_fallback_when_instant_answer_is_empty():
+    class FakeResponse:
+        def __init__(self, body: bytes):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _size: int):
+            return self.body
+
+    calls = []
+
+    def fake_opener(request, *, timeout):
+        calls.append(request.full_url)
+        if request.full_url.startswith(web_search_module.DUCKDUCKGO_INSTANT_ANSWER_URL):
+            return FakeResponse(b'{"RelatedTopics":[]}')
+        assert request.full_url.startswith(web_search_module.DUCKDUCKGO_HTML_SEARCH_URL)
+        html_body = b"""
+        <html><body>
+          <div class="result">
+            <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpython%3Ftoken%3Ddrop">Python Result</a>
+            <a class="result__snippet">Python is a programming language for clear code.</a>
+          </div>
+          <div class="result">
+            <a class="result__a" href="https://example.org/docs#frag">Docs Result</a>
+            <a class="result__snippet">Docs explain Python syntax.</a>
+          </div>
+        </body></html>
+        """
+        return FakeResponse(html_body)
+
+    client = web_search_module.DuckDuckGoInstantAnswerSearch(opener=fake_opener)
+
+    hits = client.search("Python", max_results=2)
+
+    assert len(calls) == 2
+    assert hits == [
+        web_search_module.WebSearchHit(
+            title="Python Result",
+            url="https://example.com/python",
+            snippet="Python is a programming language for clear code.",
+        ),
+        web_search_module.WebSearchHit(
+            title="Docs Result",
+            url="https://example.org/docs",
+            snippet="Docs explain Python syntax.",
+        ),
+    ]
+
+
+def test_duckduckgo_search_skips_html_fallback_when_instant_answer_has_enough_hits():
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, _size: int):
+            return json.dumps(
+                {
+                    "Heading": "Python",
+                    "AbstractText": "Python is a programming language.",
+                    "AbstractURL": "https://www.python.org/",
+                }
+            ).encode("utf-8")
+
+    calls = []
+
+    def fake_opener(request, *, timeout):
+        calls.append(request.full_url)
+        if request.full_url.startswith(web_search_module.DUCKDUCKGO_HTML_SEARCH_URL):
+            raise AssertionError("HTML fallback should not run when enough evidence exists")
+        return FakeResponse()
+
+    client = web_search_module.DuckDuckGoInstantAnswerSearch(opener=fake_opener)
+
+    hits = client.search("Python", max_results=1)
+
+    assert len(calls) == 1
+    assert hits[0].snippet == "Python is a programming language."
+
+
+def test_duckduckgo_html_parser_sanitizes_redirects_and_markup():
+    html_text = """
+    <html><body>
+      <div class="result">
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fsafe%3Fsecret%3Ddrop">Example <b>Title</b></a>
+        <a class="result__snippet">Example <b>snippet</b> with markup.</a>
+      </div>
+    </body></html>
+    """
+
+    hits = web_search_module.parse_duckduckgo_html_results(html_text, max_results=1)
+
+    assert hits == [
+        web_search_module.WebSearchHit(
+            title="Example Title",
+            url="https://example.com/safe",
+            snippet="Example snippet with markup.",
+        )
+    ]
+
+
+def test_duckduckgo_html_parser_rejects_lookalike_redirect_host():
+    html_text = """
+    <html><body>
+      <div class="result">
+        <a class="result__a" href="https://notduckduckgo.com/l/?uddg=https%3A%2F%2Fevil.example%2Fsecret">Lookalike</a>
+        <a class="result__snippet">This should not be cited through a lookalike redirect.</a>
+      </div>
+    </body></html>
+    """
+
+    hits = web_search_module.parse_duckduckgo_html_results(html_text, max_results=1)
+
+    assert hits == [
+        web_search_module.WebSearchHit(
+            title="Lookalike",
+            url="https://notduckduckgo.com/l/",
+            snippet="This should not be cited through a lookalike redirect.",
+        )
+    ]
+
+
+def test_duckduckgo_html_parser_skips_results_without_safe_url():
+    html_text = """
+    <html><body>
+      <div class="result">
+        <a class="result__a" href="javascript:alert(1)">Unsafe Result</a>
+        <a class="result__snippet">Unsafe results should not become citeable evidence.</a>
+      </div>
+    </body></html>
+    """
+
+    hits = web_search_module.parse_duckduckgo_html_results(html_text, max_results=1)
+
+    assert hits == []
 
 
 def test_query_trace_counts_only_prompt_included_chunks(tmp_path):
@@ -3429,7 +3800,10 @@ def test_self_check_rejects_cited_but_unsupported_answer(tmp_path):
     assert result.trace.self_check.outcome == "needs_refusal"
     assert result.trace.self_check.reasons == ["llm_verifier_unsupported"]
     assert result.trace.self_check.retry_attempted is False
-    assert result.trace.model_thinking is None
+    assert result.trace.model_thinking == "I may cite a nonexistent budget source."
+    public_payload = web_contract_module.query_response_dict(result)
+    assert public_payload["trace"]["model_thinking"]["redacted"] is True
+    assert "nonexistent budget" not in json.dumps(public_payload)
     assert len(verifier.calls) == 1
     assert "Project Phoenix launches tomorrow [1]." in verifier.calls[0]
     assert "Project Phoenix launches in June 2026." in verifier.calls[0]
@@ -3600,7 +3974,10 @@ def test_self_check_refuses_when_retry_keeps_hallucinated_inline_citation_id(tmp
     assert "self_check_failed_closed" in result.trace.self_check.reasons
     assert "invalid_inline_citation" in result.trace.self_check.reasons
     assert result.trace.self_check.retry_attempted is True
-    assert result.trace.model_thinking is None
+    assert result.trace.model_thinking == "I am still citing source 999."
+    public_payload = web_contract_module.query_response_dict(result)
+    assert public_payload["trace"]["model_thinking"]["redacted"] is True
+    assert "source 999" not in json.dumps(public_payload)
     assert verifier.calls == []
 
 

@@ -41,9 +41,9 @@ Primary runtime files:
 - `src/model_adapters.py`: Ollama and OpenAI-compatible LLM/embedding adapters,
   provider request helpers, and provider embedding response validation.
   `src/ai_loop_runtime.py` re-exports these names for compatibility.
-- `src/web_search.py`: per-query web-search snippet provider,
-  DuckDuckGo Instant Answer parsing, and web evidence retrieval chain. It must
-  not fetch arbitrary result pages.
+- `src/web_search.py`: per-query web-search snippet provider, DuckDuckGo
+  Instant Answer/result-snippet parsing, and web evidence retrieval chain. It
+  must not fetch arbitrary result pages.
 - `src/answer_loop.py`: answer self-check policy, citation mechanics, deterministic
   refutation prefilters, verifier prompt parsing, retry/refusal helpers, and
   verification result mapping. Keep it free of native-heavy imports.

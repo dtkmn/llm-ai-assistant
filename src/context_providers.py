@@ -30,7 +30,7 @@ class DocumentContextProvider:
 
 @dataclass(frozen=True)
 class WebSearchContextProvider:
-    display_name: Optional[str] = "DuckDuckGo Instant Answer"
+    display_name: Optional[str] = "DuckDuckGo web snippets"
     vector_store: Optional["FaissVectorStore"] = None
     retrieval_chain: Optional[object] = None
     provider_type: str = "web"
