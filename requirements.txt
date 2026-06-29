@@ -1,7 +1,7 @@
 # Pip compatibility export. Keep synchronized with pyproject.toml.
 # Pinned direct dependencies for reproducible and safer builds.
 aiohttp==3.14.1
-charset-normalizer==3.4.4
+charset-normalizer==3.4.7
 docx2txt==0.9
 faiss-cpu==1.13.2
 fastapi==0.138.0
