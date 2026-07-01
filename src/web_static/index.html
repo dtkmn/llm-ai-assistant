@@ -24,7 +24,10 @@
         <section class="context-panel" aria-labelledby="threads-title">
           <div class="panel-heading">
             <h2 id="threads-title">Threads</h2>
-            <button class="ghost-button" id="new-thread" type="button">New</button>
+            <div class="thread-actions">
+              <button class="ghost-button" id="new-thread" type="button">New</button>
+              <button class="ghost-button danger-button" id="delete-thread" type="button" aria-label="Delete active thread">Delete</button>
+            </div>
           </div>
           <div class="thread-list" id="thread-list" role="list" aria-label="Conversation threads"></div>
           <div class="panel-divider"></div>
