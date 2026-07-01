@@ -15,6 +15,7 @@ const state = {
   recipeDraft: null,
   latest: null,
   runningQuery: null,
+  deletingThreadIds: new Set(),
 };
 
 const elements = {
@@ -27,6 +28,7 @@ const elements = {
   fileInput: document.querySelector("#document-file"),
   textEncoding: document.querySelector("#text-encoding"),
   newThreadButton: document.querySelector("#new-thread"),
+  deleteThreadButton: document.querySelector("#delete-thread"),
   threadList: document.querySelector("#thread-list"),
   recipeSelect: document.querySelector("#recipe-select"),
   recipeStatus: document.querySelector("#recipe-status"),
@@ -640,6 +642,10 @@ function titleFromMessage(message) {
 
 function renderThreads() {
   elements.threadList.replaceChildren();
+  elements.deleteThreadButton.disabled =
+    !state.threads.length ||
+    !state.activeThreadId ||
+    state.deletingThreadIds.has(state.activeThreadId);
   for (const thread of state.threads) {
     const button = document.createElement("button");
     button.type = "button";
@@ -765,6 +771,81 @@ async function startNewThread() {
   renderRuns(thread.loopRuns);
   renderLoopPayload(emptyLoopPayload());
   elements.queryInput.focus();
+}
+
+async function deleteActiveThread() {
+  const thread = activeThread();
+  const threadId = thread.id;
+  if (!threadId) {
+    return;
+  }
+  if (state.deletingThreadIds.has(threadId)) {
+    return;
+  }
+  const title = thread.title || DEFAULT_THREAD_TITLE;
+  const confirmed = typeof globalThis.confirm === "function"
+    ? globalThis.confirm(
+        `Delete thread "${title}"? This removes its messages, memories, and runs from this local database.`,
+      )
+    : true;
+  if (!confirmed) {
+    return;
+  }
+
+  state.deletingThreadIds.add(threadId);
+  setBusy(elements.deleteThreadButton, true, "Delete");
+  if (state.activeThreadId === threadId) {
+    setQueryControlsBusy(true);
+  }
+  try {
+    await requestJson(`/api/threads/${encodeURIComponent(threadId)}`, {
+      method: "DELETE",
+    });
+    state.threads = state.threads.filter((item) => item.id !== threadId);
+    if (state.runningQuery?.threadId === threadId) {
+      stopQueryProgress(state.runningQuery.pendingId);
+      if (!state.deletingThreadIds.has(state.activeThreadId)) {
+        setQueryControlsBusy(false);
+      }
+    }
+    if (state.activeThreadId === threadId) {
+      state.activeThreadId = state.threads[0]?.id || null;
+    }
+    if (!state.threads.length) {
+      await loadThreads();
+    } else if (
+      state.activeThreadId &&
+      !state.deletingThreadIds.has(state.activeThreadId)
+    ) {
+      await loadThreadDetail(state.activeThreadId);
+      persistActiveThreadId();
+    }
+    renderThreads();
+    renderActiveThreadTitle();
+    renderMessages();
+    renderRuns(activeThread().loopRuns);
+    renderLoopPayload(activeThread().latest || emptyLoopPayload());
+    elements.uploadStatus.textContent = `Deleted thread "${title}".`;
+  } catch (error) {
+    await loadThreadDetail(threadId).catch(() => {});
+    if (state.activeThreadId === threadId) {
+      renderActiveThreadTitle();
+      renderMessages();
+      renderRuns(activeThread().loopRuns);
+      renderLoopPayload(activeThread().latest || emptyLoopPayload());
+    }
+    elements.uploadStatus.textContent = error.message;
+  } finally {
+    state.deletingThreadIds.delete(threadId);
+    setBusy(elements.deleteThreadButton, false, "Delete");
+    if (
+      !state.runningQuery &&
+      !state.deletingThreadIds.has(state.activeThreadId)
+    ) {
+      setQueryControlsBusy(false);
+    }
+    renderThreads();
+  }
 }
 
 function renderRuntimeStatus(status) {
@@ -1515,6 +1596,9 @@ async function runQuery(event) {
 
   const requestThread = activeThread();
   const requestThreadId = requestThread.id;
+  if (!requestThreadId || state.deletingThreadIds.has(requestThreadId)) {
+    return;
+  }
   const baseMessageCount = nonNegativeInteger(requestThread.messageCount);
   const queryId = `query_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const requestRevision = bumpThreadRevision(requestThread);
@@ -1562,7 +1646,11 @@ async function runQuery(event) {
       body: JSON.stringify(queryPayload),
     });
     const targetThread = threadById(requestThreadId);
-    if (!targetThread || normalizedRevision(targetThread.revision) !== requestRevision) {
+    if (
+      !targetThread ||
+      normalizedRevision(targetThread.revision) !== requestRevision ||
+      state.deletingThreadIds.has(requestThreadId)
+    ) {
       return;
     }
     const removedPending = removePendingMessage(
@@ -1607,7 +1695,11 @@ async function runQuery(event) {
     }
   } catch (error) {
     const targetThread = threadById(requestThreadId);
-    if (!targetThread || normalizedRevision(targetThread.revision) !== requestRevision) {
+    if (
+      !targetThread ||
+      normalizedRevision(targetThread.revision) !== requestRevision ||
+      state.deletingThreadIds.has(requestThreadId)
+    ) {
       return;
     }
     removePendingMessage(targetThread, pendingMessage.pending_id);
@@ -1622,7 +1714,10 @@ async function runQuery(event) {
     const ownsRunningState =
       state.runningQuery?.pendingId === pendingMessage.pending_id;
     stopQueryProgress(pendingMessage.pending_id);
-    if (ownsRunningState || !state.runningQuery) {
+    if (
+      (ownsRunningState || !state.runningQuery) &&
+      !state.deletingThreadIds.has(state.activeThreadId)
+    ) {
       setQueryControlsBusy(false);
     }
   }
@@ -1699,6 +1794,11 @@ async function boot() {
   elements.queryForm.addEventListener("submit", runQuery);
   elements.newThreadButton.addEventListener("click", () =>
     startNewThread().catch((error) => {
+      elements.uploadStatus.textContent = error.message;
+    }),
+  );
+  elements.deleteThreadButton.addEventListener("click", () =>
+    deleteActiveThread().catch((error) => {
       elements.uploadStatus.textContent = error.message;
     }),
   );

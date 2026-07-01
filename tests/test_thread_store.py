@@ -312,6 +312,44 @@ def test_thread_store_clear_missing_thread_does_not_recreate():
     assert store.get_thread("thread_local") is None
 
 
+def test_thread_store_delete_removes_messages_runs_and_memories():
+    store = ThreadStore.in_memory()
+    report = sample_loop_report(thread_id="thread_local")
+    store.create_thread(thread_id="thread_local")
+    messages = store.append_turn(
+        "thread_local",
+        user_content="remember this",
+        assistant_content="stored answer",
+        raw_loop_report=report.to_dict(),
+        public_loop_report=report.to_public_dict(),
+    )
+    for message in messages:
+        assert store.upsert_message_embedding(
+            message,
+            embedding_model="fake-memory",
+            vector=[1.0, 0.0],
+        )
+
+    assert store.get_thread("thread_local").message_count == 2
+    assert store.list_loop_runs("thread_local")
+    assert store.semantic_memories(
+        "thread_local",
+        embedding_model="fake-memory",
+        query_vector=[1.0, 0.0],
+    )
+
+    assert store.delete_thread("thread_local") is True
+
+    assert store.get_thread("thread_local") is None
+    assert store.recent_messages("thread_local") == ()
+    assert store.list_loop_runs("thread_local") == ()
+    assert store.semantic_memories(
+        "thread_local",
+        embedding_model="fake-memory",
+        query_vector=[1.0, 0.0],
+    ) == ()
+
+
 def test_thread_store_rejects_invalid_message_role():
     store = ThreadStore.in_memory()
     store.create_thread(thread_id="thread_local")

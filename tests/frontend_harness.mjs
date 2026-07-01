@@ -171,6 +171,7 @@ export function createDom() {
     "document-file",
     "text-encoding",
     "new-thread",
+    "delete-thread",
     "thread-list",
     "recipe-select",
     "recipe-status",

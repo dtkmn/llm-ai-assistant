@@ -1233,6 +1233,529 @@ assert.equal(errorDom["final-decision"].textContent, "error");
 assert.ok(nodeText(errorDom.messages).includes("backend unavailable"));
 assert.ok(errorDom["trace-json"].textContent.includes("query_failed"));
 assert.equal(errorDom["trace-json"].textContent.includes("backend unavailable"), false);
+	'''
+    )
+
+
+def test_static_frontend_deletes_threads_from_server_and_ui():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  deferred,
+  errorResponse,
+  importFreshApp,
+  jsonResponse,
+  nodeText,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
+
+const dom = createDom();
+const recipes = [{
+  recipe_id: "recipe_general_loop",
+  name: "General assistant loop",
+  goal: "Answer the request clearly.",
+  instructions: "Use same-thread memory carefully.",
+  success_criteria: ["Answer the request clearly."],
+  stop_condition: "Stop when done.",
+  is_default: true,
+}];
+let serverThreads = [
+  createThreadPayload("thread_delete", [
+    { role: "user", content: "Delete me question" },
+    { role: "assistant", content: "Delete me answer" },
+  ]),
+  createThreadPayload("thread_keep", [
+    { role: "user", content: "Keep me question" },
+  ]),
+];
+serverThreads[0].title = "Delete me";
+serverThreads[1].title = "Keep me";
+const deleted = [];
+const detailFetches = [];
+const queryBodies = [];
+const confirmations = [];
+const deleteGate = deferred();
+let createdCount = 0;
+globalThis.confirm = (message) => {
+  confirmations.push(message);
+  return true;
+};
+
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: serverThreads });
+  }
+  if (url === "/api/threads" && method === "POST") {
+    createdCount += 1;
+    const thread = createThreadPayload(`thread_created_${createdCount}`);
+    serverThreads = [thread];
+    return jsonResponse(thread);
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    detailFetches.push(id);
+    const thread = serverThreads.find((item) => item.id === id);
+    return thread
+      ? jsonResponse(thread)
+      : errorResponse(404, { detail: "Thread not found." });
+  }
+  if (url.startsWith("/api/threads/") && method === "DELETE") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    deleted.push(id);
+    serverThreads = serverThreads.filter((thread) => thread.id !== id);
+    await deleteGate.promise;
+    return jsonResponse({ deleted: true, thread_id: id });
+  }
+  if (url === "/api/query") {
+    queryBodies.push(JSON.parse(options.body));
+    return jsonResponse({ answer: "Should not be sent", timeline: { rows: [], final_decision: "not_verified" }, summary: {}, trace: { model_thinking: null } });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+
+await importFreshApp();
+await tick();
+assert.equal(dom["active-thread-title"].textContent, "Delete me");
+assert.ok(nodeText(dom["thread-list"]).includes("Delete me"));
+assert.ok(nodeText(dom["thread-list"]).includes("Keep me"));
+assert.deepEqual(detailFetches, ["thread_delete"]);
+
+const pendingDelete = dom["delete-thread"].dispatch("click");
+await tick();
+assert.deepEqual(deleted, ["thread_delete"]);
+assert.equal(confirmations.length, 1);
+assert.ok(confirmations[0].includes("Delete me"));
+assert.equal(dom["query-button"].disabled, true);
+dom["query-input"].value = "do not resurrect deleted thread";
+await dom["query-form"].dispatch("submit");
+assert.deepEqual(queryBodies, []);
+deleteGate.resolve();
+await pendingDelete;
+await tick();
+assert.equal(nodeText(dom["thread-list"]).includes("Delete me"), false);
+assert.ok(nodeText(dom["thread-list"]).includes("Keep me"));
+assert.equal(dom["active-thread-title"].textContent, "Keep me");
+assert.equal(globalThis.localStorage.getItem("ai-loop-engine.active-thread.v1"), "thread_keep");
+assert.deepEqual(detailFetches, ["thread_delete", "thread_keep"]);
+assert.equal(dom["query-button"].disabled, false);
+
+await dom["delete-thread"].dispatch("click");
+await tick();
+assert.deepEqual(deleted, ["thread_delete", "thread_keep"]);
+assert.equal(createdCount, 1);
+assert.equal(serverThreads.length, 1);
+assert.equal(serverThreads[0].id, "thread_created_1");
+assert.equal(dom["active-thread-title"].textContent, "New thread");
+assert.equal(globalThis.localStorage.getItem("ai-loop-engine.active-thread.v1"), "thread_created_1");
+assert.equal(dom["delete-thread"].disabled, false);
+assert.equal(nodeText(dom["thread-list"]).includes("Keep me"), false);
+'''
+    )
+
+
+def test_static_frontend_overlapping_thread_deletes_keep_query_disabled():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  deferred,
+  errorResponse,
+  importFreshApp,
+  jsonResponse,
+  nodeText,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
+
+const dom = createDom();
+const recipes = [{
+  recipe_id: "recipe_general_loop",
+  name: "General assistant loop",
+  goal: "Answer the request clearly.",
+  instructions: "Use same-thread memory carefully.",
+  success_criteria: ["Answer the request clearly."],
+  stop_condition: "Stop when done.",
+  is_default: true,
+}];
+let serverThreads = [
+  createThreadPayload("thread_a"),
+  createThreadPayload("thread_b"),
+];
+serverThreads[0].title = "Thread A";
+serverThreads[1].title = "Thread B";
+const gates = {
+  thread_a: deferred(),
+  thread_b: deferred(),
+};
+const detailFetches = [];
+const queryBodies = [];
+let createdCount = 0;
+globalThis.confirm = () => true;
+
+async function clickThreadByTitle(title) {
+  const button = dom["thread-list"].children.find((node) =>
+    nodeText(node).includes(title),
+  );
+  assert.ok(button, `thread button should exist for ${title}`);
+  await button.dispatch("click");
+  await tick();
+}
+
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: serverThreads });
+  }
+  if (url === "/api/threads" && method === "POST") {
+    createdCount += 1;
+    const thread = createThreadPayload(`thread_created_${createdCount}`);
+    serverThreads = [thread];
+    return jsonResponse(thread);
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    detailFetches.push(id);
+    const thread = serverThreads.find((item) => item.id === id);
+    return thread
+      ? jsonResponse(thread)
+      : errorResponse(404, { detail: "Thread not found." });
+  }
+  if (url.startsWith("/api/threads/") && method === "DELETE") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    serverThreads = serverThreads.filter((thread) => thread.id !== id);
+    await gates[id].promise;
+    return jsonResponse({ deleted: true, thread_id: id });
+  }
+  if (url === "/api/query") {
+    queryBodies.push(JSON.parse(options.body));
+    return jsonResponse({ answer: "Should not be sent", timeline: { rows: [], final_decision: "not_verified" }, summary: {}, trace: { model_thinking: null } });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+
+await importFreshApp();
+await tick();
+assert.equal(dom["active-thread-title"].textContent, "Thread A");
+
+const pendingDeleteA = dom["delete-thread"].dispatch("click");
+await tick();
+assert.equal(dom["query-button"].disabled, true);
+await clickThreadByTitle("Thread B");
+assert.equal(dom["active-thread-title"].textContent, "Thread B");
+
+const pendingDeleteB = dom["delete-thread"].dispatch("click");
+await tick();
+dom["query-input"].value = "do not query B while deleting";
+await dom["query-form"].dispatch("submit");
+assert.deepEqual(queryBodies, []);
+assert.equal(dom["query-button"].disabled, true);
+
+gates.thread_a.resolve();
+await pendingDeleteA;
+await tick();
+assert.equal(
+  dom["query-button"].disabled,
+  true,
+  "finishing another delete must not re-enable the active pending-delete thread",
+);
+await dom["query-form"].dispatch("submit");
+assert.deepEqual(queryBodies, []);
+assert.equal(
+  detailFetches.filter((id) => id === "thread_b").length,
+  1,
+  "finishing delete A should not refetch active thread B while B is pending deletion",
+);
+
+gates.thread_b.resolve();
+await pendingDeleteB;
+await tick();
+assert.equal(createdCount, 1);
+assert.equal(dom["active-thread-title"].textContent, "New thread");
+assert.equal(dom["query-button"].disabled, false);
+assert.deepEqual(queryBodies, []);
+'''
+    )
+
+
+def test_static_frontend_query_completion_during_thread_delete_stays_disabled():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  deferred,
+  errorResponse,
+  findNode,
+  importFreshApp,
+  jsonResponse,
+  nodeText,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
+
+const dom = createDom();
+const recipes = [{
+  recipe_id: "recipe_general_loop",
+  name: "General assistant loop",
+  goal: "Answer the request clearly.",
+  instructions: "Use same-thread memory carefully.",
+  success_criteria: ["Answer the request clearly."],
+  stop_condition: "Stop when done.",
+  is_default: true,
+}];
+let serverThreads = [createThreadPayload("thread_delete")];
+serverThreads[0].title = "Delete during query";
+const queryGate = deferred();
+const deleteGate = deferred();
+const queryBodies = [];
+let createdCount = 0;
+globalThis.confirm = () => true;
+
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: serverThreads });
+  }
+  if (url === "/api/threads" && method === "POST") {
+    createdCount += 1;
+    const thread = createThreadPayload(`thread_created_${createdCount}`);
+    serverThreads = [thread];
+    return jsonResponse(thread);
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    const thread = serverThreads.find((item) => item.id === id);
+    return thread
+      ? jsonResponse(thread)
+      : errorResponse(404, { detail: "Thread not found." });
+  }
+  if (url === "/api/query") {
+    queryBodies.push(JSON.parse(options.body));
+    await queryGate.promise;
+    return jsonResponse({
+      answer: "Stale answer should not render",
+      timeline: { rows: [], final_decision: "not_verified" },
+      summary: {},
+      trace: { model_thinking: null },
+      thread: createThreadPayload("thread_delete", [
+        { role: "user", content: "Slow question" },
+        { role: "assistant", content: "Stale answer should not render" },
+      ]),
+    });
+  }
+  if (url.startsWith("/api/threads/") && method === "DELETE") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    serverThreads = serverThreads.filter((thread) => thread.id !== id);
+    await deleteGate.promise;
+    return jsonResponse({ deleted: true, thread_id: id });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+
+await importFreshApp();
+await tick();
+dom["query-input"].value = "Slow question";
+const pendingQuery = dom["query-form"].dispatch("submit");
+await tick();
+assert.deepEqual(queryBodies.map((body) => body.session_id), ["thread_delete"]);
+assert.equal(dom["query-button"].disabled, true);
+
+const pendingDelete = dom["delete-thread"].dispatch("click");
+await tick();
+assert.equal(dom["query-button"].disabled, true);
+
+queryGate.resolve();
+await pendingQuery;
+await tick();
+assert.equal(
+  dom["query-button"].disabled,
+  true,
+  "query completion must not re-enable controls while active thread deletion is pending",
+);
+const staleAssistant = findNode(
+  dom.messages,
+  (node) =>
+    node.className === "message assistant" &&
+    nodeText(node).includes("Stale answer should not render"),
+);
+assert.equal(staleAssistant, null);
+
+deleteGate.resolve();
+await pendingDelete;
+await tick();
+assert.equal(createdCount, 1);
+assert.equal(dom["active-thread-title"].textContent, "New thread");
+assert.equal(dom["query-button"].disabled, false);
+'''
+    )
+
+
+def test_static_frontend_running_query_delete_does_not_enable_other_pending_delete():
+    run_frontend_node(
+        r'''
+import assert from "node:assert/strict";
+const {
+  createDom,
+  createThreadPayload,
+  deferred,
+  errorResponse,
+  importFreshApp,
+  jsonResponse,
+  nodeText,
+  tick,
+} = await import(process.env.FRONTEND_HARNESS_URL);
+
+const dom = createDom();
+const recipes = [{
+  recipe_id: "recipe_general_loop",
+  name: "General assistant loop",
+  goal: "Answer the request clearly.",
+  instructions: "Use same-thread memory carefully.",
+  success_criteria: ["Answer the request clearly."],
+  stop_condition: "Stop when done.",
+  is_default: true,
+}];
+let serverThreads = [
+  createThreadPayload("thread_a"),
+  createThreadPayload("thread_b"),
+];
+serverThreads[0].title = "Thread A";
+serverThreads[1].title = "Thread B";
+const queryGate = deferred();
+const gates = {
+  thread_a: deferred(),
+  thread_b: deferred(),
+};
+let createdCount = 0;
+globalThis.confirm = () => true;
+
+async function clickThreadByTitle(title) {
+  const button = dom["thread-list"].children.find((node) =>
+    nodeText(node).includes(title),
+  );
+  assert.ok(button, `thread button should exist for ${title}`);
+  await button.dispatch("click");
+  await tick();
+}
+
+globalThis.fetch = async (url, options = {}) => {
+  const method = String(options.method || "GET").toUpperCase();
+  if (url === "/api/config") {
+    return jsonResponse({ text_encodings: [{ label: "Auto", value: "auto" }] });
+  }
+  if (url === "/api/status") {
+    return jsonResponse({ backend: "ollama", model: "thinking-model", ready_for_queries: false, query_mode: "direct", chunk_count: 0 });
+  }
+  if (url === "/api/recipes") {
+    return jsonResponse({ default_recipe_id: "recipe_general_loop", recipes });
+  }
+  if (url.startsWith("/api/recipes/") && method === "GET") {
+    return jsonResponse(recipes[0]);
+  }
+  if (url === "/api/threads" && method === "GET") {
+    return jsonResponse({ threads: serverThreads });
+  }
+  if (url === "/api/threads" && method === "POST") {
+    createdCount += 1;
+    const thread = createThreadPayload(`thread_created_${createdCount}`);
+    serverThreads = [thread];
+    return jsonResponse(thread);
+  }
+  if (url.startsWith("/api/threads/") && method === "GET") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    const thread = serverThreads.find((item) => item.id === id);
+    return thread
+      ? jsonResponse(thread)
+      : errorResponse(404, { detail: "Thread not found." });
+  }
+  if (url === "/api/query") {
+    await queryGate.promise;
+    return jsonResponse({ answer: "Old answer", timeline: { rows: [], final_decision: "not_verified" }, summary: {}, trace: { model_thinking: null } });
+  }
+  if (url.startsWith("/api/threads/") && method === "DELETE") {
+    const id = decodeURIComponent(url.slice("/api/threads/".length));
+    serverThreads = serverThreads.filter((thread) => thread.id !== id);
+    await gates[id].promise;
+    return jsonResponse({ deleted: true, thread_id: id });
+  }
+  throw new Error(`unexpected fetch ${url}`);
+};
+
+await importFreshApp();
+await tick();
+dom["query-input"].value = "Slow query on A";
+const pendingQuery = dom["query-form"].dispatch("submit");
+await tick();
+assert.equal(dom["query-button"].disabled, true);
+
+const pendingDeleteA = dom["delete-thread"].dispatch("click");
+await tick();
+await clickThreadByTitle("Thread B");
+const pendingDeleteB = dom["delete-thread"].dispatch("click");
+await tick();
+assert.equal(dom["active-thread-title"].textContent, "Thread B");
+assert.equal(dom["query-button"].disabled, true);
+
+gates.thread_a.resolve();
+await pendingDeleteA;
+await tick();
+assert.equal(
+  dom["query-button"].disabled,
+  true,
+  "finishing delete A must not enable query controls while active thread B is deleting",
+);
+
+queryGate.resolve();
+await pendingQuery;
+await tick();
+assert.equal(dom["query-button"].disabled, true);
+
+gates.thread_b.resolve();
+await pendingDeleteB;
+await tick();
+assert.equal(createdCount, 1);
+assert.equal(dom["query-button"].disabled, false);
 '''
     )
 
